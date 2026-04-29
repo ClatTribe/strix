@@ -37,12 +37,14 @@ Effort estimates: **S** ≈ a day, **M** ≈ a week, **L** ≈ a month.
 5. [Structured outputs and event-stream contract](#5-structured-outputs-and-event-stream-contract)
 6. [Cloud credential pass-through](#6-cloud-credential-pass-through)
 7. [Comprehensive coverage and recon pipeline](#7-comprehensive-coverage-and-recon-pipeline)
-8. [Multi-tool orchestration](#8-multi-tool-orchestration)
-9. [Threat intelligence enrichment](#9-threat-intelligence-enrichment)
-10. [Reporting and messaging integration](#10-reporting-and-messaging-integration)
-11. [Triage and continuous-learning hooks](#11-triage-and-continuous-learning-hooks)
-12. [Integration ergonomics](#12-integration-ergonomics)
-13. [Research and longer-horizon ideas](#13-research-and-longer-horizon-ideas)
+8. [Specialist sub-agent teams per target type](#8-specialist-sub-agent-teams-per-target-type)
+9. [Multi-tool orchestration](#9-multi-tool-orchestration)
+10. [Threat intelligence enrichment](#10-threat-intelligence-enrichment)
+11. [Reporting and messaging integration](#11-reporting-and-messaging-integration)
+12. [Triage and continuous-learning hooks](#12-triage-and-continuous-learning-hooks)
+13. [Integration ergonomics](#13-integration-ergonomics)
+14. [Cross-target correlation and adversary modeling](#14-cross-target-correlation-and-adversary-modeling)
+15. [Research and longer-horizon ideas](#15-research-and-longer-horizon-ideas)
 
 ---
 
@@ -57,13 +59,13 @@ improvement for non-CLI consumers (and a big one for the TUI).
 | | Item | Why | Where | Effort |
 |---|---|---|---|---|
 | ⬜ | **`run.test_plan` event after `run.configured`.** Carries the categories the planner intends to cover and the per-target planned checks. | Lets any consumer (TUI, CI log, dashboard) answer "what is this scan doing?" before findings exist. The planner already decomposes the instruction into sub-goals; this just surfaces them. | [`strix/agents/StrixAgent`](strix/agents/StrixAgent), planner stage. | M |
-| ⬜ | **Phase-state events.** `phase.entered {phase}` for `recon`, `exploit`, `validate`, `report`. Today the agent slides between modes ad-hoc; an explicit phase machine makes progress visible and connects to the recon pipeline in §7. | Consumers can render a meaningful progress bar; the agent's own behaviour benefits from explicit phase boundaries (recon completeness check before exploit). | [`strix/agents/StrixAgent`](strix/agents/StrixAgent). | M |
+| ⬜ | **Phase-state events.** `phase.entered {phase}` for `recon`, `exploit`, `validate`, `report`. Today the agent slides between modes ad-hoc; an explicit phase machine makes progress visible and connects to the recon pipeline in §7 and the team architecture in §8. | Consumers can render a meaningful progress bar; the agent's own behaviour benefits from explicit phase boundaries (recon completeness check before exploit). | [`strix/agents/StrixAgent`](strix/agents/StrixAgent). | M |
 | ⬜ | **Semantic checkpoint events: `check.started` / `check.completed`.** Per attack class × surface. `result` is one of `vulnerable`, `not_vulnerable`, `inconclusive`; include a `confidence` score. | A scan that tested 8 attack classes and found 2 vulns reads very differently from a scan that found 2 vulns with no idea what else was tried. This is the data behind a real coverage report and behind "negative coverage assertions" downstream. | New event types emitted from the per-class probe code. | M |
 | ⬜ | **Findings tagged with a semantic category enum**, not just CWE. Suggested values: `sqli`, `xss`, `cmd_injection`, `ssrf`, `auth`, `authz`, `idor`, `crypto`, `info_disclosure`, `csrf`, `path_traversal`, `misconfig`, `race_condition`, `open_redirect`, `deserialization`, `mass_assignment`, `ssti`, `xxe`, `request_smuggling`, `cache_poisoning`, `subdomain_takeover`, `cors`, `jwt`, `oauth`, `graphql`, `other`. | CWE alone forces every consumer to redo keyword bucketing. Today downstream tools regex on title + CWE; that drifts. | `add_vulnerability_report` and the report dict shape in [`strix/tools/reporting`](strix/tools/reporting). | S |
-| ⬜ | **Per-agent `category` tag on `agent.created`.** When a sub-agent is spawned to probe a single attack class, declare it. | Today downstream UIs render `agent.created.payload.task` verbatim, which is just the user's instruction echoed back. A category gives sub-agents named roles ("auth-attacker", "ssrf-scanner") rather than "Investigator #3". | Same place that builds the `agent.created` payload. | S |
+| ⬜ | **Per-agent `category` tag on `agent.created`.** When a sub-agent is spawned to probe a single attack class, declare it. | Today downstream UIs render `agent.created.payload.task` verbatim, which is just the user's instruction echoed back. A category gives sub-agents named roles ("auth-attacker", "ssrf-scanner") rather than "Investigator #3". Pairs with §8's specialist-team architecture. | Same place that builds the `agent.created` payload. | S |
 | ⬜ | **`run.summary` event at scan end.** A one-paragraph plain-English summary: targets covered, categories tested, key findings, duration. The agent already writes a markdown report — emit the same summary as a structured event so consumers don't have to re-parse markdown. | Headline answer to "how did the scan go" in 10 seconds. Useful for CI exit logs, dashboard cards, Slack notifications. | Final phase of [`StrixAgent.execute_scan`](strix/agents/StrixAgent/strix_agent.py). | S |
 | ⬜ | **`target.started` / `target.completed` events** with the target value. | Multi-target scans have no clean per-target progress today — consumers join across multiple events to figure out what's running where. | Multi-target loop in `execute_scan`. | S |
-| ⬜ | **`finding.kill_chain` event for multi-step findings.** When a finding required several steps (leaked credential → re-used to log in → escalated to admin), emit a structured event grouping the tool-calls + reasoning steps that led to the finding. | "Pattern matcher" tools emit findings as standalone alerts. A real adversarial agent's value is the chain. Consumers render this as a numbered timeline; triage layers feed it into per-finding context. Triage-side consumers in §11 also depend on this. | New event type, populated when a finding is finalized. | M |
+| ⬜ | **`finding.kill_chain` event for multi-step findings.** When a finding required several steps (leaked credential → re-used to log in → escalated to admin), emit a structured event grouping the tool-calls + reasoning steps that led to the finding. | "Pattern matcher" tools emit findings as standalone alerts. A real adversarial agent's value is the chain. Consumers render this as a numbered timeline; triage layers feed it into per-finding context. Triage-side consumers in §12 also depend on this. | New event type, populated when a finding is finalized. | M |
 
 ---
 
@@ -188,21 +190,234 @@ introduce structured guarantees on top of agent improvisation: explicit
 phases, tech-driven skill loading, and a coverage matrix the agent has to
 clear before it can claim the scan is done.
 
+The section is organized by target type because that's the natural way an
+AI security engineer thinks about coverage — code targets need taint and
+reachability analysis, web apps need an authz matrix and GraphQL handling,
+domains need DNS hygiene and takeover detection, IPs need service-specialist
+depth. The §7.0 foundations apply to every target type; the per-type
+subsections list the specialist gaps.
+
+### 7.0 Foundations (apply to every target type)
+
 | | Item | Why | Where | Effort |
 |---|---|---|---|---|
-| ⬜ | **Explicit recon phase before exploit phase.** Recon completes a deterministic checklist (subdomain enumeration, service detection, tech fingerprinting, endpoint discovery, JS analysis) and emits `phase.completed {phase: recon, surface_map}` *before* the agent starts attacking. The exploit phase reads `surface_map` rather than re-discovering. | Today the agent oscillates between recon and exploit. It works for small targets but loses coverage on large ones — once the agent finds one bug, it tunnels into validating it and forgets the other 50 endpoints. Phase-gating forces breadth. | New phase machine in [`strix/agents/StrixAgent`](strix/agents/StrixAgent). Connects to `phase.entered` events in §1. | L |
+| ⬜ | **Explicit recon phase before exploit phase.** Recon completes a deterministic checklist (subdomain enumeration, service detection, tech fingerprinting, endpoint discovery, JS analysis) and emits `phase.completed {phase: recon, surface_map}` *before* the agent starts attacking. The exploit phase reads `surface_map` rather than re-discovering. | Today the agent oscillates between recon and exploit. It works for small targets but loses coverage on large ones — once the agent finds one bug, it tunnels into validating it and forgets the other 50 endpoints. Phase-gating forces breadth. Foundation for §8. | New phase machine in [`strix/agents/StrixAgent`](strix/agents/StrixAgent). Connects to `phase.entered` events in §1. | L |
 | ⬜ | **Tech-stack fingerprinting → deterministic skill loading.** Detect framework/runtime/library versions via headers, fingerprints, dependency manifests; auto-load the matching skills. Django detected → `frameworks/django` loaded; Firebase SDK detected → `technologies/firebase` loaded. | Today `load_skill` is agent-driven and probabilistic. A deterministic mapping makes coverage repeatable. The agent can still pull additional skills via `load_skill` for edge cases. | New fingerprinter in `strix/tools/` + a registry mapping in [`strix/skills/`](strix/skills/). | M |
-| ⬜ | **Coverage matrix per target type.** Document and enforce the minimum-category coverage for each target type. `web_application` → at minimum: authn, authz, IDOR, SQLi, XSS, SSRF, open redirect, CSRF, security headers, CORS, JWT/session handling, rate-limiting, error handling. The agent can't emit `run.completed` unless every required category has at least one `check.completed` event. | Without this, "comprehensive scan" means whatever the model felt like covering. With this, it means a known matrix. | New required-coverage table in [`strix/skills/scan_modes/`](strix/skills/scan_modes/) + an end-of-run validator. | M |
-| ⬜ | **API Security Top 10 skill pack.** BOLA, broken authentication, broken object property level authorization, unrestricted resource consumption, function-level authorization, server-side request forgery, security misconfiguration, lack of inventory, unsafe consumption of APIs, mass assignment. Distinct from web-app top 10. | Today's skills lean web-app; pure-API targets get probabilistic API-specific coverage. The OWASP API Top 10 is the standard checklist. | New: `strix/skills/vulnerabilities/api_top_10/`. | M |
-| ⬜ | **Supply-chain / dependency skill pack.** `npm audit`, `pip-audit`, `cargo audit`, `bundle audit`, plus `osv-scanner` for cross-ecosystem coverage. Findings flow through the canonical finding shape with `category: dependency`. | Today the agent might run these via terminal; a first-class skill makes it deterministic and emits structured findings. | New: `strix/skills/vulnerabilities/supply_chain/` + tool wrapper. | M |
-| ⬜ | **Mobile API skill pack.** Deeplink / URI-scheme abuse, certificate-pinning bypass detection patterns, JWT-in-mobile-app, IPC, exported activities. | Android/iOS API backends are a huge attack surface; the same agent should be able to handle one if pointed at the API endpoint. | New: `strix/skills/vulnerabilities/mobile_api/`. | M |
-| ⬜ | **Subdomain takeover detection** as a first-class check on `domain` targets. CNAME → unclaimed third-party service (S3 bucket, Heroku app, GitHub Pages, etc.). | A standard external-attack-surface check. The fingerprint database is well-known (e.g. `can-i-take-over-xyz`). | New tool wrapping `subjack` / `nuclei` takeover templates. | S |
-| ⬜ | **JS analysis pass for SPAs.** Extract minified JS, run an extractor for endpoints, secrets, internal API structure. Feeds `surface_map` for the exploit phase. | Today large SPAs hide most of their attack surface inside bundled JS — endpoints the agent never sees by crawling HTML. | New tool wrapping `katana` + `LinkFinder` / `secretfinder` patterns. | M |
+| ⬜ | **Coverage matrix per target type.** Document and enforce the minimum-category coverage for each target type. The agent can't emit `run.completed` unless every required category has at least one `check.completed` event. | Without this, "comprehensive scan" means whatever the model felt like covering. With this, it means a known matrix. | New required-coverage table in [`strix/skills/scan_modes/`](strix/skills/scan_modes/) + an end-of-run validator. | M |
 | ⬜ | **`--surface-map-only` / recon-only mode.** Run recon, emit the surface map, exit. Useful for separating expensive recon from cheap follow-up scans, and for wrappers that want to run recon nightly + targeted scans on demand. | Recon is the most expensive phase for many targets. Letting consumers run it independently unlocks a "weekly recon, daily targeted scan" pattern. | New mode flag + early-exit after `phase.completed {phase: recon}`. | S |
+
+### 7.1 Code targets (`repository`, `local_code`)
+
+The white-box specialist team's missing capabilities. Today the agent
+reads files line-by-line and reasons about flow in natural language —
+wasteful and lossy on non-trivial codebases. These items raise the
+floor.
+
+| | Item | Why | Where | Effort |
+|---|---|---|---|---|
+| ⬜ | **Codebase map artifact at recon end.** A `code_map.json` listing entry points (HTTP routes, CLI commands, queue consumers), controllers, models, DB queries, external HTTP calls, auth-boundary file:line references, and a route → handler-file index. Built once; every downstream agent reads from it. | LLM-only code reasoning is wasteful — the agent re-greps the same routes 30 times in a long scan. A built artifact is read O(1) by every specialist. | New: `strix/tools/code_map/`. | M |
+| ⬜ | **Taint analysis / data-flow tracing.** Trace user-controlled inputs (request body, query params, headers, cookies) to dangerous sinks (raw SQL, `exec`, `system`, file I/O, deserialization, template rendering). Emit candidate-flow findings the LLM then triages for false positives. Engine: CodeQL, Joern, or a built-in source-sink registry per language. | Static taint analysis is the single highest-precision SAST technique for injection-class bugs. Today Strix doesn't run any. | New: `strix/tools/taint/`. | L |
+| ⬜ | **Reachability scoring on candidate findings.** For each candidate finding, score 0–1 by reachability from internet-facing entrypoints, dependency in the dependency graph, and whether the affected file is exercised by tests vs. only-imported-from-tests. Findings on dead code drop to severity:info; findings on the auth path bump to fix-now. | A SQL injection in dead code wastes triage cycles. Reachability-aware severity is closer to "real engineer" judgement. | Built on top of the codebase map. | M |
+| ⬜ | **Git-history mining.** Scan recently-removed code (deleted in last N commits but still deployed if no release has happened), historical-version vulnerabilities, blame-based ownership for findings (so the report can route to the right team). | Today the agent scans HEAD; vulnerabilities introduced and removed go unseen even when still in production. | New: pre-scan git-walk in the recon phase. | M |
+| ⬜ | **Diff-impact scoring (beyond binary).** For PR-scoped scans, score each changed line by reachability, exposure, and historical bug density of the surrounding file. A line in `auth.py` is higher-impact than a line in `tests/utils.py`. | Today `--scope-mode diff` is binary (in-scope or out). Real reviewers prioritize within the diff. | Built on top of the codebase map + git history. | S |
+| ⬜ | **Supply-chain / dependency skill pack.** `npm audit`, `pip-audit`, `cargo audit`, `bundle audit`, plus `osv-scanner` for cross-ecosystem coverage. Findings flow through the canonical finding shape with `category: dependency`. | Today the agent might run these via terminal; a first-class skill makes it deterministic and emits structured findings. | New: `strix/skills/vulnerabilities/supply_chain/` + tool wrapper. | M |
+| ⬜ | **White-box → black-box bridging (Validator agent).** For top-N candidate findings, spin up the app (`docker compose up`, language-specific runners) and exploit dynamically, capturing the vulnerable response. Sets `verification_status: verified` only when the exploit triggered. | Verified findings are the difference between "looks vulnerable" and "is vulnerable". Today this bridge is agent-discretion. | New: `strix/agents/ValidatorAgent/` (white-box code targets). | L |
+
+### 7.2 Web application targets
+
+Today's web-app coverage is good at injection-class probing and weak at
+state-aware testing (race conditions, multi-step flows, authz matrix
+testing, second-order injection). These items close the structural gaps.
+
+| | Item | Why | Where | Effort |
+|---|---|---|---|---|
+| ⬜ | **Structured BFS crawl with JS-bundle endpoint extraction.** A dedicated crawl agent runs breadth-first (not the agent's natural depth-first), extracts endpoints from minified JS via `LinkFinder` patterns, parses sitemap.xml/robots.txt, optionally consumes `--openapi`. | Today large SPAs hide most of their attack surface inside bundled JS. Agent-driven crawl misses it. | New: `strix/tools/web_crawler/`. | M |
+| ⬜ | **API Security Top 10 skill pack.** BOLA, broken authentication, broken object property level authorization, unrestricted resource consumption, function-level authorization, server-side request forgery, security misconfiguration, lack of inventory, unsafe consumption of APIs, mass assignment. Distinct from web-app top 10. | Today's skills lean web-app; pure-API targets get probabilistic API-specific coverage. The OWASP API Top 10 is the standard checklist. | New: `strix/skills/vulnerabilities/api_top_10/`. | M |
+| ⬜ | **Authz matrix testing as a first-class probe.** For each (role × resource × verb) cell, send the request as that role and check outcome. Emit a per-cell `check.completed` event. | The classical pen-test approach to authorization. Today the agent fragments this across many sessions; gaps are inevitable. | New: `strix/tools/authz_matrix/` (consumes auth credentials from §2). | M |
+| ⬜ | **GraphQL specialist support.** Auto-introspect, build the query graph, test field-level authz, depth/batching abuse, alias overloading, query-cost DoS. Falls back gracefully if introspection is disabled. | Today GraphQL endpoints get a probabilistic subset of the actual API tested. | New: `strix/tools/graphql/`. | M |
+| ⬜ | **WebSocket / SSE first-class testing.** Connect, fuzz frames, test origin checks, auth-on-upgrade, message-level authz. | Today the agent can connect via terminal but has no structured fuzzing approach. Auth-on-upgrade and origin checks are routinely missed. | New: `strix/tools/websocket/`. | M |
+| ⬜ | **Race-condition prober.** Turbo-Intruder-style dispatch: send N concurrent requests within milliseconds to test for TOCTOU on state-changing endpoints (purchase, redeem, transfer, change-password). | Race conditions are deterministic in concept and nearly impossible for an agent to test reliably without dedicated tooling. | New: `strix/tools/race/` using the existing python sandbox. | S |
+| ⬜ | **State-mutation rollback / transactional probe pattern.** A documented pattern (and tool support) for safe testing of state-changing endpoints: snapshot DB → run probe → restore. Lets users say yes to deeper testing on staging. | Without this, `--exclude-path` is the only safety lever. Many users would consent to deeper testing if rollback existed. | New skill + helper. | M |
+| ⬜ | **Cross-subdomain cookie/JWT scoping checks.** When multiple subdomains are in scope, probe whether session cookies leak across subdomain boundaries, JWT audience/issuer mismatch is exploitable, or `SameSite` settings are inconsistent. | Pivots between sister apps in the same org are a real attack class. Single-target scans never see them. | Cross-target probe. Pairs with §14 cross-target correlation. | M |
+
+### 7.3 Domain targets
+
+Domain targets are external-attack-surface scans. Today's coverage is
+"subfinder + httpx + nuclei templates" — competent but incidental on the
+checks that catch the most-impactful real findings.
+
+| | Item | Why | Where | Effort |
+|---|---|---|---|---|
+| ⬜ | **Subdomain takeover detection** as a first-class check. CNAME → unclaimed third-party service (S3 bucket, Heroku app, GitHub Pages, etc.). Full provider matrix. | A standard external-attack-surface check. The fingerprint database is well-known (e.g. `can-i-take-over-xyz`). High-impact, low-cost. | New tool wrapping `subjack` / `nuclei` takeover templates. | S |
+| ⬜ | **DNS hygiene checks.** Wildcard DNS detection, dangling NS records, public AXFR exposure, missing CAA records, mis-scoped DNSSEC. Emit findings deterministically. | DNS misconfiguration is rarely caught by HTTP-driven scanners but enables real attacks (subdomain takeover, mail spoofing, BGP hijack defense). | New: `strix/tools/dns_hygiene/`. | S |
+| ⬜ | **Email security checks.** SPF, DMARC, DKIM, MTA-STS, DANE, BIMI scoring. Each emits a structured finding with severity tied to the misconfiguration impact (no DMARC → severity:medium for spoofing risk). | 30-second checks that catch misconfigurations directly enabling phishing of the brand. Absent today. | New: `strix/tools/email_security/`. | S |
+| ⬜ | **Cloud asset discovery from org name.** Given `acme.com`, find related S3 buckets (`acme-prod-uploads`, `acme-backups`, …), Azure storage accounts, GCS buckets, Heroku apps, Vercel deployments, Netlify sites. Use bucket-name word-list + permutation patterns. | Where real treasure lives in external recon. Today the agent has to be told. | New: `strix/tools/cloud_assets/`. | M |
+| ⬜ | **Passive DNS history mining.** Query SecurityTrails / Shodan / VirusTotal Passive DNS for historical resolutions; old subdomains pointing to defunct or internal infra; old CNAMEs to expired services. | Stale records are a classic source of subdomain-takeover candidates and hidden internal infra. Requires API keys (opt-in). | New tool with optional credentials. | S |
+| ⬜ | **WAF / CDN fingerprinting that reshapes downstream scans.** Detect Cloudflare / Akamai / AWS WAF / Fastly / Imperva up-front; load the matching bypass-pattern skill; tune the rate-limit. | Today the agent rediscovers WAF behaviour each scan. Up-front fingerprinting + skill-loading is far more efficient. | Recon-phase tool + skill registry. | S |
+| ⬜ | **Org-level fingerprinting.** WHOIS history, ASN ownership, GitHub org hints, similar-name typosquats, certificate-transparency-discovered related orgs. Surfaces "the rest of the company's external surface" to scan. | Today every domain target is an island. Real engagements scope to "everything we own"; this finds it. | New: `strix/tools/org_fingerprint/`. | M |
+
+### 7.4 IP / network targets
+
+Today's IP-target coverage is `nmap + naabu + agent-improvised
+service-specific probes`. The right tools, used inconsistently. These
+items make service-specialist depth deterministic.
+
+| | Item | Why | Where | Effort |
+|---|---|---|---|---|
+| ⬜ | **Service-specialist skill packs.** SMB (null sessions, signing, anonymous shares), RDP (BlueKeep, NLA, certificate validity), SSH (algorithms, host-key reuse, weak ciphers, auth methods), SNMP (default community, walk public OIDs), LDAP (anonymous bind, base DN enumeration), RPC, NFS (exports, anonymous mount), Database services (Mongo / Redis / Elastic / PostgreSQL — auth required?). Each is its own deterministic playbook. | Agent-discretion service probing means coverage varies by run. A skill pack per service makes it repeatable. | New: `strix/skills/protocols/<service>/` per service. | M |
+| ⬜ | **IoT / OT protocol skill pack.** Modbus, BACnet, MQTT, CoAP, S7, DNP3, OPC-UA. Read-only enumeration; no actuator manipulation. Targets infra customers in industrial/IoT space. | Industrial customers have these in scope; today Strix can't usefully test them. | New: `strix/skills/protocols/ot/` + sandbox tool wrappers. | L |
+| ⬜ | **Internal-network pivot awareness (with explicit auth).** For an authorized internal scan, after recon-mapping the target IP, discover the L2/L3 neighborhood (broadcast probes, ARP scan, traceroute pivots). Report what's reachable from this host. | "What does this compromised host see?" is the lateral-movement question every internal pen-test asks. | New tool, gated behind an explicit `--allow-internal-pivot` flag. | L |
+| ⬜ | **Structured surface-map artifact for IP targets.** Today recon output is embedded in agent prose. A `surface_map.json` for IP targets: per-host port list, service versions, banner snippets, fingerprints. Read by every downstream specialist. | Same shape rationale as the codebase map (§7.1) — built once, read O(1). | New: emitted by the recon-trio (Port-scan + Service-detect + CVE-correlation) in §8.4. | S |
 
 ---
 
-## 8. Multi-tool orchestration
+## 8. Specialist sub-agent teams per target type
+
+Sections 1–7 are individual capability gaps. This section is the
+**architectural commitment** that makes them sustainable.
+
+Today Strix has multi-agent capability — the lead `StrixAgent` can
+spawn sub-agents via `agents_graph` — but no structural commitment to
+per-target specialization. The lead improvises which sub-agents to
+spawn and what to delegate. The result is closer to *one strong
+generalist with a bag of tools* than to a structured pen-test team. As
+target complexity grows, the generalist's coverage starts to depend on
+context size and model attention — both of which are noisy.
+
+The shift is to **specialist sub-agent teams per target type**. Each
+team has a lead (planner), a recon group, an exploit group, a validate
+group, and a reporter. Each specialist owns one job, runs to a tight
+budget, and emits canonical findings.
+
+Three commitments make this tractable:
+
+1. **Phase gating.** Recon must complete (and emit `surface_map`)
+   before exploit starts. Exploit emits `candidate_findings`; validate
+   consumes them; report consumes verified findings only. No phase
+   blurring. Connects to §1 phase-state events and §7.0 explicit recon
+   phase.
+
+2. **Specialist scope.** Each sub-agent has one job, a tight system
+   prompt, ~20 iterations max, and emits canonical findings. The model
+   spends compute on the work, not on context-juggling. Concretely:
+   the SQLi specialist's system prompt does not include the SSRF
+   skill — and vice versa.
+
+3. **Structured handoffs.** Recon → exploit handoff is `surface_map`.
+   Exploit → validate is `candidate_findings`. Validate → report is
+   `verified_findings` with PoCs. No prose-as-state — every handoff is
+   a typed JSON artifact written to the run directory.
+
+The sections below define the team roster per target type. Building the
+teams is incremental: ship the lead-team scaffolding first (§8.0), then
+one specialist per team per release.
+
+### 8.0 Foundations (apply to every team)
+
+| | Item | Why | Where | Effort |
+|---|---|---|---|---|
+| ⬜ | **Documented lead-team protocol.** Spec for how a lead agent spawns specialists, hands off context, collects findings, adjudicates conflicts (e.g., two specialists report overlapping findings). Today this is implicit in `agents_graph`. | Without a documented protocol, every team reimplements coordination ad-hoc; bugs in coordination look like model-quality problems. | New design doc + reference impl in [`strix/agents/`](strix/agents/). | M |
+| ⬜ | **Sub-agent canonical-finding contract.** Every sub-agent emits findings in the canonical shape (cf. §9). Validation at write time rejects malformed findings instead of letting them poison the report. | Cross-team dedup, cross-team confidence scoring depend on this. | Schema + validation in finding-write path. | S |
+| ⬜ | **Per-sub-agent budget enforcement.** Each sub-agent has its own iteration / token / time budget; the lead enforces. A runaway specialist gets terminated and emits `agent.budget_exceeded` instead of starving the rest of the team. | Without per-sub-agent budgets, one over-eager specialist can burn the whole scan budget. | Budget tracking in `BaseAgent` state. | M |
+| ⬜ | **Specialist scope discipline (system-prompt convention).** Each specialist's system prompt is small, single-purpose, and does **not** include the full Strix toolset. The SQLi specialist gets the SQLi skill + the HTTP tool, not the whole skill registry. | Today every spawned agent gets the full prompt; the breadth dilutes focus. Smaller prompts are also faster + cheaper. | Per-specialist prompt templates + a registry. | M |
+| ⬜ | **Handoff artifact schemas (`surface_map.json`, `candidate_findings.json`, `verified_findings.json`).** Documented JSON schemas for every inter-phase handoff. | Replaces "prose as state" with structured contracts. Lets specialists be tested in isolation. | Schemas in `strix/agents/handoffs/`. | M |
+
+### 8.1 Code-target team
+
+```
+  Code-Target Lead (planner)
+   ├── Code-Map agent      — emits codebase map (routes, models, queries, external calls, auth boundaries)
+   ├── Dependency agent    — SBOM + osv-scanner; emits CVE findings deterministically
+   ├── Secret agent        — gitleaks + trufflehog + custom patterns
+   ├── SAST agent          — Semgrep + per-language packs; emits pattern findings
+   ├── Taint agent         — data-flow from user inputs to dangerous sinks
+   ├── Reachability agent  — scores candidate findings by reachability from entrypoints
+   ├── Validator agent     — for top-N candidates, spin up the app and exploit dynamically
+   └── Reporter            — dedupes across specialists, ranks by reachability × severity
+```
+
+| | Item | Why | Effort |
+|---|---|---|---|
+| ⬜ | **Build the Code-Map agent first.** Single-purpose specialist that produces the codebase map artifact. All downstream agents read from it. | First specialist to land — others depend on it. | M |
+| ⬜ | **Wire Dependency / Secret / SAST as deterministic specialists.** Each invokes its first-class tool (§9), emits canonical findings, exits. No improvisation. | Removes ~40% of LLM-driven coverage that should be deterministic, freeing tokens for the work that needs reasoning. | M |
+| ⬜ | **Build the Taint agent.** Engine: CodeQL or Joern. The agent's role is to triage candidate flows for relevance and false-positive likelihood, then forward to the Validator. | LLM-only taint reasoning is lossy on non-trivial codebases. | L |
+| ⬜ | **Build the Validator agent (the white-box → black-box bridge).** Spins up the app, exploits the candidate, captures the vulnerable response. Sets `verification_status` (§12). | Verified findings are the difference between "looks vulnerable" and "is vulnerable". Pairs with §7.1. | L |
+
+### 8.2 Web-application team
+
+```
+  Web-App Lead (planner)
+   ├── Fingerprint agent       — tech stack, framework, WAF/CDN; loads matching skills deterministically
+   ├── Crawl agent             — structured BFS, JS-bundle extraction, OpenAPI discovery, sitemap parsing
+   ├── Auth agent              — handles login (cookie/bearer/recorded-replay), maintains and refreshes session
+   ├── Surface-map writer      — emits endpoints, parameters, auth requirements, content types, observed responses
+   │ ─── recon phase done ───
+   ├── Authz matrix agent      — for each (role × resource × verb), probe and assess
+   ├── Injection agent         — SQLi/NoSQLi/SSTI/XSS/cmd/path probes, parameter-aware
+   ├── SSRF agent              — internal-resource access, DNS rebinding, gopher/dict variants
+   ├── IDOR agent              — predictable-ID enumeration, cross-tenant probing
+   ├── GraphQL agent           — introspect, build query graph, field-level authz, depth/batching abuse
+   ├── WebSocket agent         — origin checks, auth-on-upgrade, frame fuzzing
+   ├── Race agent              — Turbo-Intruder-style for state-changing endpoints
+   ├── Auth-flaws agent        — JWT alg-confusion, OAuth state CSRF, session fixation
+   ├── Business-logic agent    — consumes threat model (§14); workflow abuse, entitlement bypass
+   └── Verifier agent          — for each candidate, reproduce deterministically and capture PoC
+```
+
+| | Item | Why | Effort |
+|---|---|---|---|
+| ⬜ | **Build the recon group first** (Fingerprint + Crawl + Auth + Surface-map writer). Runs to completion; emits the surface map; nothing else starts before it. | Without a structured surface map, every exploit specialist re-discovers the surface — costly and lossy. | L |
+| ⬜ | **Convert today's monolithic exploit behaviour into specialist exploit agents.** Start with the highest-leverage three: Authz-matrix, Injection, IDOR. Then SSRF, GraphQL, Race. | Specialists outperform a generalist when each owns one playbook. | L |
+| ⬜ | **Build the Verifier agent.** Reads `candidate_findings`, reproduces, captures PoC. Sets `verification_status` (§12). | The "verified vs pattern-match" distinction has to come from a specialist whose only job is verification. | M |
+
+### 8.3 Domain team
+
+```
+  Domain Lead
+   ├── Subdomain enum agent       — subfinder + amass + CT + DNS bruteforce
+   ├── DNS-hygiene agent          — SPF/DMARC/DKIM/MTA-STS/DANE/CAA scoring
+   ├── Takeover agent             — CNAME → unclaimed third-party detection
+   ├── Cloud-asset agent          — S3/GCS/Azure storage from org name + subdomain patterns
+   ├── Passive-DNS agent          — historical resolution mining
+   ├── Org-fingerprint agent      — WHOIS, ASN, GitHub org, similar-named orgs
+   ├── Pivot-triage agent         — for each live subdomain, classify: deep | shallow | skip
+   └── Web-app sub-teams           — invoked per "deep" subdomain with a tighter scope
+```
+
+| | Item | Why | Effort |
+|---|---|---|---|
+| ⬜ | **Build the Pivot-triage agent.** Today domain scans degenerate to "agent picks 5 of 47 subdomains and goes deep". A triage agent classifies each subdomain (login UI? marketing? API? prod?) and routes it to the right depth of testing. | Coverage breadth without paying for deep scans on every subdomain. | M |
+| ⬜ | **Cross-team handoff: domain team spawns web-app sub-teams.** When Pivot-triage classifies a subdomain as "deep web app", spawn a full §8.2 team scoped to that subdomain. | Real attacks pivot from external recon to web-app exploitation. The architecture has to support it. | M |
+| ⬜ | **Build the DNS-hygiene + Email-security + Takeover trio first.** Highest impact for cost; all three are deterministic and cheap; they ship before any LLM-heavy specialist. | These are the "free wins" of domain-target scans. Shipping them first proves the team architecture without LLM cost noise. | M |
+
+### 8.4 IP / network team
+
+```
+  IP Lead
+   ├── Port-scan agent          — nmap + naabu, deterministic top-1000 + targeted
+   ├── Service-detect agent     — nmap -sV + banners + custom probes
+   ├── CVE-correlation agent    — for each (service, version), OSV/NVD/exploit-db lookup
+   ├── Service-specialists (parallel):
+   │     ├── SMB-prober
+   │     ├── SSH-prober
+   │     ├── RDP-prober
+   │     ├── SNMP-prober
+   │     ├── LDAP-prober
+   │     ├── HTTP-on-port-N → escalates to web-application sub-team
+   │     └── Database-prober
+   ├── Pivot-discovery agent    — only with explicit `--allow-internal-pivot`
+   └── Reporter
+```
+
+| | Item | Why | Effort |
+|---|---|---|---|
+| ⬜ | **Build the recon trio first** (Port-scan + Service-detect + CVE-correlation). Every IP target should produce the same `surface_map.json` shape regardless of which paths the agent took that day. | Today an IP target's findings depend heavily on agent improvisation at recon time. Determinism is more valuable than creativity at the recon layer. | M |
+| ⬜ | **Cross-team handoff: HTTP-on-port-N spawns a web-application sub-team.** When a service-detect agent identifies HTTP/HTTPS on any port, hand off to the §8.2 web-app team scoped to that URL. | Real internal IPs run web admin UIs on weird ports (8080, 8443, 9090, 5601 …). Cross-team handoff makes them first-class. | S |
+| ⬜ | **Build service-specialists incrementally.** Start with SMB and SSH (highest hit rate in real engagements), then RDP, then the rest. | Each specialist is a contained delivery; users see depth improve with each release. | M |
+
+---
+
+## 9. Multi-tool orchestration
 
 The Strix sandbox already ships `nuclei`, `nmap`, `sqlmap`, `subfinder`,
 `naabu`, `ffuf`, `httpx`, `katana`, `semgrep`, and `trivy`. Today the agent
@@ -230,7 +445,7 @@ and business-logic findings.
 
 ---
 
-## 9. Threat intelligence enrichment
+## 10. Threat intelligence enrichment
 
 A finding without context is just a string. An AI security engineer
 contextualizes every finding: "this CVE is on the CISA KEV list", "this
@@ -252,7 +467,7 @@ same enriched data.
 
 ---
 
-## 10. Reporting and messaging integration
+## 11. Reporting and messaging integration
 
 The contract between Strix and the rest of the developer's world: chat
 notifications, PR comments, SIEM ingestion, dashboards. Today's only output
@@ -262,7 +477,7 @@ formats the rest of the toolchain expects.
 | | Item | Why | Where | Effort |
 |---|---|---|---|---|
 | ⬜ | **`--webhook-url <url>` for live finding events.** POST each finding to the URL as it lands. HMAC-SHA256 signature in `X-Strix-Signature` header (key from `--webhook-secret` or env). Retry with backoff on non-2xx. | The standard way for any external system (Slack, JIRA, PagerDuty, custom dashboard) to consume findings without polling. | New flag + delivery worker. | M |
-| ⬜ | **SARIF output (`--sarif <path>`).** Industry-standard JSON format for static-analysis findings. Consumed by GitHub Code Scanning, GitLab Security Dashboard, most enterprise SIEMs. | Without SARIF, security teams can't move findings into existing workflow. | Renderer over the canonical finding shape from §8. | M |
+| ⬜ | **SARIF output (`--sarif <path>`).** Industry-standard JSON format for static-analysis findings. Consumed by GitHub Code Scanning, GitLab Security Dashboard, most enterprise SIEMs. | Without SARIF, security teams can't move findings into existing workflow. | Renderer over the canonical finding shape from §9. | M |
 | ⬜ | **JUnit XML output (`--junit <path>`).** CI systems (Jenkins, GitLab CI, CircleCI, Azure DevOps) parse JUnit natively for test reporting. Renders findings as test failures. | Lets Strix slot into existing CI test-result UIs. | Renderer. | S |
 | ⬜ | **JSON / CSV output flags.** `--json <path>`, `--csv <path>`. Same data as `vulnerabilities.json` (§5) but at the run level (one file with all findings). | "I just need to give this to a consultant" use case. | Trivial renderers. | S |
 | ⬜ | **Slack / Teams / Discord card-ready payload mode.** A `--message-format slack-blocks` (also `teams-adaptive`, `discord-embed`) flag makes the webhook (or a separate `--message-output`) emit a payload that maps directly to the platform's card format. No template engine needed downstream. | Most chat integrations want one POST that renders well. Today every consumer assembles a card from raw fields. | Renderer per platform. | M |
@@ -273,7 +488,7 @@ formats the rest of the toolchain expects.
 
 ---
 
-## 11. Triage and continuous-learning hooks
+## 12. Triage and continuous-learning hooks
 
 Strix doesn't ship a triage layer or a learning loop — that's a consumer
 concern, and consumers should own their own triage. But for a consumer's
@@ -285,7 +500,7 @@ reinvents the same fragile glue.
 | | Item | Why | Where | Effort |
 |---|---|---|---|---|
 | ⬜ | **`verification_status` enum on every finding.** Values: `verified` (PoC ran and the vulnerable response was captured), `pattern_match` (signature only — e.g. a Semgrep regex hit), `inconclusive` (the agent saw evidence but couldn't confirm). | The "real vulnerabilities, not noise" promise hinges on this distinction. Verified findings should look unmistakably different to consumers. | Schema field on the report dict; agent populates based on tool-call outcome. | S |
-| ⬜ | **PoC artifact reference on `verified` findings.** `poc_artifacts: [{type: "http_exchange", path: "..."}, {type: "screenshot", path: "..."}]`. Pairs with the evidence bundle (§10). | Today PoC content lives in the markdown body; structured references let consumers build "view PoC" UI without parsing markdown. | Same code path as `verification_status`. | S |
+| ⬜ | **PoC artifact reference on `verified` findings.** `poc_artifacts: [{type: "http_exchange", path: "..."}, {type: "screenshot", path: "..."}]`. Pairs with the evidence bundle (§11). | Today PoC content lives in the markdown body; structured references let consumers build "view PoC" UI without parsing markdown. | Same code path as `verification_status`. | S |
 | ⬜ | **Stable, documented fingerprint algorithm.** Specify the exact algorithm (e.g. `sha256(cwe + ":" + endpoint + ":" + first_80_chars_of_normalized_title)`) in the [README](README.md). Emit the fingerprint on every finding. Bump a version field if the algorithm changes. | Cross-scan dedup needs stability across versions; today every consumer hashes their own way. | New field + documentation. Promotes the `dedup_key` item from §5. | S |
 | ⬜ | **Optional per-finding embedding vector.** With `--emit-embeddings`, attach a `description_embedding: [float]` (and the model used) to each finding. Embedding model is configurable via env. | Per-tenant similarity search and "have we seen this before?" retrieval need embeddings. Computing them at finding-write time is far cheaper than re-embedding the corpus per query. Not default — costs tokens. | New optional field + a small embedding helper. | M |
 | ⬜ | **`finding.kill_chain` event** (also referenced from §1). Structured representation of the multi-step exploit chain that produced a finding: ordered list of `{step, tool_call, observation, reasoning}`. | Triage layers want to render this as a timeline; consumers also feed it as RAG context for "is this a real attack chain or did the agent talk itself into one?". | New event type. | M |
@@ -296,7 +511,7 @@ reinvents the same fragile glue.
 
 ---
 
-## 12. Integration ergonomics
+## 13. Integration ergonomics
 
 Smaller items that smooth the rough edges between Strix and any non-CLI driver.
 
@@ -308,27 +523,48 @@ Smaller items that smooth the rough edges between Strix and any non-CLI driver.
 
 ---
 
-## 13. Research and longer-horizon ideas
+## 14. Cross-target correlation and adversary modeling
+
+Multi-target scans today are N independent scans that happen to share a
+workspace. The agent doesn't natively connect findings across targets,
+doesn't understand the user's threat model, and doesn't tune to a
+specified adversary. The items below close those gaps and turn
+multi-target scans into something closer to a real engagement.
+
+| | Item | Why | Where | Effort |
+|---|---|---|---|---|
+| ⬜ | **Cross-target finding correlation.** A finding on one target that suggests an attack chain into another (e.g., SSRF on a `web_application` target → automatically probe reachability of any `ip_address` target in scope; subdomain takeover → probe related `web_application` targets for auth-bypass via the taken-over subdomain). The correlator is a first-class agent watching the shared findings store and emitting `chain_of_attack` findings. | Today every target is an island; real attacks span them. The chains are often the highest-impact findings. | New: `strix/agents/CorrelationAgent/`. | M |
+| ⬜ | **Multi-target dependency graph.** When user passes `-t code-repo -t web-app -t domain`, the lead agent builds a dependency graph: "this repo deploys to that web-app at that domain." Cross-target findings reference the relationship. Recon teams in §8 share fingerprints across targets when they match. | Today multi-target scans are independent; correlation only happens when the agent notices and remembers. A built graph makes it deterministic. | Lead-agent recon stage. | M |
+| ⬜ | **Structured threat-model input.** Today users put threat-model context in `--instruction` (prose). Better: a structured `--threat-model <file>` flag accepting YAML/JSON with: data classifications, trust boundaries, role list, sensitive operations, regulatory context (PCI / HIPAA / SOX / DPDP), high-value assets, abuse scenarios. The Business-logic specialist (§8.2) consumes this directly. | Without structure, business-logic findings are luck-of-the-draw. With structure, the lead agent prioritizes deterministically and the Business-logic agent has a real spec to test against. | New flag + system-prompt augmentation + schema in `docs/threat-model-schema.json`. | M |
+| ⬜ | **Adversary-model selector.** `--adversary <model>` accepting `external` (default), `low_priv_user`, `insider`, `compromised_ci`, `peer_tenant`, `nation_state`. Reshapes which checks run, which credentials the agent assumes available, and the cost/risk tolerance for the testing. | One-size-fits-all `deep` mode treats every threat actor the same. Real assessments tune to who's modeled. | New flag + per-adversary scan-mode skills in [`strix/skills/scan_modes/`](strix/skills/scan_modes/). | M |
+| ⬜ | **Cost-aware planning at the lead agent.** Given the budget (`--max-cost`, §4), the lead declares which target-type teams (§8) it will deploy and which it will skip, emits a `run.budget_plan` event up front, and sticks to it. Findings get a `priority_under_budget` field. The plan is published as part of `run.test_plan` (§1). | Today the agent runs until it runs out of iterations or the user runs out of patience. A real engineer scopes to the budget. | Lead-agent planner extension. | M |
+| ⬜ | **Per-finding business-impact scoring.** When a threat model is provided, every finding gets a `business_impact: low/medium/high/critical` field derived from which trust boundary it crosses and which data classification it touches. | CWE severity is technical; business impact is what the user decides on. Computing it from the threat model means the consumer doesn't have to. | Finding finalization with threat-model lookup. | S |
+
+---
+
+## 15. Research and longer-horizon ideas
 
 Lower-confidence items. Listed for tracking, not committed.
 
 - **Plan-then-execute mode.** Emit `run.test_plan` (§1) for review *before* spending tokens. Useful for high-cost scans where a human should approve scope.
 - **Replay scan from a specific commit.** Re-run a prior scan against a different commit to verify a fix landed. Needs deterministic-enough sandboxing to be meaningful.
 - **Differential triage signal.** When a finding's confidence shifts between scans (codebase changed, model changed), surface the delta and the reasoning rather than emitting a fresh finding.
-- **Auto-remediation safety nets.** Before applying a generated patch, verify existing tests pass *and* add a regression test that the original PoC no longer exploits. Pairs with the triage hooks in §11.
+- **Auto-remediation safety nets.** Before applying a generated patch, verify existing tests pass *and* add a regression test that the original PoC no longer exploits. Pairs with the triage hooks in §12.
 - **Anonymized cross-org benchmarks.** Voluntary opt-in: "your stack typically has 3 SSRFs; you have 1." Privacy-respecting; the data is aggregated across consenting users only.
-- **Threat-model-driven scanning.** Let users describe their app's architecture once (data-flow diagram, trust boundaries); the agent uses it as scaffolding. Pairs with §9's threat-intel feeds for enterprise relevance.
+- **Threat-model-driven scanning.** Let users describe their app's architecture once (data-flow diagram, trust boundaries); the agent uses it as scaffolding. Pairs with §10's threat-intel feeds for enterprise relevance and with §14's structured threat-model input.
 - **Bug-bounty disclosure pattern feed.** Anonymous learning from public HackerOne / Bugcrowd disclosures — extract the attack pattern, normalize it as a skill, ship the skill. The hard part is the legal/ethical review.
+- **Specialist-team cross-pollination.** A finding by the Web-app team's IDOR specialist sometimes hints at a related Code team Authz check (e.g., "this endpoint missed `@require_role` decorator"). Today the teams are siloed; cross-pollination would let one team's finding spawn a targeted check in another.
 
 ---
 
 ## How to land an item
 
 1. Open an issue referencing the row above.
-2. For event-shape changes (§1, §5, §11): include the proposed JSON shape in the issue. Once shipped, document the event in the [README](README.md).
-3. For new flags (§2, §3, §4, §10): note the proposed semantic and how it interacts with existing flags. Flags that overlap with `--instruction` should clearly document precedence.
-4. For new tools or skills (§7, §8, §9): the contribution should include a documented capability matrix (target types it applies to, categories it covers, expected runtime).
-5. When an item ships, strike through the row and link the merged PR.
+2. For event-shape changes (§1, §5, §12): include the proposed JSON shape in the issue. Once shipped, document the event in the [README](README.md).
+3. For new flags (§2, §3, §4, §11, §14): note the proposed semantic and how it interacts with existing flags. Flags that overlap with `--instruction` should clearly document precedence.
+4. For new tools or skills (§7, §9, §10): the contribution should include a documented capability matrix (target types it applies to, categories it covers, expected runtime).
+5. For new sub-agent specialists (§8): include the system prompt, the iteration/token budget, the input/output schemas, and at least one end-to-end integration test against a known-vulnerable fixture.
+6. When an item ships, strike through the row and link the merged PR.
 
 This roadmap is a living document. Items move between sections as we learn,
 and "P0" today is whatever blocks real users from real outcomes — not a
