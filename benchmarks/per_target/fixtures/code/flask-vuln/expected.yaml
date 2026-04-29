@@ -1,0 +1,98 @@
+target_type: local_code
+target: ./app.py
+description: |
+  Minimal Flask app with 10 deliberately-planted vulnerabilities, one per
+  classic OWASP category. Used as a baseline benchmark for code-target
+  coverage. Line numbers below correspond to the comment line of each
+  planted bug; the matcher tolerates ±20 lines.
+
+expected_findings:
+  - id: hardcoded-secret
+    category: info_disclosure
+    cwe: CWE-798
+    file: app.py
+    line: 22
+    severity: high
+    must_find: true
+    description: API_KEY assigned a literal high-entropy credential in source.
+
+  - id: sqli-search
+    category: sqli
+    cwe: CWE-89
+    file: app.py
+    line: 51
+    severity: critical
+    must_find: true
+    description: /search uses an f-string SQL query with user input.
+
+  - id: cmd-injection-ping
+    category: cmd_injection
+    cwe: CWE-78
+    file: app.py
+    line: 63
+    severity: critical
+    must_find: true
+    description: /ping calls subprocess.run with shell=True on user input.
+
+  - id: ssrf-fetch
+    category: ssrf
+    cwe: CWE-918
+    file: app.py
+    line: 73
+    severity: high
+    must_find: true
+    description: /fetch passes a user-controlled URL to urllib.request.urlopen.
+
+  - id: idor-users
+    category: idor
+    cwe: CWE-639
+    file: app.py
+    line: 81
+    severity: high
+    must_find: true
+    description: /api/users/<id> returns any user without checking session ownership.
+
+  - id: xss-hello
+    category: xss
+    cwe: CWE-79
+    file: app.py
+    line: 92
+    severity: medium
+    must_find: true
+    description: /hello echoes the `name` param unescaped into HTML.
+
+  - id: deserialization-restore
+    category: deserialization
+    cwe: CWE-502
+    file: app.py
+    line: 99
+    severity: critical
+    must_find: true
+    description: /restore calls pickle.loads on a user-supplied base64 blob.
+
+  - id: path-traversal-files
+    category: path_traversal
+    cwe: CWE-22
+    file: app.py
+    line: 107
+    severity: high
+    must_find: true
+    description: /files opens a user-controlled filename without sanitization.
+
+  - id: open-redirect-login
+    category: open_redirect
+    cwe: CWE-601
+    file: app.py
+    line: 116
+    severity: medium
+    must_find: true
+    description: /login follows user-controlled `next` URL.
+
+  - id: weak-crypto-md5
+    category: crypto
+    cwe: CWE-327
+    file: app.py
+    line: 124
+    severity: medium
+    must_find: true
+    description: /register uses md5 for password hashing.

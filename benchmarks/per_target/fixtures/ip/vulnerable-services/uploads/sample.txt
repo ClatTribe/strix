@@ -1,0 +1,5 @@
+This is a sample file in the uploads directory.
+
+The fixture's nginx config has `autoindex on` for /uploads/, so a
+directory listing of this path is exposed to anyone who navigates to
+http://127.0.0.1:8080/uploads/. That's the planted finding.
