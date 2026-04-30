@@ -1,0 +1,98 @@
+target_type: web_application
+target: http://localhost:3000
+description: |
+  OWASP Juice Shop running locally via docker compose. The manifest below
+  is a curated subset of Juice Shop's documented vulnerabilities — chosen
+  because they're (a) discoverable via DAST, (b) deterministic in v17.2.0,
+  and (c) representative of distinct categories. Juice Shop has 100+ total
+  challenges; we don't try to cover them all here.
+
+  Pinning `bkimminich/juice-shop:v17.2.0` keeps the fixture stable. Bumping
+  the tag may shift which paths trigger which findings — re-baseline after
+  any version bump.
+
+docker:
+  compose_file: docker-compose.yml
+  wait_url: http://localhost:3000/rest/admin/application-version
+  wait_timeout_seconds: 90
+
+expected_findings:
+  - id: sqli-login
+    category: sqli
+    cwe: CWE-89
+    endpoint: /rest/user/login
+    severity: critical
+    must_find: true
+    description: Login endpoint is SQLi-vulnerable; classic `' OR 1=1--` bypasses auth.
+
+  - id: xss-search
+    category: xss
+    cwe: CWE-79
+    endpoint: /#/search
+    severity: medium
+    must_find: true
+    description: Product search reflects the `q` parameter unescaped.
+
+  - id: idor-basket
+    category: idor
+    cwe: CWE-639
+    endpoint: /api/Baskets
+    severity: high
+    must_find: true
+    description: Basket access does not enforce ownership; `/api/Baskets/<other-user-id>` returns content.
+
+  - id: missing-auth-admin
+    category: authz
+    cwe: CWE-862
+    endpoint: /#/administration
+    severity: high
+    must_find: true
+    description: Admin section reachable by any authenticated user; should be admin-only.
+
+  - id: directory-traversal-ftp
+    category: path_traversal
+    cwe: CWE-22
+    endpoint: /ftp
+    severity: medium
+    must_find: true
+    description: /ftp serves arbitrary files via path traversal.
+
+  - id: weak-jwt-handling
+    category: jwt
+    cwe: CWE-347
+    endpoint: /rest/user/whoami
+    severity: high
+    must_find: true
+    description: Tokens accept the `none` algorithm and/or weak HMAC keys.
+
+  - id: deprecated-interface
+    category: misconfig
+    cwe: CWE-489
+    endpoint: /b2b/v2/orders
+    severity: medium
+    must_find: true
+    description: Deprecated B2B endpoint reachable; XXE via XML body.
+
+  - id: nosqli-products
+    category: sqli
+    cwe: CWE-943
+    endpoint: /rest/products/search
+    severity: high
+    must_find: true
+    description: Product review search accepts a NoSQL operator payload.
+
+  - id: ssrf-image-upload
+    category: ssrf
+    cwe: CWE-918
+    endpoint: /profile
+    severity: high
+    must_find: false
+    description: Profile-image-from-URL fetches arbitrary URLs server-side. Marked `must_find: false` because it requires authenticated upload — recall depends on auth handling (§2 in roadmap).
+
+  - id: open-redirect-redirect
+    category: open_redirect
+    cwe: CWE-601
+    endpoint: /redirect
+    severity: medium
+    must_find: true
+    description: `/redirect?to=...` allows arbitrary external destinations.
