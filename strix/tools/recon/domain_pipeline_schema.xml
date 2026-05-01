@@ -1,0 +1,76 @@
+<tools>
+  <tool name="domain_recon_pipeline">
+    <description>Run the full deterministic domain-target recon pipeline as a single
+orchestrated call.
+
+This is the §8.3 "specialist team" entry point for domain targets. It composes the
+existing recon tools (org_fingerprint, dns_hygiene_check, passive_dns_history,
+subdomain_takeover_check, discover_cloud_assets) plus subfinder-based subdomain
+enumeration plus a per-subdomain HEAD-probing triage classifier — all bracketed in
+one phase.entered/phase.completed pair, with a `surface_map.json` artifact
+persisted for the exploit phase to consume.
+
+Use this near the start of any domain-target scan. Order:
+
+1. **(External step)** Call `fingerprint_tech_stack(target)` first if you want the
+   per-tech skills auto-loaded — that tool is host-side and needs agent_state, so it
+   can't run inside this orchestrator.
+2. **This tool** runs the deterministic recon checks + builds the surface map.
+3. **Then** the agent enters exploit phase, reading `deep_targets` from the surface
+   map for the per-host web-app exploit reasoning.
+
+What gets emitted as a side effect:
+- `phase.entered` / `phase.completed` events around the whole pipeline
+- All check events from the underlying tools (per-DNS-hygiene-check, per-subdomain
+  takeover, per-provider passive DNS, etc.)
+- All findings the underlying tools normally emit (DNS hygiene misconfigs, takeover
+  candidates, cloud-asset exposures, typosquats)
+- `surface_map.json` written to the run directory
+
+Triage classification per subdomain:
+- **deep** — likely a web app or auth-protected surface worth deep testing
+  (200/301/302 with HTML or JSON, or 401/403)
+- **shallow** — live but probably not a primary target (static content, redirects)
+- **skip** — doesn't resolve, 5xx, or no HTTP response</description>
+    <parameters>
+      <parameter name="domain" type="string" required="true">
+        <description>Apex domain to scan (e.g. "example.com").</description>
+      </parameter>
+      <parameter name="enable_typosquats" type="boolean" required="false">
+        <description>When true (default), generate and DNS-resolve ~25 typosquat candidates inside org_fingerprint.</description>
+      </parameter>
+      <parameter name="enable_passive_dns" type="boolean" required="false">
+        <description>When true (default), invoke passive_dns_history. Fails open when no API keys configured.</description>
+      </parameter>
+      <parameter name="enable_cloud_assets" type="boolean" required="false">
+        <description>When true (default), invoke discover_cloud_assets across S3/GCS/Azure.</description>
+      </parameter>
+      <parameter name="subdomain_max" type="integer" required="false">
+        <description>Cap on number of subdomains to triage + takeover-check. Default 50, to bound HTTP probe count on large domains.</description>
+      </parameter>
+      <parameter name="triage_subdomains" type="boolean" required="false">
+        <description>When true (default), HEAD-probe each live subdomain and classify it as deep / shallow / skip.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, domain, phase_id, surface_map: {...}, next_steps: [...]}.
+
+`surface_map` is the same structure persisted to `surface_map.json`: schema_version, domain, generated_at, phase_id, summary (counts), org_fingerprint, dns_hygiene, passive_dns, subdomain_enum, subdomain_triage, deep_targets, shallow_targets, takeover, cloud_assets.
+
+`next_steps` is a compact list of suggested follow-up actions for the agent based on what was discovered.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<domain_recon_pipeline>
+<parameter=domain>example.com</parameter>
+</domain_recon_pipeline>
+
+<domain_recon_pipeline>
+<parameter=domain>example.com</parameter>
+<parameter=enable_typosquats>false</parameter>
+<parameter=subdomain_max>20</parameter>
+</domain_recon_pipeline>
+]]>
+    </example_usage>
+  </tool>
+</tools>
