@@ -447,3 +447,106 @@ def test_tracer_otel_flag_overrides_global_telemetry(monkeypatch, tmp_path) -> N
 
     events_path = tmp_path / "strix_runs" / "otel-enabled" / "events.jsonl"
     assert events_path.exists()
+
+
+def test_vulnerability_report_infers_category_from_cwe(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    tracer = Tracer("category-infer")
+    set_global_tracer(tracer)
+    tracer.set_scan_config({"targets": ["https://example.com"]})
+
+    tracer.add_vulnerability_report(
+        title="SQLi in /search",
+        severity="high",
+        cwe="CWE-89",
+    )
+    tracer.add_vulnerability_report(
+        title="Open redirect at /login",
+        severity="medium",
+        cwe="CWE-601",
+    )
+
+    reports = tracer.get_existing_vulnerabilities()
+    assert reports[0]["category"] == "sqli"
+    assert reports[1]["category"] == "open_redirect"
+
+
+def test_vulnerability_report_explicit_category_wins(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    tracer = Tracer("category-explicit")
+    set_global_tracer(tracer)
+
+    tracer.add_vulnerability_report(
+        title="No DMARC",
+        severity="medium",
+        cwe="CWE-1278",  # would map to misconfig by default
+        category="email_security",
+    )
+    reports = tracer.get_existing_vulnerabilities()
+    assert reports[0]["category"] == "email_security"
+
+
+def test_verification_status_defaults_from_poc(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    tracer = Tracer("verification")
+    set_global_tracer(tracer)
+
+    tracer.add_vulnerability_report(
+        title="With PoC",
+        severity="high",
+        poc_script_code="curl http://target/exploit",
+    )
+    tracer.add_vulnerability_report(
+        title="Without PoC",
+        severity="medium",
+    )
+    tracer.add_vulnerability_report(
+        title="Pattern only",
+        severity="low",
+        verification_status="pattern_match",
+    )
+
+    reports = tracer.get_existing_vulnerabilities()
+    assert reports[0]["verification_status"] == "verified"
+    assert reports[1]["verification_status"] == "inconclusive"
+    assert reports[2]["verification_status"] == "pattern_match"
+
+
+def test_save_run_data_writes_run_meta_and_vulnerabilities_json(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    tracer = Tracer("meta-and-json")
+    set_global_tracer(tracer)
+    tracer.set_scan_config(
+        {
+            "targets": ["https://example.com"],
+            "scan_mode": "standard",
+            "scope_mode": "full",
+            "model_name": "test/model",
+        }
+    )
+
+    tracer.add_vulnerability_report(
+        title="SSRF in /fetch",
+        severity="high",
+        cwe="CWE-918",
+        endpoint="/fetch",
+    )
+
+    run_dir = tmp_path / "strix_runs" / "meta-and-json"
+    meta_path = run_dir / "run_meta.json"
+    json_path = run_dir / "vulnerabilities.json"
+
+    assert meta_path.exists()
+    meta = json.loads(meta_path.read_text())
+    assert meta["targets"] == ["https://example.com"]
+    assert meta["scan_mode"] == "standard"
+    assert meta["scope_mode"] == "full"
+    assert meta["model_name"] == "test/model"
+
+    assert json_path.exists()
+    data = json.loads(json_path.read_text())
+    assert data["count"] == 1
+    assert data["findings"][0]["category"] == "ssrf"
+    assert data["findings"][0]["verification_status"] == "inconclusive"
+    assert data["findings"][0]["endpoint"] == "/fetch"
+    assert data["schema_version"] == 1

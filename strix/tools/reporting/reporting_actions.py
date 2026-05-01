@@ -199,7 +199,7 @@ def _validate_cvss_parameters(**kwargs: str) -> list[str]:
 
 
 @register_tool(sandbox_execution=False)
-def create_vulnerability_report(  # noqa: PLR0912
+def create_vulnerability_report(  # noqa: PLR0912, PLR0913
     title: str,
     description: str,
     impact: str,
@@ -214,6 +214,8 @@ def create_vulnerability_report(  # noqa: PLR0912
     cve: str | None = None,
     cwe: str | None = None,
     code_locations: str | None = None,
+    category: str | None = None,
+    verification_status: str | None = None,
 ) -> dict[str, Any]:
     validation_errors = _validate_required_fields(
         title=title,
@@ -314,6 +316,8 @@ def create_vulnerability_report(  # noqa: PLR0912
                 cve=cve,
                 cwe=cwe,
                 code_locations=parsed_locations,
+                category=category,
+                verification_status=verification_status,
             )
 
             return {
