@@ -1,0 +1,41 @@
+<tools>
+  <tool name="subdomain_takeover_check">
+    <description>Check subdomains for takeover candidates against a known-provider fingerprint matrix.
+
+For each subdomain, follow CNAMEs and match the final target against a list of third-party
+services known to be vulnerable to subdomain takeover when the underlying project / bucket /
+app is unclaimed (Heroku, GitHub Pages, S3 website, Vercel, Netlify, Fastly, Bitbucket,
+Ghost, Shopify, etc.). When the CNAME matches a provider, fetch the subdomain over HTTP
+and check the response body for that provider's "unclaimed" signature.
+
+Conservative — flags candidates only. Active verification (claim the project, confirm
+exploit) is intentionally out of scope.
+
+Findings are filed under category `subdomain_takeover` with severity tied to provider impact
+(`high` for hijack-friendly providers like Heroku, GitHub Pages; `medium` for ambiguous like
+Vercel where 404 doesn't always mean takeover). `verification_status` is "verified" when the
+fingerprint matched the response body, "pattern_match" when only the CNAME matched.
+
+Use AFTER subdomain enumeration: pass the discovered subdomain list via `subdomains`. When
+called with only the apex `domain`, only the apex is checked.</description>
+    <parameters>
+      <parameter name="domain" type="string" required="true">
+        <description>Apex domain (e.g. "example.com"). Used as fallback when `subdomains` not given.</description>
+      </parameter>
+      <parameter name="subdomains" type="string" required="false">
+        <description>Comma-separated list of fully-qualified subdomains to check, e.g. "blog.example.com,api.example.com,www.example.com". When omitted, only the apex is checked.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, domain, checked, candidates, results: [...]}. Each result has {host, cname, candidate, provider, verification_status, severity}.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<subdomain_takeover_check>
+<parameter=domain>example.com</parameter>
+<parameter=subdomains>blog.example.com,api.example.com,docs.example.com</parameter>
+</subdomain_takeover_check>
+]]>
+    </example_usage>
+  </tool>
+</tools>
