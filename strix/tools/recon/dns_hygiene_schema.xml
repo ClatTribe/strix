@@ -1,0 +1,44 @@
+<tools>
+  <tool name="dns_hygiene_check">
+    <description>Run a battery of DNS hygiene and email-security checks on a domain target.
+
+This tool wraps `dig` queries to evaluate the domain's posture across well-known
+categories: SPF, DMARC, DKIM (common selectors), MTA-STS, CAA, DNSSEC, wildcard DNS,
+and AXFR (zone transfer) exposure. Each misconfiguration is emitted as a structured
+finding via the tracer; the return value summarises every check.
+
+Use this tool during the recon phase for any `domain` target — it produces deterministic
+coverage of categories the agent's free-form reasoning often misses (especially MTA-STS,
+DANE, CAA, AXFR which are easy to overlook).
+
+Categories the findings file under: `email_security` (SPF, DMARC, MTA-STS), `dns_security`
+(CAA, DNSSEC, wildcard, AXFR).
+
+Returns a dict: `{success, domain, checks_run, results: [...], findings_emitted}`. Each
+entry in `results` describes one check's outcome; the side-effect findings carry the
+full description / impact / remediation.</description>
+    <parameters>
+      <parameter name="domain" type="string" required="true">
+        <description>Domain to check (apex, e.g. "example.com" — not a URL, not a subdomain unless that's the apex of interest).</description>
+      </parameter>
+      <parameter name="checks" type="string" required="false">
+        <description>Comma-separated list of checks to run, e.g. "spf,dmarc,caa". Default is "all". Valid values: spf, dmarc, dkim, mta_sts, caa, dnssec, wildcard, axfr.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, domain, checks_run, results, findings_emitted}. Findings are written through the tracer side-effect; the agent does not need to re-emit them.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<dns_hygiene_check>
+<parameter=domain>example.com</parameter>
+</dns_hygiene_check>
+
+<dns_hygiene_check>
+<parameter=domain>example.com</parameter>
+<parameter=checks>spf,dmarc,mta_sts</parameter>
+</dns_hygiene_check>
+]]>
+    </example_usage>
+  </tool>
+</tools>
