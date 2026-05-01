@@ -18,10 +18,18 @@ from typing import Any
 
 from strix.tools.registry import register_tool
 
-from ._common import dig, emit_finding, http_get_text, looks_like_domain
+from ._common import (
+    complete_check,
+    dig,
+    emit_finding,
+    http_get_text,
+    looks_like_domain,
+    start_check,
+)
 
 
 logger = logging.getLogger(__name__)
+_TOOL_NAME = "subdomain_takeover_check"
 
 
 # Provider matrix: each entry maps a provider name to:
@@ -135,12 +143,15 @@ def _classify(cname_target: str) -> dict[str, Any] | None:
 
 
 def _check_one(host: str) -> dict[str, Any]:
+    check_id = start_check(category="subdomain_takeover", surface=host, tool=_TOOL_NAME)
     cname = _resolve_cname(host)
     if not cname:
+        complete_check(check_id, "not_vulnerable", evidence="no CNAME")
         return {"host": host, "cname": None, "candidate": False}
 
     provider = _classify(cname)
     if not provider:
+        complete_check(check_id, "not_vulnerable", evidence=f"CNAME → {cname} (no known provider)")
         return {"host": host, "cname": cname, "candidate": False}
 
     # Provider matched. Try to verify by HTTP fetching the host and matching
@@ -186,6 +197,25 @@ def _check_one(host: str) -> dict[str, Any]:
                 "the subdomain record."
             ),
             verification_status=verification,
+        )
+
+    # Emit completed-check verdict: vulnerable if unclaimed-fingerprint matched
+    # or provider has fingerprint=None (always-candidate); otherwise the
+    # CNAME-only match is treated as inconclusive — confirmation requires
+    # active verification (out of scope here).
+    if is_unclaimed or fingerprint is None:
+        complete_check(
+            check_id,
+            "vulnerable",
+            confidence=0.95 if is_unclaimed else 0.6,
+            evidence=summary,
+        )
+    else:
+        complete_check(
+            check_id,
+            "inconclusive",
+            confidence=0.4,
+            evidence=summary,
         )
 
     return {

@@ -25,7 +25,10 @@ from typing import Any
 
 from strix.tools.registry import register_tool
 
-from ._common import emit_finding, http_head
+from ._common import complete_check, emit_finding, http_head, start_check
+
+
+_TOOL_NAME = "discover_cloud_assets"
 
 
 logger = logging.getLogger(__name__)
@@ -229,6 +232,16 @@ def discover_cloud_assets(
         extras_suffix_list = [s.strip() for s in extra_suffixes.split(",") if s.strip()]
 
     candidates = _candidate_names(org_name, extra_suffixes=extras_suffix_list)
+
+    # One check.started/completed per provider — emitting a check per
+    # candidate-name probe (140+ × 3 providers) would flood events.jsonl;
+    # the per-provider summary is the right granularity.
+    provider_checks: dict[str, str | None] = {
+        p: start_check(category="info_disclosure", surface=org_name, tool=_TOOL_NAME)
+        for p in active_providers
+    }
+    provider_hits: dict[str, int] = {p: 0 for p in active_providers}
+
     hits: list[dict[str, Any]] = []
     for name in candidates:
         for provider in active_providers:
@@ -239,6 +252,7 @@ def discover_cloud_assets(
                 hit = None
             if hit:
                 hits.append(hit)
+                provider_hits[provider] += 1
                 emit_finding(
                     title=f"Public {hit['provider']} asset: {name}",
                     severity=hit["severity"],
@@ -263,6 +277,17 @@ def discover_cloud_assets(
                     ),
                     verification_status="verified",
                 )
+
+    # Close out one check per provider with the aggregate verdict.
+    for provider, cev_id in provider_checks.items():
+        hit_count = provider_hits[provider]
+        verdict = "vulnerable" if hit_count else "not_vulnerable"
+        evidence = (
+            f"{hit_count} hit(s) across {len(candidates)} candidates"
+            if hit_count
+            else f"no public assets found across {len(candidates)} candidates"
+        )
+        complete_check(cev_id, verdict, evidence=evidence)
 
     return {
         "success": True,

@@ -112,6 +112,15 @@ class Tracer:
         self.vulnerability_reports: list[dict[str, Any]] = []
         self.final_scan_result: str | None = None
 
+        # Phase + check tracking (roadmap §1).
+        # `_open_phases` keyed by phase_id; entries are popped on complete_phase.
+        # `_open_checks` keyed by check_id; entries are popped on complete_check.
+        # `_completed_checks` accumulates the `check.completed` payloads so the
+        # end-of-run summary can aggregate negative-coverage assertions.
+        self._open_phases: dict[str, dict[str, Any]] = {}
+        self._open_checks: dict[str, dict[str, Any]] = {}
+        self._completed_checks: list[dict[str, Any]] = []
+
         self.scan_results: dict[str, Any] | None = None
         self.scan_config: dict[str, Any] | None = None
         self.run_metadata: dict[str, Any] = {
@@ -458,6 +467,232 @@ class Tracer:
     def get_existing_vulnerabilities(self) -> list[dict[str, Any]]:
         return list(self.vulnerability_reports)
 
+    # ------------------------------------------------------------------
+    # Phase + check events (roadmap §1)
+    #
+    # Phases mark the major stages of a scan (recon → exploit → validate →
+    # report). Checks are per-attack-class × per-surface probes that emit
+    # both a started-event (work begun) and a completed-event (with a
+    # vulnerable | not_vulnerable | inconclusive verdict). Together they
+    # answer the "what was tried, not just what was found" question.
+    #
+    # All methods return cheap string IDs the caller passes back to the
+    # corresponding *_complete method. Caller-tracked rather than
+    # context-managed because completion can be cross-call (e.g., the
+    # check is started by a fingerprint tool and completed by an exploit
+    # tool that reads the surface map).
+    # ------------------------------------------------------------------
+
+    _PHASE_NAMES = ("recon", "exploit", "validate", "report")
+    _CHECK_RESULTS = ("vulnerable", "not_vulnerable", "inconclusive")
+
+    def enter_phase(
+        self,
+        phase: str,
+        agent_id: str | None = None,
+        focus: str | None = None,
+    ) -> str:
+        """Mark the start of a scan phase. Returns a phase_id to pass to complete_phase."""
+        phase_id = f"phase-{uuid4().hex[:12]}"
+        normalised = phase.strip().lower()
+        record = {
+            "phase_id": phase_id,
+            "phase": normalised,
+            "started_at": datetime.now(UTC).isoformat(),
+            "agent_id": agent_id,
+            "focus": focus,
+        }
+        self._open_phases[phase_id] = record
+
+        payload: dict[str, Any] = {"phase_id": phase_id, "phase": normalised}
+        if focus:
+            payload["focus"] = focus
+        if normalised not in self._PHASE_NAMES:
+            payload["custom"] = True
+
+        actor = {"id": agent_id} if agent_id else None
+        self._emit_event(
+            "phase.entered",
+            actor=actor,
+            payload=payload,
+            status=normalised,
+            source="strix.run",
+        )
+        return phase_id
+
+    def complete_phase(
+        self,
+        phase_id: str,
+        summary: dict[str, Any] | None = None,
+    ) -> None:
+        """Mark the end of a phase. Idempotent — completing an unknown id is silently no-op."""
+        record = self._open_phases.pop(phase_id, None)
+        if record is None:
+            logger.debug("complete_phase called with unknown phase_id %s", phase_id)
+            return
+
+        try:
+            started = datetime.fromisoformat(record["started_at"])
+            duration = (datetime.now(UTC) - started).total_seconds()
+        except (ValueError, TypeError):
+            duration = 0.0
+
+        payload: dict[str, Any] = {
+            "phase_id": phase_id,
+            "phase": record["phase"],
+            "duration_seconds": round(duration, 3),
+        }
+        if summary:
+            payload["summary"] = summary
+
+        actor = {"id": record["agent_id"]} if record["agent_id"] else None
+        self._emit_event(
+            "phase.completed",
+            actor=actor,
+            payload=payload,
+            status="completed",
+            source="strix.run",
+        )
+
+    def start_check(
+        self,
+        category: str,
+        surface: str | None = None,
+        *,
+        tool: str | None = None,
+        agent_id: str | None = None,
+    ) -> str:
+        """Mark the start of one attack-class × surface probe. Returns a check_id."""
+        check_id = f"check-{uuid4().hex[:12]}"
+        record = {
+            "check_id": check_id,
+            "category": category.strip().lower(),
+            "surface": surface,
+            "tool": tool,
+            "agent_id": agent_id,
+            "started_at": datetime.now(UTC).isoformat(),
+        }
+        self._open_checks[check_id] = record
+
+        payload: dict[str, Any] = {
+            "check_id": check_id,
+            "category": record["category"],
+        }
+        if surface:
+            payload["surface"] = surface
+        if tool:
+            payload["tool"] = tool
+
+        actor = {"id": agent_id} if agent_id else None
+        self._emit_event(
+            "check.started",
+            actor=actor,
+            payload=payload,
+            source="strix.checks",
+        )
+        return check_id
+
+    def complete_check(
+        self,
+        check_id: str,
+        result: str,
+        *,
+        confidence: float | None = None,
+        evidence: str | None = None,
+        finding_id: str | None = None,
+    ) -> None:
+        """Mark the end of a check. `result` ∈ {vulnerable, not_vulnerable, inconclusive}.
+
+        On vulnerable: pass `finding_id` to link to the corresponding
+        vulnerabilities/<id>.md entry. Confidence is 0.0–1.0; if unset, defaults
+        to 1.0 for `vulnerable`/`not_vulnerable` (the caller is making a
+        deterministic claim) and 0.5 for `inconclusive`.
+        """
+        record = self._open_checks.pop(check_id, None)
+        if record is None:
+            logger.debug("complete_check called with unknown check_id %s", check_id)
+            return
+
+        normalised_result = result.strip().lower()
+        if normalised_result not in self._CHECK_RESULTS:
+            logger.warning(
+                "complete_check called with invalid result %r; coercing to inconclusive",
+                result,
+            )
+            normalised_result = "inconclusive"
+
+        if confidence is None:
+            confidence = 0.5 if normalised_result == "inconclusive" else 1.0
+        # Clamp.
+        confidence = max(0.0, min(1.0, float(confidence)))
+
+        try:
+            started = datetime.fromisoformat(record["started_at"])
+            duration = (datetime.now(UTC) - started).total_seconds()
+        except (ValueError, TypeError):
+            duration = 0.0
+
+        payload: dict[str, Any] = {
+            "check_id": check_id,
+            "category": record["category"],
+            "result": normalised_result,
+            "confidence": round(confidence, 3),
+            "duration_seconds": round(duration, 3),
+        }
+        if record.get("surface"):
+            payload["surface"] = record["surface"]
+        if record.get("tool"):
+            payload["tool"] = record["tool"]
+        if evidence:
+            payload["evidence"] = evidence
+        if finding_id:
+            payload["finding_id"] = finding_id
+
+        # Accumulate for end-of-run summary.
+        self._completed_checks.append(dict(payload))
+
+        actor = {"id": record["agent_id"]} if record["agent_id"] else None
+        self._emit_event(
+            "check.completed",
+            actor=actor,
+            payload=payload,
+            status=normalised_result,
+            source="strix.checks",
+        )
+
+    def get_check_summary(self) -> dict[str, Any]:
+        """Aggregate completed checks for end-of-run reporting.
+
+        Returns counts per result, per category, and the list of
+        not_vulnerable checks (which feed §11 negative-coverage assertions).
+        """
+        by_result: dict[str, int] = {"vulnerable": 0, "not_vulnerable": 0, "inconclusive": 0}
+        by_category: dict[str, dict[str, int]] = {}
+        not_vulnerable: list[dict[str, Any]] = []
+
+        for c in self._completed_checks:
+            result = c.get("result", "inconclusive")
+            by_result[result] = by_result.get(result, 0) + 1
+            cat = c.get("category", "unknown")
+            by_category.setdefault(cat, {"vulnerable": 0, "not_vulnerable": 0, "inconclusive": 0})
+            by_category[cat][result] = by_category[cat].get(result, 0) + 1
+            if result == "not_vulnerable":
+                not_vulnerable.append(
+                    {
+                        "category": cat,
+                        "surface": c.get("surface"),
+                        "tool": c.get("tool"),
+                        "confidence": c.get("confidence"),
+                    }
+                )
+
+        return {
+            "total": len(self._completed_checks),
+            "by_result": by_result,
+            "by_category": by_category,
+            "not_vulnerable": not_vulnerable,
+        }
+
     def update_scan_final_fields(
         self,
         executive_summary: str,
@@ -714,6 +949,29 @@ class Tracer:
                     )
             except (OSError, TypeError):
                 logger.warning("Failed to write run_meta.json", exc_info=True)
+
+            # Persist the check summary so downstream consumers can render
+            # negative-coverage assertions ("we tested X for Y, clean") without
+            # re-aggregating events.jsonl. Empty when no checks were run.
+            try:
+                checks_summary_file = run_dir / "checks_summary.json"
+                summary = self.get_check_summary()
+                if summary["total"] > 0:
+                    with checks_summary_file.open("w", encoding="utf-8") as f:
+                        json.dump(
+                            {
+                                "schema_version": 1,
+                                "run_id": self.run_id,
+                                "run_name": self.run_name,
+                                "generated_at": datetime.now(UTC).isoformat(),
+                                **summary,
+                            },
+                            f,
+                            indent=2,
+                            ensure_ascii=False,
+                        )
+            except (OSError, TypeError):
+                logger.warning("Failed to write checks_summary.json", exc_info=True)
 
             if self.final_scan_result:
                 penetration_test_report_file = run_dir / "penetration_test_report.md"
