@@ -101,8 +101,13 @@ def _cwe_match(a: str | None, b: str | None) -> bool:
 
 
 def _file_match(a: str | None, b: str | None) -> bool:
+    # Match-by-category-only fallback: if either side lacks file metadata,
+    # don't penalize. Strix's markdown sometimes omits file:line for findings
+    # the agent identified by behaviour rather than by source location. Same
+    # convention as _line_match — be permissive on missing data, strict when
+    # both sides have something to compare.
     if not a or not b:
-        return False
+        return True
     a, b = _norm(a), _norm(b)
     return a == b or a.endswith("/" + b) or b.endswith("/" + a)
 

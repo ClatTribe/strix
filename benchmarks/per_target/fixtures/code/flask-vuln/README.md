@@ -12,16 +12,22 @@ coverage on code targets.
 
 | # | Category | CWE | Where |
 |---|---|---|---|
-| 1 | Hardcoded secret | CWE-798 | `app.py:22` |
-| 2 | SQL injection | CWE-89 | `app.py:51` |
-| 3 | OS command injection | CWE-78 | `app.py:63` |
-| 4 | SSRF | CWE-918 | `app.py:73` |
-| 5 | IDOR | CWE-639 | `app.py:81` |
-| 6 | Reflected XSS | CWE-79 | `app.py:92` |
-| 7 | Insecure deserialization | CWE-502 | `app.py:99` |
-| 8 | Path traversal | CWE-22 | `app.py:107` |
-| 9 | Open redirect | CWE-601 | `app.py:116` |
-| 10 | Weak crypto | CWE-327 | `app.py:124` |
+| 1 | Hardcoded secret | CWE-798 | `src/app.py:22` |
+| 2 | SQL injection | CWE-89 | `src/app.py:51` |
+| 3 | OS command injection | CWE-78 | `src/app.py:63` |
+| 4 | SSRF | CWE-918 | `src/app.py:73` |
+| 5 | IDOR | CWE-639 | `src/app.py:81` |
+| 6 | Reflected XSS | CWE-79 | `src/app.py:92` |
+| 7 | Insecure deserialization | CWE-502 | `src/app.py:99` |
+| 8 | Path traversal | CWE-22 | `src/app.py:107` |
+| 9 | Open redirect | CWE-601 | `src/app.py:116` |
+| 10 | Weak crypto | CWE-327 | `src/app.py:124` |
+
+## Layout
+
+Source files live in `src/`. The manifest (`expected.yaml`) and this
+README sit at the fixture root, **outside** the scanned directory — so
+the agent doesn't read the answers when it scans `src/`.
 
 The exact line numbers are pinned in `expected.yaml`. The matcher in
 `scoring.py` tolerates ±20 lines, so small editorial changes to the file
@@ -56,9 +62,9 @@ hardcoding on `app.secret_key` is another).
 
 ## Editing this fixture
 
-If you change `app.py`:
+If you change `src/app.py`:
 
-1. Run `grep -n "Planted bug" app.py` to get the new line numbers.
+1. Run `grep -n "Planted bug" src/app.py` to get the new line numbers.
 2. Update `line:` fields in `expected.yaml`.
 3. Re-baseline before merging.
 

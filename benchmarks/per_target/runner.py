@@ -158,14 +158,150 @@ def run_strix(
 _SEVERITY_LINE = re.compile(r"^\*\*Severity:\*\*\s*(\S+)", re.IGNORECASE | re.MULTILINE)
 _CATEGORY_LINE = re.compile(r"^\*\*Category:\*\*\s*(\S+)", re.IGNORECASE | re.MULTILINE)
 _CWE_LINE = re.compile(r"\bCWE[- ]?(\d+)\b", re.IGNORECASE)
-_FILE_LINE = re.compile(
-    r"^\*\*(?:File|Affected\s+File|Location)[:\*\s]*\s*([^\s:]+)(?::(\d+))?",
-    re.IGNORECASE | re.MULTILINE,
-)
-_ENDPOINT_LINE = re.compile(
+
+_FILE_EXTS = r"py|js|ts|tsx|jsx|java|go|rb|php|c|cpp|h|hpp|cs|rs|yml|yaml|toml|json"
+
+# Strix uses several patterns to mention file:line; we try each in order.
+# (1) Strict bold field — only when the keyword is *immediately* followed by colon.
+#     "**File:** app.py:50"  /  "**Affected File:** src/app.py"
+_FILE_PATTERNS = [
+    re.compile(
+        rf"^\*\*(?:File|Affected\s+File)\*\*\s*:\s*`?([\w\-./]+\.(?:{_FILE_EXTS}))`?(?::(\d+))?",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    # (2) "**Location N:** `app.py` (line 55)" — strix's actual format for code findings.
+    re.compile(
+        rf"^\*\*Location\s+\d+:\*\*\s*`?([\w\-./]+\.(?:{_FILE_EXTS}))`?\s*\(\s*lines?\s+(\d+)",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    # (3) "Vulnerable Code Snippet (app.py:117-119):" — first line of the affected-code block.
+    re.compile(
+        rf"(?:Vulnerable\s+Code\s+Snippet|Code\s+Snippet|Affected\s+Code)\s*\(\s*([\w\-./]+\.(?:{_FILE_EXTS}))\s*:\s*(\d+)",
+        re.IGNORECASE,
+    ),
+    # (4) Prose: "in `app.py` (lines 61-68)" / "in `app.py` around lines 65-66".
+    re.compile(
+        rf"\bin\s+`([\w\-./]+\.(?:{_FILE_EXTS}))`\s*(?:\(|around\s+)?lines?\s+(\d+)",
+        re.IGNORECASE,
+    ),
+    # (5) Reverse prose: "(lines 61-68) of `app.py`" / "lines 50-55 in `app.py`".
+    re.compile(
+        rf"lines?\s+(\d+)(?:-\d+)?\s*\)?\s+(?:of|in)\s+`([\w\-./]+\.(?:{_FILE_EXTS}))`",
+        re.IGNORECASE,
+    ),
+    # (6) "on line N of `app.py`" / "at line N in `app.py`".
+    re.compile(
+        rf"(?:on|at)\s+lines?\s+(\d+)\s+(?:of|in)\s+`([\w\-./]+\.(?:{_FILE_EXTS}))`",
+        re.IGNORECASE,
+    ),
+    # (7) Bare "app.py:50" anywhere.
+    re.compile(
+        rf"\b([\w\-./]+\.(?:{_FILE_EXTS}))\s*:\s*(\d+)\b",
+        re.IGNORECASE,
+    ),
+    # (8) Last resort — file mentioned anywhere, no line. Better than nothing.
+    re.compile(
+        rf"`([\w\-./]+\.(?:{_FILE_EXTS}))`",
+        re.IGNORECASE,
+    ),
+]
+# Patterns 5 and 6 capture (line, file) — reverse of the others. The parser
+# detects this by index.
+_FILE_PATTERN_LINE_FIRST = {4, 5}
+_ENDPOINT_FIELD = re.compile(
     r"^\*\*(?:Endpoint|URL|Path)[:\*\s]*\s*([^\s]+)", re.IGNORECASE | re.MULTILINE
 )
+# Strix often puts the endpoint in the title or in a "## Endpoint" / Method line.
+_ENDPOINT_INLINE = re.compile(r"\b(/[\w\-./?=&%]+)", re.MULTILINE)
 _PORT_LINE = re.compile(r"\bport\s+(\d{1,5})\b", re.IGNORECASE)
+
+
+# Map CWE → semantic category (matches the enum in roadmap §1).
+_CWE_TO_CATEGORY = {
+    "CWE-22": "path_traversal",
+    "CWE-78": "cmd_injection",
+    "CWE-79": "xss",
+    "CWE-89": "sqli",
+    "CWE-94": "cmd_injection",
+    "CWE-200": "info_disclosure",
+    "CWE-209": "info_disclosure",
+    "CWE-269": "authz",
+    "CWE-285": "authz",
+    "CWE-287": "auth",
+    "CWE-306": "misconfig",
+    "CWE-319": "crypto",
+    "CWE-326": "crypto",
+    "CWE-327": "crypto",
+    "CWE-347": "jwt",
+    "CWE-352": "csrf",
+    "CWE-434": "misconfig",
+    "CWE-489": "misconfig",
+    "CWE-502": "deserialization",
+    "CWE-548": "misconfig",
+    "CWE-601": "open_redirect",
+    "CWE-611": "xxe",
+    "CWE-639": "idor",
+    "CWE-732": "misconfig",
+    "CWE-798": "info_disclosure",
+    "CWE-862": "authz",
+    "CWE-918": "ssrf",
+    "CWE-943": "sqli",
+    "CWE-1104": "misconfig",
+    "CWE-1278": "misconfig",
+    "CWE-1390": "subdomain_takeover",
+}
+
+
+# Title-keyword → category, fallback when CWE isn't present.
+_TITLE_KEYWORDS = [
+    ("sql injection", "sqli"),
+    ("nosql injection", "sqli"),
+    ("command injection", "cmd_injection"),
+    ("os command", "cmd_injection"),
+    ("rce", "cmd_injection"),
+    ("remote code execution", "cmd_injection"),
+    ("xss", "xss"),
+    ("cross-site scripting", "xss"),
+    ("ssrf", "ssrf"),
+    ("server-side request forgery", "ssrf"),
+    ("idor", "idor"),
+    ("insecure direct object", "idor"),
+    ("path traversal", "path_traversal"),
+    ("directory traversal", "path_traversal"),
+    ("open redirect", "open_redirect"),
+    ("deserialization", "deserialization"),
+    ("pickle", "deserialization"),
+    ("hardcoded", "info_disclosure"),
+    ("secret", "info_disclosure"),
+    ("api key", "info_disclosure"),
+    ("md5", "crypto"),
+    ("weak hash", "crypto"),
+    ("insecure hash", "crypto"),
+    ("weak crypto", "crypto"),
+    ("authorization", "authz"),
+    ("missing auth", "authz"),
+    ("broken access control", "authz"),
+    ("authentication", "auth"),
+    ("session", "auth"),
+    ("jwt", "jwt"),
+    ("csrf", "csrf"),
+    ("xxe", "xxe"),
+    ("subdomain takeover", "subdomain_takeover"),
+    ("graphql", "graphql"),
+    ("oauth", "oauth"),
+    ("cors", "cors"),
+]
+
+
+def _infer_category(title: str | None, cwe: str | None) -> str | None:
+    if cwe and cwe.upper() in _CWE_TO_CATEGORY:
+        return _CWE_TO_CATEGORY[cwe.upper()]
+    if title:
+        t = title.lower()
+        for kw, cat in _TITLE_KEYWORDS:
+            if kw in t:
+                return cat
+    return None
 
 
 def parse_finding_md(md_text: str) -> Found:
@@ -175,19 +311,44 @@ def parse_finding_md(md_text: str) -> Found:
             title = line[2:].strip()
             break
     sev = _SEVERITY_LINE.search(md_text)
-    cat = _CATEGORY_LINE.search(md_text)
-    cwe = _CWE_LINE.search(md_text)
-    file_m = _FILE_LINE.search(md_text)
-    endpoint_m = _ENDPOINT_LINE.search(md_text)
+    cat_field = _CATEGORY_LINE.search(md_text)
+    cwe_m = _CWE_LINE.search(md_text)
+    cwe_value = ("CWE-" + cwe_m.group(1)) if cwe_m else None
+
+    # File:line — try each pattern in order; first hit wins.
+    # Patterns marked in _FILE_PATTERN_LINE_FIRST capture (line, file) instead of (file, line).
+    file_val: str | None = None
+    line_val: int | None = None
+    for idx, pat in enumerate(_FILE_PATTERNS):
+        m = pat.search(md_text)
+        if not m:
+            continue
+        if idx in _FILE_PATTERN_LINE_FIRST:
+            line_val = int(m.group(1))
+            file_val = m.group(2)
+        else:
+            file_val = m.group(1)
+            line_val = int(m.group(2)) if m.lastindex and m.lastindex >= 2 and m.group(2) else None
+        break
+
+    # Endpoint — top-level field if present, otherwise infer from the title's first /path token.
+    endpoint_m = _ENDPOINT_FIELD.search(md_text)
+    if endpoint_m:
+        endpoint_val: str | None = endpoint_m.group(1)
+    else:
+        title_endpoint = _ENDPOINT_INLINE.search(title or "")
+        endpoint_val = title_endpoint.group(1) if title_endpoint else None
+
     port_m = _PORT_LINE.search(md_text)
-    line_no = int(file_m.group(2)) if file_m and file_m.group(2) else None
+    category = cat_field.group(1) if cat_field else _infer_category(title, cwe_value)
+
     return Found(
         title=title or "(untitled)",
-        category=cat.group(1) if cat else None,
-        cwe=("CWE-" + cwe.group(1)) if cwe else None,
-        file=file_m.group(1) if file_m else None,
-        line=line_no,
-        endpoint=endpoint_m.group(1) if endpoint_m else None,
+        category=category,
+        cwe=cwe_value,
+        file=file_val,
+        line=line_val,
+        endpoint=endpoint_val,
         port=int(port_m.group(1)) if port_m else None,
         severity=sev.group(1) if sev else None,
     )
@@ -286,6 +447,14 @@ def main() -> int:
         default=[],
         help="extra arg to pass to strix (repeatable)",
     )
+    parser.add_argument(
+        "--rescore",
+        metavar="RUN_DIR",
+        help=(
+            "skip strix, re-score the existing strix_runs/ output under the given dir. "
+            "Useful after a parser fix, or to regenerate baselines without paying the LLM cost."
+        ),
+    )
     args = parser.parse_args()
 
     fixture_dir = Path(args.fixture).resolve()
@@ -299,25 +468,37 @@ def main() -> int:
 
     manifest, expected = parse_expected(fixture_dir)
 
-    # Run from a clean tmp working dir so strix_runs/ doesn't pollute the fixture.
-    work_root = fixture_dir / ".strix-bench-work"
-    work_root.mkdir(exist_ok=True)
-    # Each invocation gets its own subdir to keep multiple runs separable.
-    run_dir = work_root / f"run-{int(time.time())}"
-    run_dir.mkdir()
-
-    docker_running = False
-    try:
-        docker_running = docker_up(fixture_dir, manifest)
+    if args.rescore:
+        # Skip strix entirely; just parse + score the existing run output.
+        run_dir = Path(args.rescore).resolve()
+        if not run_dir.exists():
+            print(f"error: --rescore dir not found: {run_dir}", file=sys.stderr)
+            return 2
         target = resolve_target(fixture_dir, manifest)
-        exit_code, duration = run_strix(
-            target, args.scan_mode, run_dir, args.strix_arg
-        )
+        exit_code = 0
+        duration = 0.0
         findings = collect_findings(run_dir)
         stats = collect_stats(run_dir)
-    finally:
-        if docker_running and not args.keep_up:
-            docker_down(fixture_dir, manifest)
+    else:
+        # Run from a clean tmp working dir so strix_runs/ doesn't pollute the fixture.
+        work_root = fixture_dir / ".strix-bench-work"
+        work_root.mkdir(exist_ok=True)
+        # Each invocation gets its own subdir to keep multiple runs separable.
+        run_dir = work_root / f"run-{int(time.time())}"
+        run_dir.mkdir()
+
+        docker_running = False
+        try:
+            docker_running = docker_up(fixture_dir, manifest)
+            target = resolve_target(fixture_dir, manifest)
+            exit_code, duration = run_strix(
+                target, args.scan_mode, run_dir, args.strix_arg
+            )
+            findings = collect_findings(run_dir)
+            stats = collect_stats(run_dir)
+        finally:
+            if docker_running and not args.keep_up:
+                docker_down(fixture_dir, manifest)
 
     result_score = score(expected, findings)
 

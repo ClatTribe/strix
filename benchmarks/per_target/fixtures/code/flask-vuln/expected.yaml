@@ -1,10 +1,14 @@
 target_type: local_code
-target: ./app.py
+target: src
 description: |
   Minimal Flask app with 10 deliberately-planted vulnerabilities, one per
   classic OWASP category. Used as a baseline benchmark for code-target
   coverage. Line numbers below correspond to the comment line of each
   planted bug; the matcher tolerates ±20 lines.
+
+  Source lives in `src/`; `target: src` keeps Strix scoped to the source
+  files and away from this manifest (which would otherwise leak the
+  answers to the agent).
 
 expected_findings:
   - id: hardcoded-secret
