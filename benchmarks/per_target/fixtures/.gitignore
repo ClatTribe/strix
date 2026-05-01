@@ -1,0 +1,3 @@
+# Per-fixture scratch dirs created by runner.py (strix_runs/, logs).
+# Don't commit. Multi-GB and contains LLM-driven scan output.
+**/.strix-bench-work/
