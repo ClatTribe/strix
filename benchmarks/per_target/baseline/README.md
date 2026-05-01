@@ -65,23 +65,34 @@ For a per-finding diff (what changed in `missed`):
 diff <(jq -r '.missed[]' a.json | sort) <(jq -r '.missed[]' b.json | sort)
 ```
 
-## When to commit baselines
+## Don't commit baselines
 
-Yes, commit them. They're small, they're how the team agrees on what
-"current behavior" means, and they let PRs include "baseline shifted by
-X" in the description.
+Baselines are **operational output of running the test suite**, not test
+infrastructure. They're tied to a specific model, scan mode, run timestamp,
+and (for live-target runs) the security state of a real production
+asset at a moment in time. None of that belongs in version control.
 
-When adding a baseline file:
+Running `runner.py` is a **read-only execution of the repo** — it should
+not modify repo content. Treat the directory like `/var/log/`: the
+runner writes here, you read here, you compare here, but you don't push
+results back.
 
-1. Run the fixture on a clean checkout of `main`.
-2. Use a stable model + scan_mode (commit the same combo each time so
-   diffs are interpretable).
-3. Add a one-line note in the PR description: "ran on
-   `anthropic/claude-sonnet-4-6` with `--scan-mode standard`."
+Concretely:
+
+- This directory is the right place to write baselines locally with `--output`.
+- Don't `git add` the resulting JSON. The directory itself is committed
+  (this README explains the convention) but its contents are gitignored
+  by virtue of project policy, not by `.gitignore` (so a commit that
+  includes a baseline by mistake is visible at `git status`, not silent).
+- For sharing a baseline: paste the relevant numbers into a PR
+  description or attach the JSON to an issue. Don't merge it.
+- For tracking drift over time: keep a personal `baseline/` archive
+  outside the repo, or use an external store (gist, S3, internal wiki).
 
 ## When to ignore a recall regression
 
-Sometimes a roadmap change makes recall *drop* on an old baseline because
-it tightened false-positive detection. That's a precision↑ recall↓
-tradeoff and may be the right call. The PR should explicitly call it
-out — not silently land a regression in the baselines.
+Sometimes a change makes recall *drop* on a previous run because it
+tightened false-positive detection. That's a precision↑ recall↓ tradeoff
+and may be the right call. Call it out explicitly when it happens — in
+the PR description, with the numbers — instead of silently re-running
+to a new baseline.
