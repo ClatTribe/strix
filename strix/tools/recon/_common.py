@@ -116,6 +116,50 @@ def emit_finding(
     )
 
 
+def start_check(
+    category: str,
+    surface: str | None = None,
+    *,
+    tool: str | None = None,
+) -> str | None:
+    """Emit a `check.started` event via the tracer. Returns check_id or None."""
+    try:
+        from strix.telemetry.tracer import get_global_tracer
+    except ImportError:
+        return None
+    tracer = get_global_tracer()
+    if tracer is None:
+        return None
+    return tracer.start_check(category=category, surface=surface, tool=tool)
+
+
+def complete_check(
+    check_id: str | None,
+    result: str,
+    *,
+    confidence: float | None = None,
+    evidence: str | None = None,
+    finding_id: str | None = None,
+) -> None:
+    """Emit a `check.completed` event. Silently no-ops when check_id is None."""
+    if not check_id:
+        return
+    try:
+        from strix.telemetry.tracer import get_global_tracer
+    except ImportError:
+        return
+    tracer = get_global_tracer()
+    if tracer is None:
+        return
+    tracer.complete_check(
+        check_id,
+        result=result,
+        confidence=confidence,
+        evidence=evidence,
+        finding_id=finding_id,
+    )
+
+
 _DOMAIN_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9.\-]*[a-zA-Z0-9])?$")
 
 

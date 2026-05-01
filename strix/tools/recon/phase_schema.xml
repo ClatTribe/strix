@@ -1,0 +1,53 @@
+<tools>
+  <tool name="record_phase">
+    <description>Declare a scan-phase boundary so consumers can render meaningful progress.
+
+Phases are the macro stages of a structured scan: recon → exploit → validate → report.
+Calling this tool emits a `phase.entered` (or `phase.completed`) event into the run's
+events.jsonl stream. Webappsec, the TUI, and any other consumer can use these to render
+progress bars, gate downstream operations, or run end-of-phase coverage validators.
+
+Cheap — each call emits one event. Use it to bookend phases, especially when the agent
+is about to switch focus (recon → exploit), or when a phase wraps up early.
+
+Action semantics:
+- action='enter' (default): records phase start, returns a phase_id.
+- action='complete': closes the phase. Pass the phase_id from the earlier enter call.
+
+If `complete` is never called, strix's run-completion path closes any still-open phases
+automatically — so fire-and-forget is fine for short scans.
+
+Custom phase names (anything not in {recon, exploit, validate, report}) are accepted but
+flagged in the event payload as custom.</description>
+    <parameters>
+      <parameter name="phase" type="string" required="true">
+        <description>One of recon, exploit, validate, report. Custom phase names accepted but tagged as custom in the event.</description>
+      </parameter>
+      <parameter name="action" type="string" required="false">
+        <description>Either "enter" (default) or "complete". When "complete", phase_id from the earlier enter call must be passed.</description>
+      </parameter>
+      <parameter name="phase_id" type="string" required="false">
+        <description>Required only when action='complete'. The phase_id returned by the earlier enter call.</description>
+      </parameter>
+      <parameter name="focus" type="string" required="false">
+        <description>Optional sub-focus for this phase (e.g. "dns_security" during a recon-only domain scan). Surfaces in the event payload for downstream filtering.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, action, phase, phase_id} on success.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<record_phase>
+<parameter=phase>recon</parameter>
+</record_phase>
+
+<record_phase>
+<parameter=phase>recon</parameter>
+<parameter=action>complete</parameter>
+<parameter=phase_id>phase-abc123def456</parameter>
+</record_phase>
+]]>
+    </example_usage>
+  </tool>
+</tools>

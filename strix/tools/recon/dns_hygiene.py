@@ -20,7 +20,17 @@ from typing import Any
 
 from strix.tools.registry import register_tool
 
-from ._common import dig, emit_finding, http_get_text, looks_like_domain
+from ._common import (
+    complete_check,
+    dig,
+    emit_finding,
+    http_get_text,
+    looks_like_domain,
+    start_check,
+)
+
+
+_TOOL_NAME = "dns_hygiene_check"
 
 
 _DKIM_SELECTORS = [
@@ -323,6 +333,62 @@ _CHECK_REGISTRY = {
 }
 
 
+# Map each check_id → (category, default_confidence_for_inconclusive)
+_CHECK_CATEGORY: dict[str, str] = {
+    "spf": "email_security",
+    "dmarc": "email_security",
+    "dkim": "email_security",
+    "mta_sts": "email_security",
+    "caa": "dns_security",
+    "dnssec": "dns_security",
+    "wildcard": "dns_security",
+    "axfr": "dns_security",
+}
+
+
+def _verdict_for_check(check_id: str, result: dict[str, Any]) -> tuple[str, str | None]:
+    """Map a sub-check's structured result → (verdict, evidence-summary).
+
+    verdict ∈ {vulnerable, not_vulnerable, inconclusive}.
+    """
+    if result.get("error"):
+        return "inconclusive", f"error: {result['error']}"
+
+    if check_id in ("spf", "dmarc", "mta_sts", "caa"):
+        if result.get("present") is False:
+            return "vulnerable", "missing record"
+        if check_id == "dmarc" and result.get("policy") in (None, "none", ""):
+            return "vulnerable", f"weak policy: p={result.get('policy')!r}"
+        if check_id == "mta_sts" and result.get("policy_reachable") is False:
+            return "vulnerable", "policy file unreachable"
+        return "not_vulnerable", "record present"
+
+    if check_id == "dnssec":
+        return ("not_vulnerable", "DNSSEC signed") if result.get("signed") else (
+            "vulnerable",
+            "DNSSEC not enabled",
+        )
+
+    if check_id == "wildcard":
+        return ("vulnerable", "wildcard DNS detected") if result.get("present") else (
+            "not_vulnerable",
+            "no wildcard",
+        )
+
+    if check_id == "axfr":
+        if result.get("exposed_nameservers"):
+            return "vulnerable", f"AXFR allowed on {result['exposed_nameservers']}"
+        if result.get("tested") is False:
+            return "inconclusive", result.get("note") or "not tested"
+        return "not_vulnerable", "AXFR refused on all NS"
+
+    if check_id == "dkim":
+        # Common-selector check is informational, not conclusive either way.
+        return "inconclusive", f"selectors_found={result.get('selectors_found')}"
+
+    return "inconclusive", None
+
+
 @register_tool(sandbox_execution=True)
 def dns_hygiene_check(domain: str, checks: str | None = None) -> dict[str, Any]:
     """Run a battery of DNS hygiene checks on a domain.
@@ -352,10 +418,15 @@ def dns_hygiene_check(domain: str, checks: str | None = None) -> dict[str, Any]:
 
     results: list[dict[str, Any]] = []
     for check_id in selected:
+        category = _CHECK_CATEGORY.get(check_id, "misconfig")
+        cev_id = start_check(category=category, surface=domain, tool=_TOOL_NAME)
         try:
-            results.append(_CHECK_REGISTRY[check_id](domain))
+            r = _CHECK_REGISTRY[check_id](domain)
         except Exception as e:  # noqa: BLE001
-            results.append({"check": check_id, "error": str(e)})
+            r = {"check": check_id, "error": str(e)}
+        results.append(r)
+        verdict, evidence = _verdict_for_check(check_id, r)
+        complete_check(cev_id, verdict, evidence=evidence)
 
     return {
         "success": True,
