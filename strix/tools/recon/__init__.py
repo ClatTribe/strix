@@ -14,11 +14,13 @@ Each tool follows the same contract:
 
 from .cloud_assets import discover_cloud_assets
 from .dns_hygiene import dns_hygiene_check
+from .fingerprint import fingerprint_tech_stack
 from .takeover import subdomain_takeover_check
 
 
 __all__ = [
     "discover_cloud_assets",
     "dns_hygiene_check",
+    "fingerprint_tech_stack",
     "subdomain_takeover_check",
 ]
