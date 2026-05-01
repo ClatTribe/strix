@@ -428,6 +428,17 @@ class Tracer:
         if code_locations:
             report["code_locations"] = code_locations
 
+        # Threat-intel enrichment — fail-open. CWE → OWASP/MITRE comes from
+        # static maps; CVE → KEV from CISA's catalog (cached on disk for 24h).
+        try:
+            from strix.telemetry import threat_intel
+
+            enrichment = threat_intel.enrich(report.get("cwe"), report.get("cve"))
+            if enrichment:
+                report.update(enrichment)
+        except Exception:  # noqa: BLE001
+            logger.warning("threat-intel enrichment failed", exc_info=True)
+
         self.vulnerability_reports.append(report)
         logger.info(f"Added vulnerability report: {report_id} - {title}")
         posthog.finding(severity)
@@ -764,6 +775,23 @@ class Tracer:
                             metadata_fields.append(
                                 ("Verification", report["verification_status"])
                             )
+                        if report.get("owasp_top_10"):
+                            metadata_fields.append(
+                                ("OWASP Top 10", report["owasp_top_10"])
+                            )
+                        if report.get("owasp_api_top_10"):
+                            metadata_fields.append(
+                                ("OWASP API Top 10", report["owasp_api_top_10"])
+                            )
+                        if report.get("mitre_attack"):
+                            metadata_fields.append(
+                                ("MITRE ATT&CK", ", ".join(report["mitre_attack"]))
+                            )
+                        if report.get("is_kev") is True:
+                            kev_label = "yes"
+                            if report.get("kev_added_at"):
+                                kev_label = f"yes (added {report['kev_added_at']})"
+                            metadata_fields.append(("CISA KEV", kev_label))
 
                         for label, value in metadata_fields:
                             if value:
@@ -828,9 +856,8 @@ class Tracer:
                 with vuln_csv_file.open("w", encoding="utf-8", newline="") as f:
                     import csv
 
-                    # New columns (category, verification_status) appended at
-                    # the end so positional readers of the original schema
-                    # keep working.
+                    # Original 5 columns first; new columns appended so
+                    # positional readers keep working.
                     fieldnames = [
                         "id",
                         "title",
@@ -839,11 +866,16 @@ class Tracer:
                         "file",
                         "category",
                         "verification_status",
+                        "owasp_top_10",
+                        "owasp_api_top_10",
+                        "mitre_attack",
+                        "is_kev",
                     ]
                     writer = csv.DictWriter(f, fieldnames=fieldnames)
                     writer.writeheader()
 
                     for report in sorted_reports:
+                        mitre = report.get("mitre_attack") or []
                         writer.writerow(
                             {
                                 "id": report["id"],
@@ -851,6 +883,10 @@ class Tracer:
                                 "severity": report["severity"].upper(),
                                 "category": report.get("category", ""),
                                 "verification_status": report.get("verification_status", ""),
+                                "owasp_top_10": report.get("owasp_top_10", ""),
+                                "owasp_api_top_10": report.get("owasp_api_top_10", ""),
+                                "mitre_attack": ",".join(mitre) if mitre else "",
+                                "is_kev": "" if report.get("is_kev") is None else str(report["is_kev"]).lower(),
                                 "timestamp": report["timestamp"],
                                 "file": f"vulnerabilities/{report['id']}.md",
                             }
