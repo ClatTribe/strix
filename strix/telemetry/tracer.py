@@ -23,6 +23,48 @@ from strix.telemetry.utils import (
 )
 
 
+# Stable finding-fingerprint algorithm (roadmap §11). Documented here as
+# the contract; consumers should use this exact algorithm when building
+# their own dedup. Bump _FINGERPRINT_VERSION when changing — never alter
+# v1 silently, since downstream caches keyed on v1 fingerprints would
+# silently mis-match.
+#
+# Algorithm:
+#   normalize(cwe) + "|" + normalize(endpoint or file) + "|" + first_80_chars(normalize(title))
+#   → sha256 → first 16 hex chars
+#
+# normalize: lowercase, strip whitespace at edges, collapse runs of internal
+# whitespace to a single space. Empty inputs are tolerated (treated as "").
+import hashlib as _hashlib
+import re as _re_fingerprint
+
+_FINGERPRINT_VERSION = 1
+_WS_COLLAPSE = _re_fingerprint.compile(r"\s+")
+
+
+def _fingerprint_normalize(s: str | None) -> str:
+    if not s:
+        return ""
+    return _WS_COLLAPSE.sub(" ", s.strip().lower())
+
+
+def compute_finding_fingerprint(
+    *,
+    title: str | None,
+    cwe: str | None,
+    endpoint: str | None = None,
+    file: str | None = None,
+) -> str:
+    """Stable, deterministic fingerprint for a finding. Same inputs ⇒ same
+    output, across processes / hosts / strix versions on the same algorithm
+    version. Returns 16 lowercase hex characters."""
+    title_part = _fingerprint_normalize(title)[:80]
+    cwe_part = _fingerprint_normalize(cwe)
+    location_part = _fingerprint_normalize(endpoint or file)
+    payload = f"{cwe_part}|{location_part}|{title_part}".encode("utf-8")
+    return _hashlib.sha256(payload).hexdigest()[:16]
+
+
 # Map CWE → semantic category. Filled in for the categories most consumers
 # bucket findings by; missing CWEs leave category unset (caller can supply
 # explicitly via add_vulnerability_report's `category` parameter).
@@ -448,6 +490,26 @@ class Tracer:
         except Exception:  # noqa: BLE001
             logger.warning("threat-intel enrichment failed", exc_info=True)
 
+        # Stable finding fingerprint (roadmap §11). Computed once at write time
+        # over normalized (cwe, endpoint|file, first-80-chars-of-title). The
+        # algorithm is documented in this module; bump _FINGERPRINT_VERSION
+        # when changing.
+        try:
+            file_hint: str | None = None
+            if report.get("code_locations"):
+                first_loc = report["code_locations"][0] if report["code_locations"] else None
+                if isinstance(first_loc, dict):
+                    file_hint = first_loc.get("file")
+            report["fingerprint"] = compute_finding_fingerprint(
+                title=report.get("title"),
+                cwe=report.get("cwe"),
+                endpoint=report.get("endpoint"),
+                file=file_hint,
+            )
+            report["fingerprint_version"] = _FINGERPRINT_VERSION
+        except Exception:  # noqa: BLE001
+            logger.warning("fingerprint computation failed", exc_info=True)
+
         self.vulnerability_reports.append(report)
         logger.info(f"Added vulnerability report: {report_id} - {title}")
         posthog.finding(severity)
@@ -692,6 +754,63 @@ class Tracer:
             "by_category": by_category,
             "not_vulnerable": not_vulnerable,
         }
+
+    def _format_coverage_assertions(self) -> str | None:
+        """Render the negative-coverage section for penetration_test_report.md.
+
+        Returns markdown text, or None when no check events were recorded
+        (in which case we don't claim positive evidence we don't have).
+        Roadmap §11.
+        """
+        summary = self.get_check_summary()
+        if summary["total"] == 0:
+            return None
+
+        not_vuln = summary.get("not_vulnerable") or []
+        by_result = summary.get("by_result") or {}
+        by_category = summary.get("by_category") or {}
+
+        lines: list[str] = ["# Coverage Assertions", ""]
+        lines.append(
+            f"This scan ran **{summary['total']}** checks across "
+            f"**{len(by_category)}** categor"
+            f"{'y' if len(by_category) == 1 else 'ies'}: "
+            f"{by_result.get('vulnerable', 0)} vulnerable, "
+            f"{by_result.get('not_vulnerable', 0)} not vulnerable, "
+            f"{by_result.get('inconclusive', 0)} inconclusive."
+        )
+        lines.append("")
+
+        if not_vuln:
+            # Group not_vulnerable checks by category, list distinct surfaces.
+            by_cat: dict[str, list[str]] = {}
+            for entry in not_vuln:
+                cat = entry.get("category") or "uncategorised"
+                surface = entry.get("surface") or "(no surface recorded)"
+                by_cat.setdefault(cat, []).append(surface)
+
+            lines.append("## Tested and not vulnerable")
+            lines.append("")
+            for cat in sorted(by_cat):
+                surfaces = sorted(set(by_cat[cat]))
+                if len(surfaces) == 1:
+                    lines.append(f"- **{cat}** — `{surfaces[0]}`")
+                else:
+                    surface_list = ", ".join(f"`{s}`" for s in surfaces[:8])
+                    if len(surfaces) > 8:
+                        surface_list += f" (and {len(surfaces) - 8} more)"
+                    lines.append(f"- **{cat}** — {surface_list}")
+            lines.append("")
+
+        if by_result.get("inconclusive", 0) > 0:
+            lines.append(
+                f"_{by_result['inconclusive']} check(s) were inconclusive — "
+                "evidence was observed but couldn't be confirmed via execution. "
+                "Treat these as 'needs review', not 'safe'._"
+            )
+            lines.append("")
+
+        return "\n".join(lines)
 
     def _evaluate_coverage(self, run_dir: Path) -> None:
         """Compute coverage gaps from the required-coverage matrix vs the
@@ -1057,6 +1176,14 @@ class Tracer:
                         f"**Generated:** {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
                     )
                     f.write(f"{self.final_scan_result}\n")
+                    # Append a coverage-assertions section based on the
+                    # check.completed events. Roadmap §11. Only emitted when
+                    # at least one check ran — silence is honest when the
+                    # agent didn't use the check API yet.
+                    coverage_md = self._format_coverage_assertions()
+                    if coverage_md:
+                        f.write("\n")
+                        f.write(coverage_md)
                 logger.info(
                     "Saved final penetration test report to: %s",
                     penetration_test_report_file,
@@ -1088,6 +1215,11 @@ class Tracer:
                         f.write(f"**ID:** {report.get('id', 'unknown')}\n")
                         f.write(f"**Severity:** {report.get('severity', 'unknown').upper()}\n")
                         f.write(f"**Found:** {report.get('timestamp', 'unknown')}\n")
+                        if report.get("fingerprint"):
+                            f.write(
+                                f"**Fingerprint:** {report['fingerprint']} "
+                                f"(v{report.get('fingerprint_version', 1)})\n"
+                            )
 
                         # Existing fields kept in their original positions for
                         # downstream parsers that anchor on order; new fields
@@ -1204,6 +1336,7 @@ class Tracer:
                         "owasp_api_top_10",
                         "mitre_attack",
                         "is_kev",
+                        "fingerprint",
                     ]
                     writer = csv.DictWriter(f, fieldnames=fieldnames)
                     writer.writeheader()
@@ -1221,6 +1354,7 @@ class Tracer:
                                 "owasp_api_top_10": report.get("owasp_api_top_10", ""),
                                 "mitre_attack": ",".join(mitre) if mitre else "",
                                 "is_kev": "" if report.get("is_kev") is None else str(report["is_kev"]).lower(),
+                                "fingerprint": report.get("fingerprint", ""),
                                 "timestamp": report["timestamp"],
                                 "file": f"vulnerabilities/{report['id']}.md",
                             }
