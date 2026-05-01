@@ -1,0 +1,46 @@
+<tools>
+  <tool name="passive_dns_history">
+    <description>Mine passive-DNS history for historical resolutions and known subdomains.
+
+Surfaces stale subdomains that don't currently resolve but historically pointed
+somewhere (defunct cloud projects, internal infra leaked into public passive-DNS
+feeds). Often the highest-value finding source on a domain target — pair the
+discovered subdomains with `subdomain_takeover_check` to flag dangling CNAMEs.
+
+Provider keys (set in the worker environment):
+- `STRIX_SECURITYTRAILS_KEY` — preferred (direct historical-A endpoint).
+- `STRIX_VIRUSTOTAL_KEY` — fallback (free-tier-friendlier).
+
+Fails open when no keys are configured — returns success=False with
+error_reason="no api keys configured" and a hint. The agent should move on to
+other recon tools.
+
+Doesn't emit findings on its own — historical-DNS data is informational.
+Subsequent tools should consume the discovered subdomains.</description>
+    <parameters>
+      <parameter name="domain" type="string" required="true">
+        <description>Apex or subdomain to query (e.g. "example.com" or "app.example.com").</description>
+      </parameter>
+      <parameter name="prefer" type="string" required="false">
+        <description>"securitytrails" or "virustotal". When set and the key is available, that provider is queried alone. When unset, falls back to whichever key(s) are configured.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, domain, providers_queried, results: [...], merged_resolutions, merged_subdomains, merged_subdomain_count}.
+
+Each entry in `results` has the per-provider raw response; `merged_resolutions` is a unified `[{ip, first_seen?, last_seen, type}]` list across providers; `merged_subdomains` is the deduped sorted list of subdomains observed.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<passive_dns_history>
+<parameter=domain>example.com</parameter>
+</passive_dns_history>
+
+<passive_dns_history>
+<parameter=domain>app.example.com</parameter>
+<parameter=prefer>securitytrails</parameter>
+</passive_dns_history>
+]]>
+    </example_usage>
+  </tool>
+</tools>

@@ -1,0 +1,57 @@
+<tools>
+  <tool name="org_fingerprint">
+    <description>Org-level external recon: WHOIS, ASN ownership, GitHub-org presence, and typosquat detection.
+
+This is the "what else does this org expose" check. Wraps four bounded probes:
+
+- **WHOIS** via the sandbox `whois` binary — registrar, creation/expiry dates, nameservers,
+  registrant org and country, DNSSEC status. Privacy-protection markers detected.
+- **ASN ownership** via Team Cymru's DNS-mapped origin zone (no API key) — returns the AS
+  number, prefix, country, registry, and allocation date for the apex IP.
+- **GitHub org presence** — one HEAD per likely org-name candidate (apex label, with/
+  without dashes, common-suffix-stripped). Up to 3 candidates probed.
+- **Typosquats** — ~25 candidates via homoglyph (o↔0, rn↔m), adjacent transposition,
+  one-character deletion, neighbour-key substitution, and alt-TLD variants. Each one is
+  DNS-resolved; resolved candidates get a HEAD probe to see if there's a live website.
+  Any resolved typosquat emits a low-severity `info_disclosure` finding (info severity
+  if no live site, low if there is one).
+
+Use this during recon for any `domain` target. Output is the structured dict — WHOIS
+and ASN data are informational and surface only in the return value, not as findings;
+typosquats that resolve are emitted as findings.
+
+Categories of check events emitted: `org_fingerprint`, `asn_ownership`,
+`github_org_presence`, `typosquat`.</description>
+    <parameters>
+      <parameter name="domain" type="string" required="true">
+        <description>Apex domain (e.g. "example.com" — not a URL, not a subdomain).</description>
+      </parameter>
+      <parameter name="skip_typosquats" type="boolean" required="false">
+        <description>When true, skip the typosquat candidate generation and DNS sweep. Useful for fast pre-flight runs where only WHOIS / ASN / GitHub data is needed.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, domain, whois, asn, github_candidates, typosquats_probed, typosquats_resolved, typosquat_details}.
+
+`whois` keys: registrar, creation_date, expiry_date, registrant_organization, registrant_country, name_servers (list), dnssec, privacy_protected (when detected).
+
+`asn` keys: ip, asn, prefix, country, registry, allocated, lookup_status.
+
+`github_candidates`: list of {name, url, exists, status}.
+
+`typosquat_details`: list of {candidate, resolves, has_web, notes}.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<org_fingerprint>
+<parameter=domain>example.com</parameter>
+</org_fingerprint>
+
+<org_fingerprint>
+<parameter=domain>example.com</parameter>
+<parameter=skip_typosquats>true</parameter>
+</org_fingerprint>
+]]>
+    </example_usage>
+  </tool>
+</tools>
