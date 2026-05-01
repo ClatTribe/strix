@@ -693,6 +693,70 @@ class Tracer:
             "not_vulnerable": not_vulnerable,
         }
 
+    def _evaluate_coverage(self, run_dir: Path) -> None:
+        """Compute coverage gaps from the required-coverage matrix vs the
+        categories that actually have a check.completed event. Emits a
+        `run.coverage_gap` event and persists `coverage.json`. Roadmap §7.0.
+        """
+        from strix.telemetry import coverage as coverage_module
+
+        target_types: list[str] = []
+        for t in self.run_metadata.get("targets") or []:
+            if isinstance(t, dict) and t.get("type"):
+                target_types.append(str(t["type"]))
+            elif isinstance(t, str):
+                # When targets were stored as strings (older callers), we can't
+                # infer type — skip.
+                continue
+
+        # Dedup while preserving insertion order.
+        seen: set[str] = set()
+        unique_target_types: list[str] = []
+        for tt in target_types:
+            if tt not in seen:
+                seen.add(tt)
+                unique_target_types.append(tt)
+
+        completed_categories = {c.get("category") for c in self._completed_checks if c.get("category")}
+        scan_mode = self.run_metadata.get("scan_mode") or "standard"
+
+        report = coverage_module.compute_gaps(
+            target_types=unique_target_types,
+            scan_mode=scan_mode,
+            completed_categories={c for c in completed_categories if c},
+        )
+
+        # Persist artifact regardless of status — consumers may want to record
+        # "no_matrix" runs so they can compare across scan modes.
+        try:
+            coverage_file = run_dir / "coverage.json"
+            with coverage_file.open("w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "schema_version": 1,
+                        "run_id": self.run_id,
+                        "run_name": self.run_name,
+                        "generated_at": datetime.now(UTC).isoformat(),
+                        **report,
+                    },
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+        except (OSError, TypeError):
+            logger.warning("Failed to write coverage.json", exc_info=True)
+
+        # Only emit a gap event when there's meaningful information — either
+        # gaps exist or full coverage was achieved (so consumers see the
+        # "complete" status as positive evidence, not silence).
+        if report["status"] in ("incomplete", "complete"):
+            self._emit_event(
+                "run.coverage_gap" if report["status"] == "incomplete" else "run.coverage_complete",
+                payload=report,
+                status=report["status"],
+                source="strix.run",
+            )
+
     def update_scan_final_fields(
         self,
         executive_summary: str,
@@ -972,6 +1036,18 @@ class Tracer:
                         )
             except (OSError, TypeError):
                 logger.warning("Failed to write checks_summary.json", exc_info=True)
+
+            # Coverage matrix evaluation (roadmap §7.0). Compares the required
+            # category set per (target_type, scan_mode) against the categories
+            # that actually have a `check.completed` event. Emits one
+            # `run.coverage_gap` event per scan and persists `coverage.json`.
+            # Only runs at run completion (mark_complete=True) — a partial
+            # save during the run shouldn't claim coverage.
+            if mark_complete:
+                try:
+                    self._evaluate_coverage(run_dir)
+                except Exception:  # noqa: BLE001
+                    logger.warning("coverage evaluation failed", exc_info=True)
 
             if self.final_scan_result:
                 penetration_test_report_file = run_dir / "penetration_test_report.md"
