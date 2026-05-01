@@ -92,6 +92,20 @@ Each metric element contains a single uppercase letter value:
 You must be 100% certain of the exact CVE number. Do NOT guess, approximate, or hallucinate CVE IDs.
 If web_search is available, use it to verify the CVE exists and matches this vulnerability. If you cannot verify it, omit this field entirely.</description>
       </parameter>
+      <parameter name="category" type="string" required="false">
+        <description>Semantic category for this finding, drawn from the strix enum. Pick exactly one of:
+sqli, xss, cmd_injection, ssrf, auth, authz, idor, crypto, info_disclosure, csrf, path_traversal, misconfig, race_condition, open_redirect, deserialization, mass_assignment, ssti, xxe, request_smuggling, cache_poisoning, subdomain_takeover, cors, jwt, oauth, graphql, mobile_api, dependency, secret_exposure, dns_security, email_security, other.
+
+If omitted, strix infers a category from the CWE you supply. Provide it explicitly when CWE alone is ambiguous (e.g., a misconfig you'd file under email_security or dns_security rather than the generic CWE-1278 → misconfig fallback).</description>
+      </parameter>
+      <parameter name="verification_status" type="string" required="false">
+        <description>How confident you are in this finding. One of:
+- "verified" — you ran a working PoC and observed the vulnerable response. Set this when poc_script_code actually executed and exhibited the bug.
+- "pattern_match" — you saw a clear vulnerable pattern (signature, regex, code shape) but didn't execute an exploit.
+- "inconclusive" — you saw evidence the issue is likely present but couldn't confirm via execution or by inspecting a definitive pattern.
+
+If omitted, strix defaults to "verified" when poc_script_code is non-empty, otherwise "inconclusive".</description>
+      </parameter>
       <parameter name="cwe" type="string" required="false">
         <description>CWE identifier. ONLY the ID, e.g. "CWE-89" — do NOT include the name or parenthetical (wrong: "CWE-89 (SQL Injection)").
 

@@ -23,6 +23,55 @@ from strix.telemetry.utils import (
 )
 
 
+# Map CWE → semantic category. Filled in for the categories most consumers
+# bucket findings by; missing CWEs leave category unset (caller can supply
+# explicitly via add_vulnerability_report's `category` parameter).
+_CWE_TO_CATEGORY: dict[str, str] = {
+    "CWE-22": "path_traversal",
+    "CWE-78": "cmd_injection",
+    "CWE-79": "xss",
+    "CWE-89": "sqli",
+    "CWE-94": "cmd_injection",
+    "CWE-200": "info_disclosure",
+    "CWE-209": "info_disclosure",
+    "CWE-269": "authz",
+    "CWE-285": "authz",
+    "CWE-287": "auth",
+    "CWE-306": "misconfig",
+    "CWE-319": "crypto",
+    "CWE-326": "crypto",
+    "CWE-327": "crypto",
+    "CWE-347": "jwt",
+    "CWE-352": "csrf",
+    "CWE-434": "misconfig",
+    "CWE-489": "misconfig",
+    "CWE-502": "deserialization",
+    "CWE-548": "misconfig",
+    "CWE-601": "open_redirect",
+    "CWE-611": "xxe",
+    "CWE-639": "idor",
+    "CWE-732": "misconfig",
+    "CWE-798": "info_disclosure",
+    "CWE-862": "authz",
+    "CWE-863": "authz",
+    "CWE-915": "mass_assignment",
+    "CWE-918": "ssrf",
+    "CWE-943": "sqli",
+    "CWE-1104": "misconfig",
+    "CWE-1278": "misconfig",
+    "CWE-1390": "subdomain_takeover",
+}
+
+
+def _infer_category_from_cwe(cwe: str | None) -> str | None:
+    if not cwe:
+        return None
+    key = cwe.strip().upper()
+    if not key.startswith("CWE-") and key.isdigit():
+        key = f"CWE-{key}"
+    return _CWE_TO_CATEGORY.get(key)
+
+
 try:
     from traceloop.sdk import Traceloop
 except ImportError:  # pragma: no cover - exercised when dependency is absent
@@ -305,7 +354,7 @@ class Tracer:
 
         return self._run_dir
 
-    def add_vulnerability_report(  # noqa: PLR0912
+    def add_vulnerability_report(  # noqa: PLR0912, PLR0913
         self,
         title: str,
         severity: str,
@@ -323,15 +372,32 @@ class Tracer:
         cve: str | None = None,
         cwe: str | None = None,
         code_locations: list[dict[str, Any]] | None = None,
+        category: str | None = None,
+        verification_status: str | None = None,
     ) -> str:
         report_id = f"vuln-{len(self.vulnerability_reports) + 1:04d}"
+
+        # Auto-infer category from CWE if not explicitly provided. Keeps the
+        # field populated even when older agent prompts don't supply it.
+        if not category and cwe:
+            category = _infer_category_from_cwe(cwe)
+
+        # verification_status defaults to "verified" when a working PoC script
+        # was supplied (the agent ran an exploit). Otherwise "inconclusive" —
+        # the agent saw evidence but didn't confirm via execution. The agent
+        # can override either default by passing the field explicitly.
+        if not verification_status:
+            verification_status = "verified" if poc_script_code else "inconclusive"
 
         report: dict[str, Any] = {
             "id": report_id,
             "title": title.strip(),
             "severity": severity.lower().strip(),
             "timestamp": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "verification_status": verification_status.strip().lower(),
         }
+        if category:
+            report["category"] = category.strip().lower()
 
         if description:
             report["description"] = description.strip()
@@ -594,6 +660,9 @@ class Tracer:
                 "targets": config.get("targets", []),
                 "user_instructions": config.get("user_instructions", ""),
                 "max_iterations": config.get("max_iterations", 200),
+                "scan_mode": config.get("scan_mode"),
+                "scope_mode": config.get("scope_mode"),
+                "model_name": config.get("model_name") or Config.get("strix_llm"),
             }
         )
         self._set_association_properties(
@@ -619,6 +688,21 @@ class Tracer:
                     self.end_time = datetime.now(UTC).isoformat()
                 self.run_metadata["end_time"] = self.end_time
                 self.run_metadata["status"] = "completed"
+
+            # Always write run_meta.json — small, idempotent, lets any consumer
+            # reconstruct the scan config from a structured artifact instead of
+            # parsing CLI args or env vars at runtime. Roadmap §5.
+            try:
+                run_meta_file = run_dir / "run_meta.json"
+                with run_meta_file.open("w", encoding="utf-8") as f:
+                    json.dump(
+                        self._sanitize_data(self.run_metadata),
+                        f,
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+            except (OSError, TypeError):
+                logger.warning("Failed to write run_meta.json", exc_info=True)
 
             if self.final_scan_result:
                 penetration_test_report_file = run_dir / "penetration_test_report.md"
@@ -660,6 +744,10 @@ class Tracer:
                         f.write(f"**Severity:** {report.get('severity', 'unknown').upper()}\n")
                         f.write(f"**Found:** {report.get('timestamp', 'unknown')}\n")
 
+                        # Existing fields kept in their original positions for
+                        # downstream parsers that anchor on order; new fields
+                        # (Category, Verification) appended at the end of the
+                        # metadata block.
                         metadata_fields: list[tuple[str, Any]] = [
                             ("Target", report.get("target")),
                             ("Endpoint", report.get("endpoint")),
@@ -670,6 +758,12 @@ class Tracer:
                         cvss_score = report.get("cvss")
                         if cvss_score is not None:
                             metadata_fields.append(("CVSS", cvss_score))
+                        if report.get("category"):
+                            metadata_fields.append(("Category", report["category"]))
+                        if report.get("verification_status"):
+                            metadata_fields.append(
+                                ("Verification", report["verification_status"])
+                            )
 
                         for label, value in metadata_fields:
                             if value:
@@ -734,7 +828,18 @@ class Tracer:
                 with vuln_csv_file.open("w", encoding="utf-8", newline="") as f:
                     import csv
 
-                    fieldnames = ["id", "title", "severity", "timestamp", "file"]
+                    # New columns (category, verification_status) appended at
+                    # the end so positional readers of the original schema
+                    # keep working.
+                    fieldnames = [
+                        "id",
+                        "title",
+                        "severity",
+                        "timestamp",
+                        "file",
+                        "category",
+                        "verification_status",
+                    ]
                     writer = csv.DictWriter(f, fieldnames=fieldnames)
                     writer.writeheader()
 
@@ -744,10 +849,32 @@ class Tracer:
                                 "id": report["id"],
                                 "title": report["title"],
                                 "severity": report["severity"].upper(),
+                                "category": report.get("category", ""),
+                                "verification_status": report.get("verification_status", ""),
                                 "timestamp": report["timestamp"],
                                 "file": f"vulnerabilities/{report['id']}.md",
                             }
                         )
+
+                # vulnerabilities.json — full structured dump of every finding
+                # with all fields the agent set. Same data as the per-finding
+                # markdown, no parsing required. Roadmap §5.
+                vuln_json_file = run_dir / "vulnerabilities.json"
+                with vuln_json_file.open("w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "schema_version": 1,
+                            "run_id": self.run_id,
+                            "run_name": self.run_name,
+                            "generated_at": datetime.now(UTC).isoformat(),
+                            "count": len(sorted_reports),
+                            "findings": sorted_reports,
+                        },
+                        f,
+                        indent=2,
+                        ensure_ascii=False,
+                        default=str,
+                    )
 
                 if new_reports:
                     logger.info(

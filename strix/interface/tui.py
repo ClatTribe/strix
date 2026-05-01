@@ -743,6 +743,8 @@ class StrixTUIApp(App):  # type: ignore[misc]
             "user_instructions": args.instruction or "",
             "run_name": args.run_name,
             "diff_scope": getattr(args, "diff_scope", {"active": False}),
+            "scan_mode": getattr(args, "scan_mode", "deep"),
+            "scope_mode": getattr(args, "scope_mode", "auto"),
         }
 
     def _build_agent_config(self, args: argparse.Namespace) -> dict[str, Any]:
