@@ -14,6 +14,7 @@ Each tool follows the same contract:
 
 from .cloud_assets import discover_cloud_assets
 from .dns_hygiene import dns_hygiene_check
+from .domain_pipeline import domain_recon_pipeline
 from .fingerprint import fingerprint_tech_stack
 from .org_recon import org_fingerprint
 from .passive_dns import passive_dns_history
@@ -24,6 +25,7 @@ from .takeover import subdomain_takeover_check
 __all__ = [
     "discover_cloud_assets",
     "dns_hygiene_check",
+    "domain_recon_pipeline",
     "fingerprint_tech_stack",
     "org_fingerprint",
     "passive_dns_history",
