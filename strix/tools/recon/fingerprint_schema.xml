@@ -1,0 +1,56 @@
+<tools>
+  <tool name="fingerprint_tech_stack">
+    <description>Detect the target's tech stack and auto-load the matching strix skills into this agent's prompt context.
+
+This tool is the deterministic complement to the agent's `load_skill` decision-making.
+When the target's stack is unambiguous (X-Powered-By: Next.js, Firebase JS SDK in body,
+Set-Cookie: laravel_session=..., etc.), the relevant skill loads automatically — no
+follow-up load_skill call needed.
+
+Mechanism: 1-2 cheap HTTP requests (HEAD + GET, 8s timeout each) to the target's root
+URL. Parses response headers, Set-Cookie, and a 32 KiB body window for well-known
+tech-stack markers. For each high-confidence detection that maps to a strix skill,
+calls the same skill-loader as `load_skill`. Caps loaded skills at 5 (the same limit
+load_skill enforces).
+
+When to use: ALWAYS at the start of recon for any web target. The output gives you the
+tech stack to reason about plus the skills you can rely on being loaded going forward.
+For pure DNS/domain recon (no HTTP probing), this tool is not the right fit — use
+dns_hygiene_check + subdomain_takeover_check instead.
+
+Categories of detection: web frameworks (Next.js, NestJS, FastAPI, Express, Django,
+Rails, Laravel, ASP.NET, PHP), CMS (WordPress, Drupal, Joomla, Shopify), JS frameworks
+(React, Angular, Vue, Nuxt), Backend-as-a-Service (Firebase, Supabase), CDN/WAF
+(Cloudflare, Akamai), and via deep mode: GraphQL endpoints.
+
+Side effect: skills get loaded into the agent's prompt. `skills_loaded` in the return
+value is the authoritative list of what landed.</description>
+    <parameters>
+      <parameter name="target" type="string" required="true">
+        <description>Full URL to probe, e.g. "https://example.com/" or "http://api.example.com:8080/". Domain-only inputs are auto-prefixed with https://. The tool always probes the root URL (`/`), regardless of any path component supplied.</description>
+      </parameter>
+      <parameter name="deep" type="boolean" required="false">
+        <description>When true, also POST a focused GraphQL introspection probe to common paths (/graphql, /api/graphql, /v1/graphql, /graphiql). Default false to keep network footprint minimal.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target, probe_url, http_status, technologies: [...], recommended_skills, skills_loaded, newly_loaded_skills, skill_load_error}.
+
+Each entry in `technologies` is {technology, label, confidence (high|medium|low), evidence, [version], [skill]}.
+
+`skills_loaded` is the authoritative list of skills now in the agent's prompt context.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<fingerprint_tech_stack>
+<parameter=target>https://app.example.com/</parameter>
+</fingerprint_tech_stack>
+
+<fingerprint_tech_stack>
+<parameter=target>https://api.example.com</parameter>
+<parameter=deep>true</parameter>
+</fingerprint_tech_stack>
+]]>
+    </example_usage>
+  </tool>
+</tools>
