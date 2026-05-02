@@ -421,8 +421,9 @@ def _format_next_steps(surface_map: dict[str, Any]) -> list[str]:
     out: list[str] = []
     if summary.get("deep_targets", 0) > 0:
         out.append(
-            f"{summary['deep_targets']} deep target(s) — invoke web-app exploit "
-            f"reasoning per host (consult `deep_targets`)."
+            f"{summary['deep_targets']} deep target(s) — call `spawn_webapp_subteam` "
+            f"with the `deep_targets` list to hand off one focused web-app sub-agent "
+            f"per host (default cap 5; tighten with `max_subteams` if needed)."
         )
     if summary.get("takeover_candidates", 0) > 0:
         out.append(
