@@ -1207,10 +1207,12 @@ class Tracer:
         name: str,
         task: str,
         parent_id: str | None = None,
+        category: str | None = None,
     ) -> None:
         agent_data: dict[str, Any] = {
             "id": agent_id,
             "name": name,
+            "category": category,
             "task": task,
             "status": "running",
             "parent_id": parent_id,
@@ -1223,7 +1225,7 @@ class Tracer:
         self._emit_event(
             "agent.created",
             actor={"agent_id": agent_id, "agent_name": name},
-            payload={"task": task, "parent_id": parent_id},
+            payload={"task": task, "parent_id": parent_id, "category": category},
             status="running",
             source="strix.agents",
         )
