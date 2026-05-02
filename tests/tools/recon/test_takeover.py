@@ -249,6 +249,149 @@ def test_unknown_provider_in_new_set_no_finding(monkeypatch, tmp_path) -> None:
 
 
 def test_provider_count_exceeds_legacy(monkeypatch, tmp_path) -> None:
-    """Sanity check on the table — should be at least 30 providers post-expansion."""
+    """Sanity check on the table — should be 60+ providers post-expansion."""
     from strix.tools.recon.takeover import _PROVIDERS
-    assert len(_PROVIDERS) >= 30
+    assert len(_PROVIDERS) >= 60
+
+
+# ---------------------------------------------------------------------------
+# 38 → 60+ provider expansion smoke tests
+# ---------------------------------------------------------------------------
+
+
+def test_webflow_unclaimed(monkeypatch) -> None:
+    _patch(
+        monkeypatch,
+        cnames={"site.example.com": "myproject.webflow.io."},
+        bodies={
+            "https://site.example.com/": (
+                404,
+                "The page you are looking for doesn't exist or has been moved",
+            )
+        },
+    )
+    out = takeover.subdomain_takeover_check(
+        "example.com", subdomains="site.example.com"
+    )
+    assert out["results"][0]["provider"] == "webflow"
+    assert out["results"][0]["verification_status"] == "verified"
+
+
+def test_hubspot_unclaimed(monkeypatch) -> None:
+    _patch(
+        monkeypatch,
+        cnames={"info.example.com": "abc.hs-sites.com."},
+        bodies={"https://info.example.com/": (404, "Domain not found")},
+    )
+    out = takeover.subdomain_takeover_check(
+        "example.com", subdomains="info.example.com"
+    )
+    assert out["results"][0]["provider"] == "hubspot"
+
+
+def test_helpscout_unclaimed(monkeypatch) -> None:
+    _patch(
+        monkeypatch,
+        cnames={"docs.example.com": "abc.helpscoutdocs.com."},
+        bodies={
+            "https://docs.example.com/": (
+                404,
+                "No settings were found for this company",
+            )
+        },
+    )
+    out = takeover.subdomain_takeover_check(
+        "example.com", subdomains="docs.example.com"
+    )
+    assert out["results"][0]["provider"] == "helpscout"
+
+
+def test_ngrok_unclaimed_is_high_severity(monkeypatch) -> None:
+    _patch(
+        monkeypatch,
+        cnames={"tunnel.example.com": "abc123.ngrok.io."},
+        bodies={"https://tunnel.example.com/": (404, "Tunnel <tunnel> not found")},
+    )
+    out = takeover.subdomain_takeover_check(
+        "example.com", subdomains="tunnel.example.com"
+    )
+    assert out["results"][0]["provider"] == "ngrok"
+    assert out["results"][0]["severity"] == "high"
+
+
+def test_uservoice_unclaimed(monkeypatch) -> None:
+    _patch(
+        monkeypatch,
+        cnames={"feedback.example.com": "abc.uservoice.com."},
+        bodies={
+            "https://feedback.example.com/": (
+                404,
+                "This UserVoice subdomain is currently available!",
+            )
+        },
+    )
+    out = takeover.subdomain_takeover_check(
+        "example.com", subdomains="feedback.example.com"
+    )
+    assert out["results"][0]["provider"] == "uservoice"
+
+
+def test_substack_unclaimed(monkeypatch) -> None:
+    _patch(
+        monkeypatch,
+        cnames={"newsletter.example.com": "myorg.substack.com."},
+        bodies={"https://newsletter.example.com/": (404, "This page does not exist")},
+    )
+    out = takeover.subdomain_takeover_check(
+        "example.com", subdomains="newsletter.example.com"
+    )
+    assert out["results"][0]["provider"] == "substack"
+
+
+def test_carrd_unclaimed(monkeypatch) -> None:
+    _patch(
+        monkeypatch,
+        cnames={"page.example.com": "abc.carrd.co."},
+        bodies={"https://page.example.com/": (404, "This site is unavailable")},
+    )
+    out = takeover.subdomain_takeover_check(
+        "example.com", subdomains="page.example.com"
+    )
+    assert out["results"][0]["provider"] == "carrd"
+
+
+def test_kajabi_unclaimed(monkeypatch) -> None:
+    _patch(
+        monkeypatch,
+        cnames={"course.example.com": "abc.mykajabi.com."},
+        bodies={
+            "https://course.example.com/": (
+                404,
+                "The page you were looking for doesn't exist",
+            )
+        },
+    )
+    out = takeover.subdomain_takeover_check(
+        "example.com", subdomains="course.example.com"
+    )
+    assert out["results"][0]["provider"] == "kajabi"
+
+
+def test_provider_names_are_unique(monkeypatch) -> None:
+    """No duplicate names across the expanded provider table."""
+    from strix.tools.recon.takeover import _PROVIDERS
+    names = [p["name"] for p in _PROVIDERS]
+    assert len(names) == len(set(names)), f"duplicate provider names: {names}"
+
+
+def test_each_provider_has_required_keys() -> None:
+    """Every provider entry must have name / cname_pattern / fingerprint / severity."""
+    from strix.tools.recon.takeover import _PROVIDERS
+
+    for entry in _PROVIDERS:
+        assert "name" in entry, f"missing name: {entry}"
+        assert "cname_pattern" in entry, f"missing cname_pattern: {entry['name']}"
+        assert "fingerprint" in entry, f"missing fingerprint: {entry['name']}"
+        assert entry["severity"] in (
+            "info", "low", "medium", "high", "critical"
+        ), f"bad severity for {entry['name']}: {entry.get('severity')}"
