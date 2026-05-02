@@ -81,7 +81,23 @@ def _patch_underlying(
         lambda **kw: cloud_result or {"success": True, "hit_count": 0, "hits": []},
     )
 
-    monkeypatch.setattr(dp, "_subfinder_enumerate", lambda d: subfinder_subs or [])
+    # Pipeline now delegates to strix.tools.recon.subdomain_enum_tool.subdomain_enum.
+    # Mock the public function on the module the pipeline imports.
+    from strix.tools.recon import subdomain_enum_tool as _subdomain_enum_mod
+
+    enum_subs_list = subfinder_subs or []  # legacy parameter name; treats as enum result
+
+    def fake_subdomain_enum(domain, **kw):
+        return {
+            "success": True,
+            "domain": domain,
+            "subdomains": enum_subs_list,
+            "per_source_counts": {"subfinder": len(enum_subs_list)},
+            "sources_run": ["subfinder"],
+            "total_unique": len(enum_subs_list),
+        }
+
+    monkeypatch.setattr(_subdomain_enum_mod, "subdomain_enum", fake_subdomain_enum)
 
     triage_map = triage_responses or {}
 

@@ -1,0 +1,62 @@
+<tools>
+  <tool name="subdomain_enum">
+    <description>Multi-source subdomain enumeration with bounded per-source budgets.
+
+Replaces single-source subfinder enumeration with five complementary sources:
+
+- **subfinder** — passive (CT logs, common providers). ~5–50 results typical.
+- **amass** — deeper active+passive enum. Bigger, slower, finds more.
+- **dns_bruteforce** — query each entry in a wordlist against the apex.
+  Default wordlist is ~150 common names. Custom wordlist via `wordlist=<path>`.
+- **wayback** — query archive.org's CDX API for historical URLs containing
+  the apex; extract subdomains. No API key required.
+- **permutations** — apply `prod-` / `staging-` / `-internal` etc. transformations
+  to already-discovered seeds; resolve each candidate. Auto-uses results from
+  the other sources as seeds; can be overridden via `permutation_seeds`.
+
+Each source emits one `check.started` / `check.completed` event (category
+= `subdomain_enum`). Each source is bounded by `max_per_source` to cap total
+network volume.
+
+Use this in place of relying on subfinder alone — typical real-world coverage
+gains are 5–10× the subfinder-only count.
+
+Used internally by `domain_recon_pipeline` (replacing the previous single-
+source enumeration step).</description>
+    <parameters>
+      <parameter name="domain" type="string" required="true">
+        <description>Apex domain to enumerate (e.g. "example.com").</description>
+      </parameter>
+      <parameter name="sources" type="string" required="false">
+        <description>Comma-separated subset of {subfinder, amass, dns_bruteforce, wayback, permutations}. Default: "default" runs subfinder + amass + dns_bruteforce + wayback (permutations auto-runs after if seeds were found). "all" runs everything explicitly. Subset like "subfinder,wayback" restricts.</description>
+      </parameter>
+      <parameter name="wordlist" type="string" required="false">
+        <description>Path to a custom wordlist file (one entry per line, # comments). Used by dns_bruteforce. Defaults to a built-in ~150-name list of common subdomain prefixes.</description>
+      </parameter>
+      <parameter name="max_per_source" type="integer" required="false">
+        <description>Hard cap on subdomains kept per source. Default 1000. Caps total network volume; bruteforce respects this before iterating the rest of the wordlist.</description>
+      </parameter>
+      <parameter name="permutation_seeds" type="string" required="false">
+        <description>Comma-separated subdomains to use as permutation seeds. When omitted, the union of other sources' results is used.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, domain, sources_run, per_source_counts, subdomains, total_unique}.
+
+`per_source_counts` shows how many each source contributed before deduplication. `subdomains` is the merged + deduped + sorted list.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<subdomain_enum>
+<parameter=domain>example.com</parameter>
+</subdomain_enum>
+
+<subdomain_enum>
+<parameter=domain>example.com</parameter>
+<parameter=sources>wayback,permutations</parameter>
+<parameter=permutation_seeds>api.example.com,blog.example.com</parameter>
+</subdomain_enum>
+]]>
+    </example_usage>
+  </tool>
+</tools>
