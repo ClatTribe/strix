@@ -191,11 +191,217 @@ def _probe_azure_blob(name: str) -> dict[str, Any] | None:
     return None
 
 
-_PROBES = {
-    "s3": _probe_s3,
-    "gcs": _probe_gcs,
-    "azure": _probe_azure_blob,
+# ---------------------------------------------------------------------------
+# PaaS-platform probes (Heroku / Vercel / Netlify / GitHub Pages /
+# Firebase Hosting / Supabase).
+#
+# These platforms host org-named projects at predictable subdomains. Existence
+# alone is informational (info-severity); a 200 OK confirms the namespace is
+# owned. Pairs naturally with subdomain_takeover_check for follow-up — if
+# the project's CNAME shape suggests it's been abandoned, that's a takeover
+# candidate.
+# ---------------------------------------------------------------------------
+
+
+def _paas_candidate_names(
+    org: str, extra_suffixes: list[str] | None = None
+) -> list[str]:
+    """PaaS app-names tend to be simple — just the org name plus a few
+    common suffixes. Smaller candidate set than the storage-bucket generator."""
+    suffixes = ["", "-prod", "-staging", "-dev", "-app", "-web", "-api", "-docs"]
+    if extra_suffixes:
+        suffixes.extend(extra_suffixes)
+    base = org.lower().split(".")[0]
+    seen: set[str] = set()
+    out: list[str] = []
+    for suffix in suffixes:
+        name = f"{base}{suffix}"
+        if 3 <= len(name) <= 63 and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def _probe_heroku(name: str) -> dict[str, Any] | None:
+    url = f"https://{name}.herokuapp.com/"
+    status, _ = http_head(url, follow_redirects=False)
+    if status == 0:
+        return None
+    if status == 200 or (300 <= status < 400):
+        return {
+            "provider": "heroku",
+            "name": name,
+            "url": url,
+            "status": status,
+            "severity": "info",
+            "reason": "Heroku app exists at this name. Confirms org-namespace ownership.",
+            "category": "info_disclosure",
+            "cwe": "CWE-200",
+        }
+    return None
+
+
+def _probe_vercel(name: str) -> dict[str, Any] | None:
+    url = f"https://{name}.vercel.app/"
+    status, _ = http_head(url, follow_redirects=False)
+    if status == 0:
+        return None
+    # Vercel returns 200 for live deployments, 404 for unclaimed (which the
+    # takeover tool handles separately). Anything 2xx/3xx → exists.
+    if status == 200 or (300 <= status < 400):
+        return {
+            "provider": "vercel",
+            "name": name,
+            "url": url,
+            "status": status,
+            "severity": "info",
+            "reason": "Vercel project deployed at this name. Confirms namespace ownership.",
+            "category": "info_disclosure",
+            "cwe": "CWE-200",
+        }
+    return None
+
+
+def _probe_netlify(name: str) -> dict[str, Any] | None:
+    url = f"https://{name}.netlify.app/"
+    status, _ = http_head(url, follow_redirects=False)
+    if status == 0:
+        return None
+    if status == 200 or (300 <= status < 400):
+        return {
+            "provider": "netlify",
+            "name": name,
+            "url": url,
+            "status": status,
+            "severity": "info",
+            "reason": "Netlify site deployed at this name. Confirms namespace ownership.",
+            "category": "info_disclosure",
+            "cwe": "CWE-200",
+        }
+    return None
+
+
+def _probe_github_pages(name: str) -> dict[str, Any] | None:
+    """github.io subdomains follow `<org>.github.io` (org page) and
+    `<org>.github.io/<repo>` (project page). HEAD on the org URL only."""
+    url = f"https://{name}.github.io/"
+    status, _ = http_head(url, follow_redirects=False)
+    if status == 0:
+        return None
+    if status == 200 or (300 <= status < 400):
+        return {
+            "provider": "github_pages",
+            "name": name,
+            "url": url,
+            "status": status,
+            "severity": "info",
+            "reason": (
+                "GitHub Pages org-page exists. Source repo may be public — "
+                "review for accidental commits of internal docs / config."
+            ),
+            "category": "info_disclosure",
+            "cwe": "CWE-200",
+        }
+    return None
+
+
+def _probe_firebase_hosting(name: str) -> dict[str, Any] | None:
+    """Firebase Hosting projects are reachable at both <name>.web.app and
+    <name>.firebaseapp.com. Probe the canonical .web.app first."""
+    url = f"https://{name}.web.app/"
+    status, _ = http_head(url, follow_redirects=False)
+    if status == 0:
+        return None
+    if status == 200 or (300 <= status < 400):
+        return {
+            "provider": "firebase_hosting",
+            "name": name,
+            "url": url,
+            "status": status,
+            "severity": "info",
+            "reason": (
+                "Firebase Hosting project deployed. Check Firebase rules + "
+                "Firestore/RTDB security rules for misconfigurations."
+            ),
+            "category": "info_disclosure",
+            "cwe": "CWE-200",
+        }
+    return None
+
+
+def _probe_supabase(name: str) -> dict[str, Any] | None:
+    """Supabase projects are reachable at <name>.supabase.co. The unauthenticated
+    REST endpoint typically returns 200 with `{"hint":"..."}` for live projects."""
+    url = f"https://{name}.supabase.co/"
+    status, _ = http_head(url, follow_redirects=False)
+    if status == 0:
+        return None
+    if status == 200 or status == 401 or (300 <= status < 400):
+        # 200/401 are both indicators of a live project.
+        return {
+            "provider": "supabase",
+            "name": name,
+            "url": url,
+            "status": status,
+            "severity": "info",
+            "reason": (
+                "Supabase project exists. Check anon-key exposure + Row-Level "
+                "Security policies on the public schema."
+            ),
+            "category": "info_disclosure",
+            "cwe": "CWE-200",
+        }
+    return None
+
+
+# Map provider → (probe-fn, candidate-fn). Storage providers use the
+# bucket-style permutation list; PaaS providers use the simpler app-name
+# generator since their project namespace is usually less elaborate.
+_PROVIDER_INFO: dict[str, dict[str, Any]] = {
+    "s3": {"probe": _probe_s3, "candidates": _candidate_names},
+    "gcs": {"probe": _probe_gcs, "candidates": _candidate_names},
+    "azure": {"probe": _probe_azure_blob, "candidates": _candidate_names},
+    "heroku": {"probe": _probe_heroku, "candidates": _paas_candidate_names},
+    "vercel": {"probe": _probe_vercel, "candidates": _paas_candidate_names},
+    "netlify": {"probe": _probe_netlify, "candidates": _paas_candidate_names},
+    "github_pages": {"probe": _probe_github_pages, "candidates": _paas_candidate_names},
+    "firebase": {"probe": _probe_firebase_hosting, "candidates": _paas_candidate_names},
+    "supabase": {"probe": _probe_supabase, "candidates": _paas_candidate_names},
 }
+
+# Backward-compat alias for any direct callers.
+_PROBES = {k: v["probe"] for k, v in _PROVIDER_INFO.items()}
+
+
+_STORAGE_IMPACT = (
+    "Public cloud storage buckets named after an organization "
+    "are a classic source of leaked data (backups, customer "
+    "uploads, log exports, build artifacts). Even a bucket "
+    "that returns 403 to anonymous listing is significant — "
+    "it confirms the namespace is owned and may be exposed "
+    "via direct-object reads if object names can be guessed."
+)
+_STORAGE_REMEDIATION = (
+    "Disable public access on the bucket, or — if public "
+    "intentional — restrict to read-only of explicit prefixes "
+    "and ensure no sensitive data is ever written there. Audit "
+    "object ACLs across the bucket."
+)
+_PAAS_IMPACT = (
+    "An org-named PaaS deployment confirms the namespace is owned and "
+    "broadens the external attack surface. Pair with subdomain_takeover "
+    "checks for follow-up — abandoned projects on Heroku/Vercel/Netlify "
+    "are a common takeover vector. For Firebase / Supabase, the existence "
+    "of the project is a prompt to audit security rules and anonymous "
+    "API access."
+)
+_PAAS_REMEDIATION = (
+    "Inventory all PaaS deployments under the org's name; decommission "
+    "stale apps. For active projects, audit access control: Firebase "
+    "Security Rules, Supabase Row-Level Security, Heroku/Vercel/Netlify "
+    "environment-variable exposure, and any unauthenticated endpoints."
+)
+_STORAGE_PROVIDERS = {"s3", "gcs", "azure"}
 
 
 @register_tool(sandbox_execution=True)
@@ -209,7 +415,8 @@ def discover_cloud_assets(
     Args:
         org_name: organization or domain name to derive bucket candidates from
                   (e.g. "example" or "example.com" — the leftmost label is used).
-        providers: comma-separated subset of {s3, gcs, azure}. Default: all.
+        providers: comma-separated subset of {s3, gcs, azure, heroku, vercel,
+                   netlify, github_pages, firebase, supabase}. Default: all.
         extra_suffixes: comma-separated suffix list to append to the default
                         wordlist (e.g. ",-customer-data,-tenant-uploads").
 
@@ -220,10 +427,10 @@ def discover_cloud_assets(
         return {"success": False, "error": "org_name required"}
 
     if providers is None or providers.strip().lower() == "all":
-        active_providers = list(_PROBES.keys())
+        active_providers = list(_PROVIDER_INFO.keys())
     else:
         active_providers = [p.strip().lower() for p in providers.split(",") if p.strip()]
-        unknown = [p for p in active_providers if p not in _PROBES]
+        unknown = [p for p in active_providers if p not in _PROVIDER_INFO]
         if unknown:
             return {"success": False, "error": f"unknown providers: {unknown}"}
 
@@ -231,11 +438,20 @@ def discover_cloud_assets(
     if extra_suffixes:
         extras_suffix_list = [s.strip() for s in extra_suffixes.split(",") if s.strip()]
 
-    candidates = _candidate_names(org_name, extra_suffixes=extras_suffix_list)
+    # Each provider has its own candidate generator — storage providers
+    # use the wide bucket-name permutations, PaaS providers use a smaller
+    # app-name list. Generate per-provider so we can report accurate
+    # candidate counts and avoid hammering PaaS endpoints with
+    # storage-style names that would never match.
+    per_provider_candidates: dict[str, list[str]] = {
+        p: _PROVIDER_INFO[p]["candidates"](org_name, extra_suffixes=extras_suffix_list)
+        for p in active_providers
+    }
+    total_candidates = sum(len(c) for c in per_provider_candidates.values())
 
     # One check.started/completed per provider — emitting a check per
-    # candidate-name probe (140+ × 3 providers) would flood events.jsonl;
-    # the per-provider summary is the right granularity.
+    # candidate-name probe would flood events.jsonl; the per-provider
+    # summary is the right granularity.
     provider_checks: dict[str, str | None] = {
         p: start_check(category="info_disclosure", surface=org_name, tool=_TOOL_NAME)
         for p in active_providers
@@ -243,49 +459,42 @@ def discover_cloud_assets(
     provider_hits: dict[str, int] = {p: 0 for p in active_providers}
 
     hits: list[dict[str, Any]] = []
-    for name in candidates:
-        for provider in active_providers:
+    for provider in active_providers:
+        probe = _PROVIDER_INFO[provider]["probe"]
+        is_storage = provider in _STORAGE_PROVIDERS
+        for name in per_provider_candidates[provider]:
             try:
-                hit = _PROBES[provider](name)
+                hit = probe(name)
             except Exception:  # noqa: BLE001
                 logger.exception("cloud probe error for %s/%s", provider, name)
                 hit = None
-            if hit:
-                hits.append(hit)
-                provider_hits[provider] += 1
-                emit_finding(
-                    title=f"Public {hit['provider']} asset: {name}",
-                    severity=hit["severity"],
-                    category=hit.get("category"),
-                    cwe=hit.get("cwe"),
-                    target=org_name,
-                    endpoint=hit["url"],
-                    description=hit["reason"],
-                    impact=(
-                        "Public cloud storage buckets named after an organization "
-                        "are a classic source of leaked data (backups, customer "
-                        "uploads, log exports, build artifacts). Even a bucket "
-                        "that returns 403 to anonymous listing is significant — "
-                        "it confirms the namespace is owned and may be exposed "
-                        "via direct-object reads if object names can be guessed."
-                    ),
-                    remediation=(
-                        "Disable public access on the bucket, or — if public "
-                        "intentional — restrict to read-only of explicit prefixes "
-                        "and ensure no sensitive data is ever written there. Audit "
-                        "object ACLs across the bucket."
-                    ),
-                    verification_status="verified",
-                )
+            if not hit:
+                continue
+            hits.append(hit)
+            provider_hits[provider] += 1
+            title_prefix = "Public" if is_storage else "Org-named"
+            emit_finding(
+                title=f"{title_prefix} {hit['provider']} asset: {name}",
+                severity=hit["severity"],
+                category=hit.get("category"),
+                cwe=hit.get("cwe"),
+                target=org_name,
+                endpoint=hit["url"],
+                description=hit["reason"],
+                impact=_STORAGE_IMPACT if is_storage else _PAAS_IMPACT,
+                remediation=_STORAGE_REMEDIATION if is_storage else _PAAS_REMEDIATION,
+                verification_status="verified",
+            )
 
     # Close out one check per provider with the aggregate verdict.
     for provider, cev_id in provider_checks.items():
         hit_count = provider_hits[provider]
+        candidate_count = len(per_provider_candidates[provider])
         verdict = "vulnerable" if hit_count else "not_vulnerable"
         evidence = (
-            f"{hit_count} hit(s) across {len(candidates)} candidates"
+            f"{hit_count} hit(s) across {candidate_count} candidates"
             if hit_count
-            else f"no public assets found across {len(candidates)} candidates"
+            else f"no public assets found across {candidate_count} candidates"
         )
         complete_check(cev_id, verdict, evidence=evidence)
 
@@ -293,7 +502,7 @@ def discover_cloud_assets(
         "success": True,
         "org_name": org_name,
         "providers_checked": active_providers,
-        "candidates_probed": len(candidates),
+        "candidates_probed": total_candidates,
         "hits": hits,
         "hit_count": len(hits),
     }
