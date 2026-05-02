@@ -130,6 +130,53 @@ _OTEL_BOOTSTRAPPED = False
 _OTEL_REMOTE_ENABLED = False
 
 
+_VALID_KILL_CHAIN_STEP_TYPES: tuple[str, ...] = (
+    "recon",
+    "discovery",
+    "exploitation",
+    "escalation",
+    "lateral_movement",
+    "impact",
+    "validation",
+)
+
+
+def _normalize_kill_chain(raw: Any) -> list[dict[str, Any]] | None:
+    """Normalize the agent-supplied kill_chain into a list of step dicts.
+
+    Each output step has stable keys: `step_number` (1-based int),
+    `type` (one of _VALID_KILL_CHAIN_STEP_TYPES, defaults to "discovery"),
+    and any of `description` / `tool` / `evidence` that were supplied.
+
+    Tolerant of malformed input: drops non-dict entries, fills missing
+    step numbers, and clamps unknown types to "discovery".
+    """
+    if not isinstance(raw, list) or not raw:
+        return None
+    out: list[dict[str, Any]] = []
+    for idx, entry in enumerate(raw, start=1):
+        if not isinstance(entry, dict):
+            continue
+        step: dict[str, Any] = {}
+        # step_number — accept int, str-of-int, or fall back to position.
+        raw_num = entry.get("step_number") or entry.get("step") or entry.get("number")
+        try:
+            step["step_number"] = int(raw_num) if raw_num is not None else idx
+        except (TypeError, ValueError):
+            step["step_number"] = idx
+        # type — clamp to known set so consumers can render reliably.
+        raw_type = (entry.get("type") or "").strip().lower()
+        step["type"] = raw_type if raw_type in _VALID_KILL_CHAIN_STEP_TYPES else "discovery"
+        for field in ("description", "tool", "evidence", "agent_id"):
+            value = entry.get(field)
+            if isinstance(value, str) and value.strip():
+                step[field] = value.strip()
+        # A step with nothing but a number isn't useful.
+        if any(k in step for k in ("description", "tool", "evidence")):
+            out.append(step)
+    return out or None
+
+
 def _normalize_target_for_events(raw: Any) -> dict[str, str] | None:
     """Coerce a scan_config target entry into a {value, type?} dict.
 
@@ -705,6 +752,7 @@ class Tracer:
         code_locations: list[dict[str, Any]] | None = None,
         category: str | None = None,
         verification_status: str | None = None,
+        kill_chain: list[dict[str, Any]] | None = None,
     ) -> str:
         report_id = f"vuln-{len(self.vulnerability_reports) + 1:04d}"
 
@@ -759,6 +807,12 @@ class Tracer:
         if code_locations:
             report["code_locations"] = code_locations
 
+        # Kill chain — multi-step finding context. Roadmap §1.
+        # Normalize each step so consumers see a stable shape.
+        normalized_chain = _normalize_kill_chain(kill_chain) if kill_chain else None
+        if normalized_chain:
+            report["kill_chain"] = normalized_chain
+
         # Threat-intel enrichment — fail-open. CWE → OWASP/MITRE comes from
         # static maps; CVE → KEV from CISA's catalog (cached on disk for 24h).
         try:
@@ -799,6 +853,24 @@ class Tracer:
             status=report["severity"],
             source="strix.findings",
         )
+
+        # Roadmap §1: separate finding.kill_chain event for multi-step findings.
+        # Emitted only when the agent supplied a chain — silence is honest when
+        # the finding is a single-step pattern match.
+        if normalized_chain:
+            self._emit_event(
+                "finding.kill_chain",
+                payload={
+                    "report_id": report_id,
+                    "fingerprint": report.get("fingerprint"),
+                    "title": report["title"],
+                    "severity": report["severity"],
+                    "step_count": len(normalized_chain),
+                    "chain": normalized_chain,
+                },
+                status="completed",
+                source="strix.findings",
+            )
 
         if self.vulnerability_found_callback:
             self.vulnerability_found_callback(report)
