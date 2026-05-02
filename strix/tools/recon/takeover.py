@@ -123,6 +123,163 @@ _PROVIDERS: list[dict[str, Any]] = [
         "fingerprint": re.compile(r"Project doesnt exist", re.IGNORECASE),
         "severity": "medium",
     },
+    # ---------------------------------------------------------------
+    # Expansion to ~38 providers — fingerprints sourced from the
+    # `can-i-take-over-xyz` registry. Conservative: only providers with
+    # well-documented unclaimed-fingerprint patterns are included.
+    # ---------------------------------------------------------------
+    {
+        "name": "statuspage",
+        "cname_pattern": re.compile(r"\.statuspage\.io\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"There is no app configured at that hostname", re.IGNORECASE),
+        "severity": "high",
+    },
+    {
+        "name": "aws_apigateway",
+        "cname_pattern": re.compile(r"\.execute-api\.[a-z0-9-]+\.amazonaws\.com\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"Missing Authentication Token|\{\"message\":\"Forbidden\"\}", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "aws_cloudfront",
+        "cname_pattern": re.compile(r"\.cloudfront\.net\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"ERROR: The request could not be satisfied", re.IGNORECASE),
+        "severity": "high",
+    },
+    {
+        "name": "surge_sh",
+        "cname_pattern": re.compile(r"\.surge\.sh\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"project not found", re.IGNORECASE),
+        "severity": "high",
+    },
+    {
+        "name": "pantheon",
+        "cname_pattern": re.compile(r"\.pantheonsite\.io\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"The gods are wise|404 - The page you were looking for could not be found", re.IGNORECASE),
+        "severity": "high",
+    },
+    {
+        "name": "tilda",
+        "cname_pattern": re.compile(r"\.tilda\.(?:ws|cc)\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"Please renew your subscription", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "helpjuice",
+        "cname_pattern": re.compile(r"\.helpjuice\.com\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"We could not find what you're looking for", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "cargocollective",
+        "cname_pattern": re.compile(r"\.cargocollective\.com\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"<title>404 Not Found</title>", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "fly_dev",
+        "cname_pattern": re.compile(r"\.fly\.dev\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"Application Error|app not found", re.IGNORECASE),
+        "severity": "high",
+    },
+    {
+        "name": "render",
+        "cname_pattern": re.compile(r"\.onrender\.com\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"Not Found", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "intercom",
+        "cname_pattern": re.compile(r"\.custom\.intercom\.help\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"Uh oh\. That page doesn't exist", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "thinkific",
+        "cname_pattern": re.compile(r"\.thinkific\.com\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"You may have mistyped the address|page doesn't exist", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "teachable",
+        "cname_pattern": re.compile(r"\.teachable\.com\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"this page is no longer available|This school is no longer available", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "zendesk",
+        "cname_pattern": re.compile(r"\.zendesk\.com\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"Help Center Closed", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "wishpond",
+        "cname_pattern": re.compile(r"\.wishpond\.com\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"Looks like you've found a page that doesn't exist", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "aha_io",
+        "cname_pattern": re.compile(r"\.ideas\.aha\.io\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"There is no portal here .* sending you back to Aha", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "acquia",
+        "cname_pattern": re.compile(r"\.acquia-sites\.com\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"Web Site Not Found", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "canny_io",
+        "cname_pattern": re.compile(r"\.canny\.io\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"Company Not Found", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "aftership",
+        "cname_pattern": re.compile(r"\.aftership\.com\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"Oops\. *\.The link may be broken|tracking page not found", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "launchrock",
+        "cname_pattern": re.compile(r"\.launchrock\.com\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"It looks like you may have taken a wrong turn", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "digitalocean_app",
+        "cname_pattern": re.compile(r"\.ondigitalocean\.app\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"app not found|domain not found", re.IGNORECASE),
+        "severity": "high",
+    },
+    {
+        "name": "firebase_hosting",
+        "cname_pattern": re.compile(r"\.web\.app\.?$|\.firebaseapp\.com\.?$", re.IGNORECASE),
+        # Firebase 404 page is too generic; keep fingerprint specific to the
+        # Site-Not-Found template Firebase serves for missing sites.
+        "fingerprint": re.compile(r"Site Not Found.*Firebase Hosting", re.IGNORECASE | re.DOTALL),
+        "severity": "high",
+    },
+    {
+        "name": "google_sites",
+        "cname_pattern": re.compile(r"\.googlepages\.com\.?$|sites\.google\.com\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"Sorry, the page you were looking for in this site cannot be found", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "uberflip",
+        "cname_pattern": re.compile(r"\.uberflip\.com\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"The URL you've accessed does not provide a hub|Hub not found", re.IGNORECASE),
+        "severity": "medium",
+    },
+    {
+        "name": "smartling",
+        "cname_pattern": re.compile(r"\.smartling\.com\.?$", re.IGNORECASE),
+        "fingerprint": re.compile(r"Domain is not configured", re.IGNORECASE),
+        "severity": "medium",
+    },
 ]
 
 
