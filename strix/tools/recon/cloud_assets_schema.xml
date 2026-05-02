@@ -1,28 +1,40 @@
 <tools>
   <tool name="discover_cloud_assets">
-    <description>Discover public cloud-storage assets (S3 / GCS / Azure Blob) by name permutation.
+    <description>Discover public cloud-storage and PaaS assets by name permutation.
 
-Generates candidate bucket names by combining the org name with a wordlist of common
-prefixes and suffixes (-prod, -staging, -uploads, -backups, etc.), then probes each
-candidate against AWS S3, Google Cloud Storage, and Azure Blob Storage endpoints.
+Two probe families:
 
-For each hit, emits a structured finding. A 200 response usually means public listing
-is exposed (`severity: medium`); a 403 typically means the bucket exists but listing
-is denied — still significant because it confirms the namespace is owned and may
-expose objects via direct-name reads (`severity: info`, recommended for follow-up).
+1. **Storage**: AWS S3, Google Cloud Storage, Azure Blob. Generates ~140
+   candidate bucket names by combining the org name with prefixes/suffixes
+   (-prod, -staging, -uploads, -backups, etc.) and probes each. A 200
+   response usually means public listing is exposed (`severity: medium`);
+   a 403 typically means the bucket exists but listing is denied — still
+   significant because it confirms the namespace is owned and may expose
+   objects via direct-name reads (`severity: info`).
 
-Use this tool during the recon phase for any `domain` target — public cloud-storage
-exposure is one of the highest-value external-recon findings and is invisible to the
+2. **PaaS**: Heroku, Vercel, Netlify, GitHub Pages, Firebase Hosting,
+   Supabase. Generates a smaller app-name candidate list (org plus a few
+   environment suffixes) and probes each platform's canonical subdomain.
+   Existence of an org-named project is informational (`severity: info`)
+   but expands the attack surface and pairs naturally with
+   `subdomain_takeover_check` for abandoned-project takeover follow-up.
+   For Firebase / Supabase a hit is also a prompt to audit anonymous
+   API access and security rules.
+
+Use this tool during the recon phase for any `domain` target — public
+cloud-storage exposure and rogue PaaS deployments are among the
+highest-value external-recon findings and are invisible to the
 agent's default reasoning loop.
 
-Categories: `info_disclosure`. CWEs: `CWE-548` (exposed listing), `CWE-200` (info
-disclosure for owned-but-listing-denied buckets).</description>
+Categories: `info_disclosure`. CWEs: `CWE-548` (exposed listing),
+`CWE-200` (info disclosure for owned-but-listing-denied buckets and
+PaaS namespace ownership).</description>
     <parameters>
       <parameter name="org_name" type="string" required="true">
         <description>Organization or domain name. The leftmost DNS label is used as the bucket-name base. For "example.com" this is "example".</description>
       </parameter>
       <parameter name="providers" type="string" required="false">
-        <description>Comma-separated subset of {s3, gcs, azure}. Default: "all". Restrict to a subset when the org's cloud provider is already known.</description>
+        <description>Comma-separated subset of {s3, gcs, azure, heroku, vercel, netlify, github_pages, firebase, supabase}. Default: "all". Restrict to a subset when the org's cloud/PaaS provider is already known.</description>
       </parameter>
       <parameter name="extra_suffixes" type="string" required="false">
         <description>Comma-separated extra suffix wordlist to append to the default. Useful when the org has a known naming convention (e.g. "-customer-data,-tenant-uploads").</description>
@@ -41,6 +53,11 @@ disclosure for owned-but-listing-denied buckets).</description>
 <parameter=org_name>acme</parameter>
 <parameter=providers>s3,gcs</parameter>
 <parameter=extra_suffixes>-customer-uploads,-tenant-data</parameter>
+</discover_cloud_assets>
+
+<discover_cloud_assets>
+<parameter=org_name>acme</parameter>
+<parameter=providers>heroku,vercel,netlify,github_pages,firebase,supabase</parameter>
 </discover_cloud_assets>
 ]]>
     </example_usage>

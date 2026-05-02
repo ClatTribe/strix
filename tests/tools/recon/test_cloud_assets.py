@@ -118,3 +118,97 @@ def test_uses_first_label_of_dotted_org(monkeypatch) -> None:
     assert not any("example.com.s3.amazonaws.com" in u for u in captured)
     # The base "example" should appear.
     assert any("//example.s3.amazonaws.com" in u for u in captured)
+
+
+# ---------------------------------------------------------------------------
+# PaaS providers
+# ---------------------------------------------------------------------------
+
+
+def test_heroku_hit_emits_info_finding(monkeypatch) -> None:
+    _patch_head(monkeypatch, {"https://example.herokuapp.com/": (200, {})})
+    out = cloud_assets.discover_cloud_assets("example", providers="heroku")
+    assert out["hit_count"] == 1
+    hit = out["hits"][0]
+    assert hit["provider"] == "heroku"
+    assert hit["severity"] == "info"
+    reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
+    assert len(reports) == 1
+    assert reports[0]["severity"] == "info"
+    # PaaS finding title differs from storage title.
+    assert "Org-named" in reports[0]["title"]
+
+
+def test_vercel_3xx_treated_as_hit(monkeypatch) -> None:
+    """Vercel returns 3xx for active deployments — should still register."""
+    _patch_head(monkeypatch, {"https://example.vercel.app/": (308, {})})
+    out = cloud_assets.discover_cloud_assets("example", providers="vercel")
+    assert out["hit_count"] == 1
+    assert out["hits"][0]["provider"] == "vercel"
+
+
+def test_netlify_404_no_hit(monkeypatch) -> None:
+    _patch_head(monkeypatch, {})  # everything 404
+    out = cloud_assets.discover_cloud_assets("example", providers="netlify")
+    assert out["hit_count"] == 0
+    # PaaS candidate set is smaller than storage's, but should still be > 0.
+    assert out["candidates_probed"] > 0
+
+
+def test_github_pages_hit(monkeypatch) -> None:
+    _patch_head(monkeypatch, {"https://example.github.io/": (200, {})})
+    out = cloud_assets.discover_cloud_assets("example", providers="github_pages")
+    assert out["hit_count"] == 1
+    assert out["hits"][0]["provider"] == "github_pages"
+
+
+def test_supabase_401_treated_as_hit(monkeypatch) -> None:
+    """Supabase 401 = live project (anon key required). Should be a hit."""
+    _patch_head(monkeypatch, {"https://example.supabase.co/": (401, {})})
+    out = cloud_assets.discover_cloud_assets("example", providers="supabase")
+    assert out["hit_count"] == 1
+    assert out["hits"][0]["provider"] == "supabase"
+
+
+def test_firebase_hosting_hit(monkeypatch) -> None:
+    _patch_head(monkeypatch, {"https://example.web.app/": (200, {})})
+    out = cloud_assets.discover_cloud_assets("example", providers="firebase")
+    assert out["hit_count"] == 1
+    assert out["hits"][0]["provider"] == "firebase_hosting"
+
+
+def test_paas_uses_smaller_candidate_list_than_storage(monkeypatch) -> None:
+    """PaaS-provider candidates should be a smaller list than storage."""
+    captured_storage: list[str] = []
+    captured_paas: list[str] = []
+
+    def fake_head(url: str, **_: Any) -> tuple[int, dict[str, str]]:
+        if "s3.amazonaws.com" in url:
+            captured_storage.append(url)
+        elif "vercel.app" in url:
+            captured_paas.append(url)
+        return (404, {})
+
+    monkeypatch.setattr(cloud_assets, "http_head", fake_head)
+    cloud_assets.discover_cloud_assets("example", providers="s3,vercel")
+    assert len(captured_storage) > len(captured_paas)
+    assert len(captured_paas) > 0
+
+
+def test_all_providers_default(monkeypatch) -> None:
+    """providers=None should activate all 9 providers."""
+    _patch_head(monkeypatch, {})
+    out = cloud_assets.discover_cloud_assets("example")
+    assert set(out["providers_checked"]) == {
+        "s3", "gcs", "azure",
+        "heroku", "vercel", "netlify", "github_pages", "firebase", "supabase",
+    }
+
+
+def test_candidates_probed_is_sum_across_providers(monkeypatch) -> None:
+    """When multiple providers run, candidates_probed counts each provider's list."""
+    _patch_head(monkeypatch, {})
+    out_s3 = cloud_assets.discover_cloud_assets("example", providers="s3")
+    out_vercel = cloud_assets.discover_cloud_assets("example", providers="vercel")
+    out_both = cloud_assets.discover_cloud_assets("example", providers="s3,vercel")
+    assert out_both["candidates_probed"] == out_s3["candidates_probed"] + out_vercel["candidates_probed"]
