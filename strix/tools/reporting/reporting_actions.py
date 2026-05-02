@@ -29,6 +29,53 @@ def parse_cvss_xml(xml_str: str) -> dict[str, str] | None:
     return result if result else None
 
 
+def parse_kill_chain_xml(xml_str: str) -> list[dict[str, Any]] | None:
+    """Parse the agent's <kill_chain> XML into a list of step dicts.
+
+    Schema:
+        <kill_chain>
+          <step number="1" type="recon">
+            <description>...</description>
+            <tool>...</tool>
+            <evidence>...</evidence>
+          </step>
+          ...
+        </kill_chain>
+
+    The number/type attributes are optional (auto-filled by the tracer's
+    normalizer when missing). Returns None when the input is empty or
+    has no parseable steps.
+    """
+    if not xml_str or not xml_str.strip():
+        return None
+    steps: list[dict[str, Any]] = []
+    for step_match in re.finditer(r"<step\b([^>]*)>(.*?)</step>", xml_str, re.DOTALL):
+        attrs = step_match.group(1)
+        body = step_match.group(2)
+        step: dict[str, Any] = {}
+
+        num_match = re.search(r'\bnumber\s*=\s*"(\d+)"', attrs)
+        if num_match:
+            try:
+                step["step_number"] = int(num_match.group(1))
+            except ValueError:
+                pass
+
+        type_match = re.search(r'\btype\s*=\s*"([^"]*)"', attrs)
+        if type_match:
+            step["type"] = type_match.group(1).strip()
+
+        for field in ("description", "tool", "evidence", "agent_id"):
+            field_match = re.search(rf"<{field}>(.*?)</{field}>", body, re.DOTALL)
+            if field_match:
+                value = field_match.group(1).strip()
+                if value:
+                    step[field] = value
+        if step:
+            steps.append(step)
+    return steps or None
+
+
 def parse_code_locations_xml(xml_str: str) -> list[dict[str, Any]] | None:
     if not xml_str or not xml_str.strip():
         return None
@@ -216,6 +263,7 @@ def create_vulnerability_report(  # noqa: PLR0912, PLR0913
     code_locations: str | None = None,
     category: str | None = None,
     verification_status: str | None = None,
+    kill_chain: str | None = None,
 ) -> dict[str, Any]:
     validation_errors = _validate_required_fields(
         title=title,
@@ -235,6 +283,7 @@ def create_vulnerability_report(  # noqa: PLR0912, PLR0913
         validation_errors.extend(_validate_cvss_parameters(**parsed_cvss))
 
     parsed_locations = parse_code_locations_xml(code_locations) if code_locations else None
+    parsed_kill_chain = parse_kill_chain_xml(kill_chain) if kill_chain else None
 
     if parsed_locations:
         validation_errors.extend(_validate_code_locations(parsed_locations))
@@ -318,6 +367,7 @@ def create_vulnerability_report(  # noqa: PLR0912, PLR0913
                 code_locations=parsed_locations,
                 category=category,
                 verification_status=verification_status,
+                kill_chain=parsed_kill_chain,
             )
 
             return {

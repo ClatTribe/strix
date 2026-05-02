@@ -190,6 +190,37 @@ const result = await db.query(query, [id]);</fix_after>
           </location>
         </format>
       </parameter>
+      <parameter name="kill_chain" type="string" required="false">
+        <description>Optional XML kill-chain — the ordered sequence of steps that led to this finding. Use whenever the finding required more than one step to establish (e.g., recon → discovery → exploitation → impact). For single-step pattern matches, omit it (silence is honest).
+
+Each step has:
+- number (attribute, optional): 1-based step ordering. Auto-filled by position when missing.
+- type (attribute, optional): one of `recon`, `discovery`, `exploitation`, `escalation`, `lateral_movement`, `impact`, `validation`. Defaults to `discovery`. Unknown values clamp to `discovery`.
+- description (REQUIRED-ish): short narration of what happened.
+- tool (optional): the tool that produced the step (e.g. `http_request`, `python_run`).
+- evidence (optional): observed result that established the step (status code, response substring, file content).
+
+Surfaces in the `finding.kill_chain` event with `report_id` linkage so triage UIs can render a numbered timeline next to the finding card. Pairs with the §12 triage hooks.</description>
+        <format>
+          <kill_chain>
+            <step number="1" type="recon">
+              <description>Found exposed admin panel at /admin via directory enumeration.</description>
+              <tool>http_request</tool>
+              <evidence>HTTP 200 with login form HTML.</evidence>
+            </step>
+            <step number="2" type="exploitation">
+              <description>Logged in with the default admin:admin credentials.</description>
+              <tool>http_request</tool>
+              <evidence>302 redirect to /admin/dashboard with JSESSIONID cookie set.</evidence>
+            </step>
+            <step number="3" type="impact">
+              <description>Listed all 1,247 user records via /admin/users.</description>
+              <tool>http_request</tool>
+              <evidence>JSON response with email, hashed password, MFA secret per user.</evidence>
+            </step>
+          </kill_chain>
+        </format>
+      </parameter>
     </parameters>
     <returns type="Dict[str, Any]">
       <description>Response containing:
