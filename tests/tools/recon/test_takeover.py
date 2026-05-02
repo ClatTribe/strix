@@ -132,3 +132,123 @@ def test_invalid_subdomain_rejected(monkeypatch) -> None:
     )
     assert out["success"] is False
     assert "invalid" in out["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Provider-expansion smoke tests (representative new providers)
+# ---------------------------------------------------------------------------
+
+
+def test_statuspage_unclaimed_high_severity(monkeypatch, tmp_path) -> None:
+    _patch(
+        monkeypatch,
+        cnames={"status.example.com": "abc123.statuspage.io."},
+        bodies={
+            "https://status.example.com/": (404, "<html><body>There is no app configured at that hostname</body></html>"),
+        },
+    )
+    out = takeover.subdomain_takeover_check(
+        "example.com", subdomains="status.example.com"
+    )
+    assert out["candidates"] == 1
+    assert out["results"][0]["provider"] == "statuspage"
+    assert out["results"][0]["severity"] == "high"
+    reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
+    assert len(reports) == 1
+    assert reports[0]["severity"] == "high"
+
+
+def test_surge_sh_unclaimed_high_severity(monkeypatch, tmp_path) -> None:
+    _patch(
+        monkeypatch,
+        cnames={"app.example.com": "myproject.surge.sh."},
+        bodies={"https://app.example.com/": (404, "project not found")},
+    )
+    out = takeover.subdomain_takeover_check(
+        "example.com", subdomains="app.example.com"
+    )
+    assert out["results"][0]["provider"] == "surge_sh"
+    assert out["results"][0]["verification_status"] == "verified"
+
+
+def test_pantheon_unclaimed(monkeypatch, tmp_path) -> None:
+    _patch(
+        monkeypatch,
+        cnames={"site.example.com": "live-x.pantheonsite.io."},
+        bodies={"https://site.example.com/": (404, "<h1>The gods are wise</h1>")},
+    )
+    out = takeover.subdomain_takeover_check(
+        "example.com", subdomains="site.example.com"
+    )
+    assert out["results"][0]["provider"] == "pantheon"
+    assert out["results"][0]["severity"] == "high"
+
+
+def test_aws_apigateway_unclaimed(monkeypatch, tmp_path) -> None:
+    _patch(
+        monkeypatch,
+        cnames={"api.example.com": "abc123.execute-api.us-east-1.amazonaws.com."},
+        bodies={
+            "https://api.example.com/": (403, '{"message":"Forbidden"}'),
+        },
+    )
+    out = takeover.subdomain_takeover_check(
+        "example.com", subdomains="api.example.com"
+    )
+    assert out["candidates"] == 1
+    assert out["results"][0]["provider"] == "aws_apigateway"
+
+
+def test_render_unclaimed(monkeypatch, tmp_path) -> None:
+    _patch(
+        monkeypatch,
+        cnames={"web.example.com": "myservice-abc.onrender.com."},
+        bodies={"https://web.example.com/": (404, "Not Found")},
+    )
+    out = takeover.subdomain_takeover_check(
+        "example.com", subdomains="web.example.com"
+    )
+    assert out["results"][0]["provider"] == "render"
+
+
+def test_zendesk_unclaimed(monkeypatch, tmp_path) -> None:
+    _patch(
+        monkeypatch,
+        cnames={"help.example.com": "support.zendesk.com."},
+        bodies={"https://help.example.com/": (404, "Help Center Closed")},
+    )
+    out = takeover.subdomain_takeover_check(
+        "example.com", subdomains="help.example.com"
+    )
+    assert out["results"][0]["provider"] == "zendesk"
+
+
+def test_canny_io_unclaimed(monkeypatch, tmp_path) -> None:
+    _patch(
+        monkeypatch,
+        cnames={"feedback.example.com": "myorg.canny.io."},
+        bodies={"https://feedback.example.com/": (404, "Company Not Found")},
+    )
+    out = takeover.subdomain_takeover_check(
+        "example.com", subdomains="feedback.example.com"
+    )
+    assert out["results"][0]["provider"] == "canny_io"
+
+
+def test_unknown_provider_in_new_set_no_finding(monkeypatch, tmp_path) -> None:
+    """A CNAME targeting a domain we don't fingerprint should not be flagged."""
+    _patch(
+        monkeypatch,
+        cnames={"x.example.com": "internal-load-balancer-12345.aws.local."},
+        bodies={},
+    )
+    out = takeover.subdomain_takeover_check(
+        "example.com", subdomains="x.example.com"
+    )
+    assert out["candidates"] == 0
+
+
+def test_provider_count_exceeds_legacy(monkeypatch, tmp_path) -> None:
+    """Sanity check on the table — should be at least 30 providers post-expansion."""
+    from strix.tools.recon.takeover import _PROVIDERS
+    assert len(_PROVIDERS) >= 30

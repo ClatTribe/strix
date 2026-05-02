@@ -2,11 +2,16 @@
   <tool name="subdomain_takeover_check">
     <description>Check subdomains for takeover candidates against a known-provider fingerprint matrix.
 
-For each subdomain, follow CNAMEs and match the final target against a list of third-party
+For each subdomain, follow CNAMEs and match the final target against a list of ~38 third-party
 services known to be vulnerable to subdomain takeover when the underlying project / bucket /
-app is unclaimed (Heroku, GitHub Pages, S3 website, Vercel, Netlify, Fastly, Bitbucket,
-Ghost, Shopify, etc.). When the CNAME matches a provider, fetch the subdomain over HTTP
-and check the response body for that provider's "unclaimed" signature.
+app is unclaimed. Covers GitHub Pages, Heroku, AWS S3 / CloudFront / API Gateway, Vercel,
+Netlify, Fastly, Statuspage, Surge.sh, Pantheon, Tilda, Helpjuice, Cargocollective, Fly.io,
+Render, Intercom, Thinkific, Teachable, Zendesk, Wishpond, Aha.io, Acquia, Canny.io,
+AfterShip, Launchrock, DigitalOcean Apps, Firebase Hosting, Google Sites, Uberflip,
+Smartling, Bitbucket, Ghost, Shopify, Tumblr, WordPress, ReadMe, Azure CloudApp.
+
+When the CNAME matches a provider, fetch the subdomain over HTTP and check the response body
+for that provider's "unclaimed" signature.
 
 Conservative — flags candidates only. Active verification (claim the project, confirm
 exploit) is intentionally out of scope.
