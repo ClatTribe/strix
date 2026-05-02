@@ -17,6 +17,7 @@ from .code_search import code_search_for_domain
 from .dns_hygiene import dns_hygiene_check
 from .domain_pipeline import domain_recon_pipeline
 from .fingerprint import fingerprint_tech_stack
+from .mail_recon import mx_fingerprint
 from .org_recon import org_fingerprint
 from .passive_dns import passive_dns_history
 from .phase import record_phase
@@ -31,6 +32,7 @@ __all__ = [
     "dns_hygiene_check",
     "domain_recon_pipeline",
     "fingerprint_tech_stack",
+    "mx_fingerprint",
     "org_fingerprint",
     "passive_dns_history",
     "record_phase",
