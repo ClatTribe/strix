@@ -22,7 +22,9 @@ full description / impact / remediation.</description>
         <description>Domain to check (apex, e.g. "example.com" — not a URL, not a subdomain unless that's the apex of interest).</description>
       </parameter>
       <parameter name="checks" type="string" required="false">
-        <description>Comma-separated list of checks to run, e.g. "spf,dmarc,caa". Default is "all". Valid values: spf, dmarc, dkim, mta_sts, caa, dnssec, wildcard, axfr.</description>
+        <description>Comma-separated list of checks to run, e.g. "spf,dmarc,caa". Default is "all". Valid values: spf, dmarc, dkim, mta_sts, caa, dnssec, wildcard, axfr, dane, bimi, dmarc_rua, spf_lookups, dkim_keys, open_resolver, dangling_ns.
+
+The deeper checks (dane / bimi / dmarc_rua / spf_lookups / dkim_keys / open_resolver / dangling_ns) catch real-world misconfigurations that survive the basic record-presence checks: DMARC reports going nowhere, SPF records that silently fail at the 10-lookup limit, RSA-1024 DKIM keys, NS records pointing at dead hostnames.</description>
       </parameter>
     </parameters>
     <returns type="dict">
