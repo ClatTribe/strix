@@ -1,0 +1,56 @@
+<tools>
+  <tool name="mx_fingerprint">
+    <description>MX server fingerprint + sample-mail Authentication-Results analysis.
+
+Two complementary checks for the email-recon story. Use during the recon phase for any
+`domain` target — pairs with `dns_hygiene_check` (which validates record presence) by
+fingerprinting what software is actually serving those records and how mail is actually
+authenticated downstream.
+
+Behaviour:
+
+1. **MX banner fingerprint.** Resolves the apex's MX records (up to 5 hosts, lowest-preference
+   first). For each host, opens a single TCP connection to port 25, reads the SMTP greeting,
+   sends EHLO, reads the response, sends QUIT. No STARTTLS, no auth, no message body.
+
+2. **Sample-mail header analysis.** When `sample_email_path` is supplied — a local path to a
+   saved `.eml` file from the target's domain — parses `Authentication-Results` to extract
+   real-world SPF / DKIM / DMARC pass/fail behaviour against actual mail flow. Validates
+   that *published* policy and *enforced* policy match.
+
+Findings:
+- **Info** (CWE-200) — banner discloses MTA software + version.
+- **Medium** (CWE-1104) — known-stale MTA (Sendmail, Exim &lt; 4.95, Postfix 1.x/2.x,
+  Exchange 6.x).
+- **Medium** (CWE-345) — sample mail's `Authentication-Results` show
+  `spf=fail` / `dkim=fail` / `dmarc=fail` — broken authentication chain.
+
+Categories: `info_disclosure`, `vulnerable_dependency`, `authentication_bypass`.</description>
+    <parameters>
+      <parameter name="domain" type="string" required="true">
+        <description>Apex domain to query MX for (e.g. "example.com").</description>
+      </parameter>
+      <parameter name="sample_email_path" type="string" required="false">
+        <description>Optional path to a saved `.eml` file from the target's domain. When provided, the file's `Authentication-Results` header is parsed for real-world SPF / DKIM / DMARC pass/fail behaviour against actual mail flow.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-connect SMTP timeout in seconds. Default 5.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, domain, mx_records, mx_results: [{preference, host, success, banner, ehlo_response, software, version, flags}], sample_mail: {success, headers_present, spf, dkim, dmarc, ...} | None}.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<mx_fingerprint>
+<parameter=domain>example.com</parameter>
+</mx_fingerprint>
+
+<mx_fingerprint>
+<parameter=domain>example.com</parameter>
+<parameter=sample_email_path>/tmp/saved.eml</parameter>
+</mx_fingerprint>
+]]>
+    </example_usage>
+  </tool>
+</tools>
