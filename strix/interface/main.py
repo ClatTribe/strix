@@ -404,6 +404,22 @@ Examples:
         ),
     )
 
+    parser.add_argument(
+        "--dns-only",
+        action="store_true",
+        default=False,
+        help=(
+            "Domain-target passive-recon mode. Skip every step that issues "
+            "HTTP/TCP probes to the target's own hosts: subdomain triage, "
+            "subdomain-takeover fingerprinting, cloud-asset HEAD probes, "
+            "MX SMTP banner grab, tech-stack fingerprinting. Pure DNS lookups "
+            "and third-party API calls (passive DNS, reverse-IP, code-search, "
+            "SaaS leak discovery) still run. Use when the engagement scope "
+            "limits active probing or when surface-mapping a target you don't "
+            "yet have authorization to probe."
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.instruction and args.instruction_file:
@@ -683,6 +699,27 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             args.instruction = f"{diff_scope.instruction_block}\n\n{args.instruction}"
         else:
             args.instruction = diff_scope.instruction_block
+
+    if args.dns_only:
+        # The env var is the load-bearing signal: domain_recon_pipeline reads
+        # STRIX_DNS_ONLY=1 and forces dns_only=True regardless of how the
+        # agent invokes the tool. Sandbox runtime forwards STRIX_* env vars
+        # to the container.
+        os.environ["STRIX_DNS_ONLY"] = "1"
+        dns_only_block = (
+            "## Active scope: passive recon only (--dns-only)\n\n"
+            "Do NOT issue HTTP/TCP probes against the target's own hosts. "
+            "Specifically: avoid subdomain HEAD probes, takeover fingerprint "
+            "fetches, cloud-asset HEAD probes, SMTP banner grabs, and "
+            "tech-stack HTTP fingerprinting. DNS lookups and third-party "
+            "API calls (passive DNS, reverse-IP, code-search, SaaS leak "
+            "discovery) are allowed. When invoking domain_recon_pipeline, "
+            "pass dns_only=True. Findings will be limited to what passive "
+            "recon can establish — that is intentional."
+        )
+        args.instruction = (
+            f"{dns_only_block}\n\n{args.instruction}" if args.instruction else dns_only_block
+        )
 
     is_whitebox = bool(args.local_sources)
 
