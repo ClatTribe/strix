@@ -1,0 +1,47 @@
+<tools>
+  <tool name="reverse_ip_discovery">
+    <description>Discover domains co-hosted on the target's IP(s) via reverse-IP lookup APIs.
+
+Given an IP address — or a domain that resolves to one — query free reverse-IP databases
+(HackerTarget no-key, ViewDNS key-gated) to find other domains sharing the host. Shared
+hosting is a real-world pivot vector: a vulnerable neighbour on the same physical/virtual
+host can be a launchpad onto the in-scope target via weak tenant isolation, shared
+services, or container/VM escape paths.
+
+Behaviour:
+- HackerTarget is queried unconditionally (free, no key, ~50/day rate limit per source IP).
+- ViewDNS is queried when `STRIX_VIEWDNS_KEY` is set; silently skipped otherwise.
+- Domain targets are resolved via DNS first; up to 5 IPs are queried.
+- Private/loopback/link-local IPs are filtered out before the API call (don't leak
+  internal IPs to a third-party service).
+- Per-IP cap of 250 results to bound payload size against shared-hosting providers
+  with thousands of co-tenants (CDN edge IPs, etc.).
+- Emits an info-severity finding when an IP has &gt;= 5 co-tenants — the signal that
+  the target is on shared hosting and the pivot surface is broader than the apex.
+
+Categories: `info_disclosure`. CWE: `CWE-200`.</description>
+    <parameters>
+      <parameter name="target" type="string" required="true">
+        <description>An IPv4/IPv6 address, or a domain (which will be resolved to its A records first).</description>
+      </parameter>
+      <parameter name="providers" type="string" required="false">
+        <description>Comma-separated subset of {hackertarget, viewdns}. Default: all (key-gated providers fall back gracefully when the key isn't set).</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target, target_type, ips_queried, providers_queried, per_ip_results: [{ip, providers: [{provider, ip, success, domains, error?}, ...]}, ...], merged_domains, merged_count}.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<reverse_ip_discovery>
+<parameter=target>example.com</parameter>
+</reverse_ip_discovery>
+
+<reverse_ip_discovery>
+<parameter=target>192.0.2.42</parameter>
+<parameter=providers>hackertarget</parameter>
+</reverse_ip_discovery>
+]]>
+    </example_usage>
+  </tool>
+</tools>
