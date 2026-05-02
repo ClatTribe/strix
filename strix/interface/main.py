@@ -26,6 +26,11 @@ from strix.llm.utils import resolve_strix_model
 apply_saved_config()
 
 from strix.interface.cli import run_cli  # noqa: E402
+from strix.interface.preflight import (  # noqa: E402
+    all_network_targets_unreachable,
+    preflight_check_targets,
+    render_preflight_panel,
+)
 from strix.interface.tui import run_tui  # noqa: E402
 from strix.interface.utils import (  # noqa: E402
     assign_workspace_subdirs,
@@ -387,6 +392,18 @@ Examples:
         help="Path to a custom config file (JSON) to use instead of ~/.strix/cli-config.json",
     )
 
+    parser.add_argument(
+        "--preflight",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Run a fast DNS + TCP reachability check on network targets before "
+            "spawning the agent loop. If every network target is unreachable, "
+            "exit with a clear diagnostic instead of running for many minutes. "
+            "Disable with --no-preflight."
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.instruction and args.instruction_file:
@@ -544,6 +561,66 @@ def persist_config() -> None:
         save_current_config()
 
 
+def run_preflight_or_exit(args: argparse.Namespace) -> None:
+    """Probe network targets for reachability before any expensive setup.
+
+    On all-unreachable: print a panel and exit 1.
+    On partial-unreachable: print a panel and prune the unreachable targets
+    from `args.targets_info` so the scan continues with what's reachable.
+    On all-reachable (or all-skipped code targets): print a brief one-liner.
+    """
+    console = Console()
+    network_targets = [t for t in args.targets_info if t["type"] in ("web_application", "ip_address")]
+    if not network_targets:
+        return  # nothing to probe — only code targets
+
+    console.print()
+    console.print("[dim]Preflight reachability check ...[/dim]")
+    results = preflight_check_targets(args.targets_info)
+
+    if all_network_targets_unreachable(results):
+        body = Text()
+        body.append("PREFLIGHT FAILED — every network target is unreachable.\n\n", style="bold red")
+        body.append(render_preflight_panel(results), style="white")
+        body.append(
+            "\n\nThis usually means: target offline, firewall, DNS misconfig, or wrong target spec.\n"
+            "Re-run with --no-preflight to bypass this check.",
+            style="dim",
+        )
+        panel = Panel(
+            body, title="[bold white]STRIX", title_align="left", border_style="red", padding=(1, 2)
+        )
+        console.print(panel)
+        sys.exit(1)
+
+    unreachable = [r for r in results if r.status in ("dns_failed", "no_open_ports")]
+    if unreachable:
+        body = Text()
+        body.append(
+            "PREFLIGHT WARNING — some network targets are unreachable.\n"
+            "Continuing with the reachable subset.\n\n",
+            style="bold yellow",
+        )
+        body.append(render_preflight_panel(results), style="white")
+        panel = Panel(
+            body,
+            title="[bold white]STRIX",
+            title_align="left",
+            border_style="yellow",
+            padding=(1, 2),
+        )
+        console.print(panel)
+        unreachable_originals = {r.target for r in unreachable}
+        args.targets_info = [
+            t for t in args.targets_info if t.get("original") not in unreachable_originals
+        ]
+        return
+
+    # All reachable — quiet one-liner.
+    reachable_count = sum(1 for r in results if r.status == "reachable")
+    console.print(f"[green]✓ Preflight: {reachable_count}/{len(network_targets)} network target(s) reachable.[/green]")
+
+
 def main() -> None:  # noqa: PLR0912, PLR0915
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -552,6 +629,9 @@ def main() -> None:  # noqa: PLR0912, PLR0915
 
     if args.config:
         apply_config_override(args.config)
+
+    if args.preflight:
+        run_preflight_or_exit(args)
 
     check_docker_installed()
     pull_docker_image()
