@@ -129,6 +129,42 @@ _OTEL_BOOTSTRAPPED = False
 _OTEL_REMOTE_ENABLED = False
 
 
+def _normalize_target_for_events(raw: Any) -> dict[str, str] | None:
+    """Coerce a scan_config target entry into a {value, type?} dict.
+
+    Accepts the three shapes the codebase uses in the wild:
+    - dict with `value` + `type` (telemetry/tracer test fixtures)
+    - dict with `details` + `type` (CLI-built `targets_info`)
+    - bare string
+
+    Returns None when no usable value can be extracted.
+    """
+    if isinstance(raw, str):
+        v = raw.strip()
+        return {"value": v} if v else None
+    if not isinstance(raw, dict):
+        return None
+    target_type = raw.get("type") or raw.get("target_type")
+    # Direct value field takes precedence (test fixtures use this shape).
+    value = raw.get("value") or raw.get("target") or raw.get("original")
+    if not value:
+        # CLI shape: details holds the canonical url/path.
+        details = raw.get("details") or {}
+        if isinstance(details, dict):
+            value = (
+                details.get("target_url")
+                or details.get("target_repo")
+                or details.get("target_ip")
+                or details.get("target_path")
+            )
+    if not value:
+        return None
+    out: dict[str, str] = {"value": str(value)}
+    if target_type:
+        out["type"] = str(target_type)
+    return out
+
+
 def _build_summary_text(
     *,
     targets: list[dict[str, str]],
@@ -229,6 +265,13 @@ class Tracer:
         self._open_phases: dict[str, dict[str, Any]] = {}
         self._open_checks: dict[str, dict[str, Any]] = {}
         self._completed_checks: list[dict[str, Any]] = []
+
+        # Per-target observability. `_targets_started` is keyed by target_id
+        # (e.g. "target-0001") and stores the value/type pair so we can emit
+        # a matching `target.completed` event per target at run-end with a
+        # rollup of findings + checks scoped to that target.
+        self._targets_started: dict[str, dict[str, Any]] = {}
+        self._targets_completed_emitted = False
 
         self.scan_results: dict[str, Any] | None = None
         self.scan_config: dict[str, Any] | None = None
@@ -442,6 +485,8 @@ class Tracer:
         self._run_dir = None
         self._events_file_path = None
         self._run_completed_emitted = False
+        self._targets_started = {}
+        self._targets_completed_emitted = False
         self._set_association_properties({"run_id": self.run_id, "run_name": self.run_name or ""})
         self._emit_run_started_event()
 
@@ -481,16 +526,9 @@ class Tracer:
         targets: list[dict[str, str]] = []
         config = self.scan_config or {}
         for raw in (config.get("targets") or []):
-            if isinstance(raw, dict):
-                value = raw.get("value") or raw.get("target") or raw.get("original")
-                target_type = raw.get("type") or raw.get("target_type")
-                if value:
-                    entry = {"value": str(value)}
-                    if target_type:
-                        entry["type"] = str(target_type)
-                    targets.append(entry)
-            elif isinstance(raw, str):
-                targets.append({"value": raw})
+            normalized = _normalize_target_for_events(raw)
+            if normalized is not None:
+                targets.append(normalized)
 
         # Findings rollup.
         by_severity: dict[str, int] = {}
@@ -544,6 +582,82 @@ class Tracer:
             "checks": check_summary,
             "summary_text": summary_text,
         }
+
+    def build_target_rollup(self, target_value: str) -> dict[str, Any]:
+        """Per-target slice of findings + checks for the target.completed payload.
+
+        Findings are matched against `target_value` via the report's `target`
+        field. Checks are matched against `surface`. Both fields are
+        already lowercased by upstream emission paths.
+        """
+        target_lower = (target_value or "").lower()
+        per_target_findings: list[dict[str, Any]] = []
+        by_severity: dict[str, int] = {}
+        by_category: dict[str, int] = {}
+        for r in self.vulnerability_reports:
+            r_target = (r.get("target") or "").lower()
+            if r_target != target_lower:
+                # Treat substring matches against url-encoded targets as a
+                # weaker signal — only count when the target value is at
+                # least an exact prefix/suffix match. Belt-and-braces; in
+                # practice the recon tools all set `target` to the apex.
+                if not r_target or target_lower not in r_target:
+                    continue
+            per_target_findings.append(r)
+            sev = (r.get("severity") or "unknown").lower()
+            by_severity[sev] = by_severity.get(sev, 0) + 1
+            cat = (r.get("category") or "uncategorized").lower()
+            by_category[cat] = by_category.get(cat, 0) + 1
+
+        target_check_count = 0
+        target_check_categories: dict[str, int] = {}
+        for c in self._completed_checks:
+            surface = (c.get("surface") or "").lower()
+            if not surface:
+                continue
+            if surface != target_lower and target_lower not in surface:
+                continue
+            target_check_count += 1
+            cat = c.get("category") or "uncategorized"
+            target_check_categories[cat] = target_check_categories.get(cat, 0) + 1
+
+        return {
+            "findings": {
+                "total": len(per_target_findings),
+                "by_severity": by_severity,
+                "by_category": by_category,
+            },
+            "checks": {
+                "total": target_check_count,
+                "by_category": target_check_categories,
+            },
+        }
+
+    def _emit_target_completed_events(self) -> None:
+        """One target.completed event per target previously started.
+
+        Idempotent — guarded by `_targets_completed_emitted` so a repeated
+        save_run_data(mark_complete=True) doesn't double-emit. Roadmap §1.
+        """
+        if self._targets_completed_emitted:
+            return
+        if not self._telemetry_enabled:
+            self._targets_completed_emitted = True
+            return
+        for target_id, info in self._targets_started.items():
+            rollup = self.build_target_rollup(info["value"])
+            self._emit_event(
+                "target.completed",
+                payload={
+                    "target_id": target_id,
+                    "value": info["value"],
+                    "type": info.get("type"),
+                    **rollup,
+                },
+                status="completed",
+                source="strix.run",
+            )
+        self._targets_completed_emitted = True
 
     def _emit_run_summary_event(self, payload: dict[str, Any] | None = None) -> None:
         """Emit the run.summary event. Pass `payload` to skip rebuild
@@ -1274,6 +1388,26 @@ class Tracer:
             source="strix.run",
         )
 
+        # One target.started per target. Per-target IDs let consumers join
+        # the target.completed events back to these without string matching.
+        # Roadmap §1.
+        for raw in (config.get("targets") or []):
+            normalized = _normalize_target_for_events(raw)
+            if normalized is None:
+                continue
+            target_id = f"target-{len(self._targets_started) + 1:04d}"
+            self._targets_started[target_id] = normalized
+            self._emit_event(
+                "target.started",
+                payload={
+                    "target_id": target_id,
+                    "value": normalized["value"],
+                    "type": normalized.get("type"),
+                },
+                status="running",
+                source="strix.run",
+            )
+
     def save_run_data(self, mark_complete: bool = False) -> None:
         try:
             run_dir = self.get_run_dir()
@@ -1555,7 +1689,11 @@ class Tracer:
 
             logger.info("📊 Essential scan data saved to: %s", run_dir)
             if mark_complete and not self._run_completed_emitted:
-                # Emit run.summary first so consumers receiving events in
+                # Emit per-target completion events first — consumers track
+                # progress per-target, so the summary should arrive after
+                # all per-target rollups are visible.
+                self._emit_target_completed_events()
+                # Emit run.summary next so consumers receiving events in
                 # order see the structured summary before the terminal
                 # run.completed signal. Also persist run_summary.json so
                 # filesystem consumers (CI, dashboard scrapers) see the
