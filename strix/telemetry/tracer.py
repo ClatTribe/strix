@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -1409,6 +1410,21 @@ class Tracer:
                 status="running",
                 source="strix.run",
             )
+
+        # run.test_plan — deterministic outer envelope of "things this run
+        # could find" given how Strix is wired today. Emitted right after
+        # target.started so consumers reading in order see (1) what's being
+        # scanned, then (2) what it's planned to check. Roadmap §1.
+        from strix.telemetry.test_plan import build_test_plan
+
+        dns_only = bool(config.get("dns_only")) or os.environ.get("STRIX_DNS_ONLY") == "1"
+        test_plan = build_test_plan(config, dns_only=dns_only)
+        self._emit_event(
+            "run.test_plan",
+            payload=test_plan,
+            status="configured",
+            source="strix.run",
+        )
 
     def save_run_data(self, mark_complete: bool = False) -> None:
         try:
