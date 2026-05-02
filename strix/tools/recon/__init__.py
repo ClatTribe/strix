@@ -22,6 +22,7 @@ from .org_recon import org_fingerprint
 from .passive_dns import passive_dns_history
 from .phase import record_phase
 from .reverse_ip import reverse_ip_discovery
+from .saas_leaks import saas_leak_discovery
 from .subdomain_enum_tool import subdomain_enum
 from .takeover import subdomain_takeover_check
 
@@ -37,6 +38,7 @@ __all__ = [
     "passive_dns_history",
     "record_phase",
     "reverse_ip_discovery",
+    "saas_leak_discovery",
     "subdomain_enum",
     "subdomain_takeover_check",
 ]

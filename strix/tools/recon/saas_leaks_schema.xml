@@ -1,0 +1,62 @@
+<tools>
+  <tool name="saas_leak_discovery">
+    <description>Discover org-named public pages on known leak-prone SaaS platforms.
+
+Many orgs accidentally publish internal docs to "the world" via permalink: a Trello board left
+on "Public", a Notion page shared with "Anyone with the link", a Google Doc set to public,
+a Pastebin upload. These are real treasure sources during external recon, completely invisible
+to DNS / port-scan / crawl tooling.
+
+Search strategy:
+- Bing Web Search API only (key-gated on `STRIX_BING_KEY`). We deliberately do not scrape
+  Google or DuckDuckGo — they CAPTCHA non-browser clients aggressively. If `STRIX_BING_KEY`
+  is unset, the tool fail-opens with a clear `error_reason` so the agent can move on.
+- For each provider, runs `site:&lt;platform&gt; "&lt;org_name&gt;"` and filters results by the
+  platform's known URL shape (Bing's `site:` filter sometimes returns tangential pages).
+
+Findings:
+- **Info** (CWE-200, info_disclosure) for each hit — an org-named page on a public-by-default
+  platform is a leak candidate, but most are benign.
+- **High** (CWE-200, info_disclosure, `verification_status=needs_review`) when the snippet
+  contains secret-indicator tokens (`password`, `api_key`, `Bearer`, AWS-style key prefixes,
+  `ghp_*`, `xox[abopr]-`, etc.) — same heuristic as `code_search_for_domain`. The agent
+  must fetch the URL to confirm and trigger rotation if real.
+
+Providers:
+- `trello` (`trello.com/b/...`) — boards
+- `notion` (`*.notion.site/...`) — published pages
+- `google_docs` (`docs.google.com/document|spreadsheets|presentation|forms/d/...`)
+- `google_drive` (`drive.google.com/file|drive/...`)
+- `pastebin` (`pastebin.com/...`)
+- `confluence_cloud` (`*.atlassian.net/wiki/...`)
+- `airtable` (`airtable.com/(app|shr)...`)
+
+Categories: `info_disclosure`. CWE: `CWE-200`.</description>
+    <parameters>
+      <parameter name="org_name" type="string" required="true">
+        <description>Organization or domain name. The leftmost DNS label is used as the literal-quoted search term. For "example.com" this is "example".</description>
+      </parameter>
+      <parameter name="providers" type="string" required="false">
+        <description>Comma-separated subset of {trello, notion, google_docs, google_drive, pastebin, confluence_cloud, airtable}. Default: "all".</description>
+      </parameter>
+      <parameter name="max_results_per_provider" type="integer" required="false">
+        <description>Maximum hits per provider. Default 20, capped at 50 by the API.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, org_name, providers_queried, per_provider: [{provider, success, raw_count, hits, error?}], hit_count, secret_leak_count}.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<saas_leak_discovery>
+<parameter=org_name>example.com</parameter>
+</saas_leak_discovery>
+
+<saas_leak_discovery>
+<parameter=org_name>acme</parameter>
+<parameter=providers>trello,notion,pastebin</parameter>
+</saas_leak_discovery>
+]]>
+    </example_usage>
+  </tool>
+</tools>
