@@ -13,6 +13,7 @@ Each tool follows the same contract:
 """
 
 from .cloud_assets import discover_cloud_assets
+from .code_search import code_search_for_domain
 from .dns_hygiene import dns_hygiene_check
 from .domain_pipeline import domain_recon_pipeline
 from .fingerprint import fingerprint_tech_stack
@@ -25,6 +26,7 @@ from .takeover import subdomain_takeover_check
 
 
 __all__ = [
+    "code_search_for_domain",
     "discover_cloud_assets",
     "dns_hygiene_check",
     "domain_recon_pipeline",

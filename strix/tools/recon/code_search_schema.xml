@@ -1,0 +1,53 @@
+<tools>
+  <tool name="code_search_for_domain">
+    <description>Search public code hosts (GitHub Code Search, GitLab) for references to the org's apex domain.
+
+A staple of real-world external recon. GitHub's index covers tens of millions of public repos
+and pulls up dev/staging URLs that DNS enumeration alone will never see, plus accidentally-committed
+secrets adjacent to those URLs. Use this tool during the recon phase for any `domain` target.
+
+Behaviour:
+- For each hit, an info-severity finding (CWE-200, info_disclosure) is emitted with the repo +
+  file + snippet as evidence.
+- When a snippet contains secret-indicator tokens (api_key / secret / password / bearer / AWS-style
+  key prefixes / GitHub PAT prefixes / Slack tokens / etc.) near the domain reference, severity
+  escalates to **high** with category=`secret_leak` and CWE-798. The verification_status is
+  `needs_review` for these — the agent should fetch the file and confirm.
+- Subdomains extracted from snippets are returned in `extracted_subdomains` for handoff to the
+  next phase (subdomain enum, fingerprint).
+
+Provider keys:
+- `STRIX_GITHUB_TOKEN` — required for GitHub. A free GitHub PAT (no scopes needed for public code
+  search) is sufficient. Without it, GitHub is silently dropped from the default provider set.
+- `STRIX_GITLAB_TOKEN` — optional for GitLab; raises the unauthenticated rate limit.
+
+Categories: `info_disclosure`, `secret_leak`. CWEs: `CWE-200`, `CWE-798`.</description>
+    <parameters>
+      <parameter name="domain" type="string" required="true">
+        <description>Apex or subdomain to search for. The exact string is queried (quoted).</description>
+      </parameter>
+      <parameter name="providers" type="string" required="false">
+        <description>Comma-separated subset of {github, gitlab}. Default: "all" (key-gated providers fall back gracefully).</description>
+      </parameter>
+      <parameter name="max_results" type="integer" required="false">
+        <description>Maximum hits per provider. Default 30, capped at 100 by the API.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, domain, providers_queried, per_provider: [{provider, success, total_count?, hits, error?}], extracted_subdomains, hit_count, secret_leak_count}.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<code_search_for_domain>
+<parameter=domain>example.com</parameter>
+</code_search_for_domain>
+
+<code_search_for_domain>
+<parameter=domain>internal.example.com</parameter>
+<parameter=providers>github</parameter>
+<parameter=max_results>50</parameter>
+</code_search_for_domain>
+]]>
+    </example_usage>
+  </tool>
+</tools>
