@@ -387,6 +387,7 @@ def create_agent(
     name: str,
     inherit_context: bool = True,
     skills: str | None = None,
+    category: str | None = None,
 ) -> dict[str, Any]:
     try:
         parent_id = agent_state.agent_id
@@ -438,9 +439,11 @@ def create_agent(
             if "White-box execution guidance (recommended when source is available):" not in task:
                 task = f"{task.rstrip()}{whitebox_guidance}"
 
+        normalized_category = category.strip().lower() if isinstance(category, str) and category.strip() else None
         state = AgentState(
             task=task,
             agent_name=name,
+            category=normalized_category,
             parent_id=parent_id,
             max_iterations=300,
             waiting_timeout=300 if interactive else 600,
@@ -486,6 +489,7 @@ def create_agent(
             "agent_info": {
                 "id": state.agent_id,
                 "name": name,
+                "category": normalized_category,
                 "status": "running",
                 "parent_id": parent_id,
             },
