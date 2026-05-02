@@ -297,6 +297,132 @@ def test_cloud_assets_skipped_when_disabled(monkeypatch, tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# dns_only mode
+# ---------------------------------------------------------------------------
+
+
+def _track_called(monkeypatch) -> dict[str, bool]:
+    """Patch every active-probing step and record whether it ran."""
+    called = {"takeover": False, "cloud": False, "triage": False}
+    from strix.tools.recon import cloud_assets, takeover
+
+    def fake_cloud(**kw):
+        called["cloud"] = True
+        return {"success": True, "hits": [], "hit_count": 0}
+
+    def fake_takeover(**kw):
+        called["takeover"] = True
+        return {"success": True, "candidates": 0, "results": []}
+
+    def fake_triage(host: str):
+        called["triage"] = True
+        return {"host": host, "ip": "1.2.3.4", "live": True, "triage": "deep", "evidence": ""}
+
+    monkeypatch.setattr(cloud_assets, "discover_cloud_assets", fake_cloud)
+    monkeypatch.setattr(takeover, "subdomain_takeover_check", fake_takeover)
+    monkeypatch.setattr(dp, "_triage_subdomain", fake_triage)
+    return called
+
+
+def test_dns_only_skips_takeover_cloud_assets_triage(monkeypatch, tmp_path) -> None:
+    """All three active-probing steps should be skipped under dns_only."""
+    called = _track_called(monkeypatch)
+    _patch_underlying(monkeypatch, subfinder_subs=["api.example.com"])
+    # _patch_underlying re-patches the same functions, so re-apply our trackers
+    # last to win.
+    called = _track_called(monkeypatch)
+
+    out = dp.domain_recon_pipeline("example.com", dns_only=True)
+    assert out["success"] is True
+    assert out["surface_map"]["dns_only"] is True
+    assert called["takeover"] is False
+    assert called["cloud"] is False
+    assert called["triage"] is False
+
+
+def test_dns_only_keeps_passive_steps(monkeypatch, tmp_path) -> None:
+    """org_fingerprint, dns_hygiene, passive_dns, subdomain_enum all still run."""
+    called: dict[str, bool] = {
+        "org": False, "dns": False, "passive_dns": False, "enum": False,
+    }
+    from strix.tools.recon import (
+        cloud_assets,
+        dns_hygiene,
+        org_recon,
+        passive_dns,
+        takeover,
+    )
+
+    def fake_org(domain, **kw):
+        called["org"] = True
+        return {"success": True}
+
+    def fake_dns(domain, **kw):
+        called["dns"] = True
+        return {"success": True, "results": []}
+
+    def fake_passive(domain, **kw):
+        called["passive_dns"] = True
+        return {"success": False}  # no key configured — fail-open path
+
+    monkeypatch.setattr(org_recon, "org_fingerprint", fake_org)
+    monkeypatch.setattr(dns_hygiene, "dns_hygiene_check", fake_dns)
+    monkeypatch.setattr(passive_dns, "passive_dns_history", fake_passive)
+    monkeypatch.setattr(cloud_assets, "discover_cloud_assets", lambda **kw: {"success": True, "hits": [], "hit_count": 0})
+    monkeypatch.setattr(takeover, "subdomain_takeover_check", lambda **kw: {"success": True, "candidates": 0, "results": []})
+
+    from strix.tools.recon import subdomain_enum_tool as _sub
+
+    def fake_sub(domain, **kw):
+        called["enum"] = True
+        return {"success": True, "domain": domain, "subdomains": [], "per_source_counts": {}, "sources_run": [], "total_unique": 0}
+
+    monkeypatch.setattr(_sub, "subdomain_enum", fake_sub)
+    monkeypatch.setattr(dp, "_triage_subdomain", lambda h: {"host": h, "live": False, "triage": "skip", "evidence": ""})
+
+    dp.domain_recon_pipeline("example.com", dns_only=True)
+    assert called["org"] is True
+    assert called["dns"] is True
+    assert called["passive_dns"] is True
+    assert called["enum"] is True
+
+
+def test_dns_only_via_env_var(monkeypatch, tmp_path) -> None:
+    """STRIX_DNS_ONLY=1 forces dns_only mode regardless of the call arg."""
+    monkeypatch.setenv("STRIX_DNS_ONLY", "1")
+    _patch_underlying(monkeypatch, subfinder_subs=["api.example.com"])
+    called = _track_called(monkeypatch)
+
+    out = dp.domain_recon_pipeline("example.com")  # no explicit dns_only kwarg
+    assert out["surface_map"]["dns_only"] is True
+    assert called["takeover"] is False
+    assert called["cloud"] is False
+    assert called["triage"] is False
+
+
+def test_dns_only_env_var_other_values_dont_trigger(monkeypatch, tmp_path) -> None:
+    """STRIX_DNS_ONLY must equal exactly '1' to enable — '0' / 'true' / etc.
+    don't activate the mode (avoid surprising bool coercion)."""
+    monkeypatch.setenv("STRIX_DNS_ONLY", "0")
+    _patch_underlying(monkeypatch, subfinder_subs=["api.example.com"])
+    called = _track_called(monkeypatch)
+
+    dp.domain_recon_pipeline("example.com")
+    assert called["takeover"] is True  # mode NOT activated
+
+
+def test_normal_mode_runs_active_probes(monkeypatch, tmp_path) -> None:
+    """Sanity: without dns_only, takeover/cloud/triage all run."""
+    _patch_underlying(monkeypatch, subfinder_subs=["api.example.com"])
+    called = _track_called(monkeypatch)
+
+    dp.domain_recon_pipeline("example.com")
+    assert called["takeover"] is True
+    assert called["cloud"] is True
+    assert called["triage"] is True
+
+
+# ---------------------------------------------------------------------------
 # next_steps
 # ---------------------------------------------------------------------------
 

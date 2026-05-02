@@ -51,6 +51,9 @@ Triage classification per subdomain:
       <parameter name="triage_subdomains" type="boolean" required="false">
         <description>When true (default), HEAD-probe each live subdomain and classify it as deep / shallow / skip.</description>
       </parameter>
+      <parameter name="dns_only" type="boolean" required="false">
+        <description>Passive-recon mode. When true, skip every step that issues HTTP/TCP probes to the target's own hosts: subdomain triage, takeover fingerprint fetches, cloud-asset HEAD probes. Pure DNS and third-party API steps (passive_dns, subdomain_enum's passive sources, dns_hygiene, org_fingerprint) still run. Implicitly forces enable_cloud_assets=False and triage_subdomains=False. The CLI flag `--dns-only` sets STRIX_DNS_ONLY=1, which forces this mode regardless of the parameter.</description>
+      </parameter>
     </parameters>
     <returns type="dict">
       <description>{success, domain, phase_id, surface_map: {...}, next_steps: [...]}.

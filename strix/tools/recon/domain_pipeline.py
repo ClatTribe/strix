@@ -213,6 +213,7 @@ def domain_recon_pipeline(  # noqa: PLR0913
     enable_cloud_assets: bool = True,
     subdomain_max: int = 50,
     triage_subdomains: bool = True,
+    dns_only: bool = False,
 ) -> dict[str, Any]:
     """Orchestrate the full deterministic domain-target recon pipeline.
 
@@ -225,6 +226,17 @@ def domain_recon_pipeline(  # noqa: PLR0913
                        to bound HTTP probe count).
         triage_subdomains: when True, HEAD-probe each live subdomain and
                            classify deep / shallow / skip.
+        dns_only: passive-recon mode. When True, every step that issues an
+                  HTTP/TCP probe to the target's own hosts is skipped:
+                  - subdomain triage (HEAD probes per host)
+                  - subdomain takeover check (HEAD probes for fingerprints)
+                  - cloud-asset discovery (HEAD probes against bucket URLs)
+                  Steps that are pure DNS or hit third-party APIs run
+                  normally: dns_hygiene, org_fingerprint, passive_dns,
+                  subdomain_enum (passive sources + DNS bruteforce).
+                  Implicitly forces `triage_subdomains=False` and
+                  `enable_cloud_assets=False`. Setting `STRIX_DNS_ONLY=1`
+                  in the environment also enables this.
 
     Effects:
         - Brackets the whole pipeline in a phase.entered/phase.completed
@@ -242,6 +254,17 @@ def domain_recon_pipeline(  # noqa: PLR0913
     """
     if not looks_like_domain(domain):
         return {"success": False, "error": f"invalid domain: {domain!r}"}
+
+    # Environment opt-in: STRIX_DNS_ONLY=1 forces dns_only mode regardless of
+    # the explicit parameter, so the CLI flag in main.py can express intent
+    # without the agent having to remember to pass dns_only=True every time.
+    import os as _os
+
+    if _os.environ.get("STRIX_DNS_ONLY") == "1":
+        dns_only = True
+    if dns_only:
+        enable_cloud_assets = False
+        triage_subdomains = False
 
     # Open the recon phase. We always close it in `finally` so a partial
     # failure still emits phase.completed.
@@ -304,10 +327,14 @@ def domain_recon_pipeline(  # noqa: PLR0913
 
         # 6. Subdomain takeover across the discovered set (live or not — CNAME
         #    targets matter even when the subdomain itself doesn't HTTP-respond).
-        takeover_subs_arg = ",".join(all_subs[:subdomain_max])
-        takeover_result = takeover.subdomain_takeover_check(
-            domain=domain, subdomains=takeover_subs_arg
-        )
+        # In dns_only mode we skip — fingerprint matching needs HTTP body
+        # fetches against the candidate hosts.
+        takeover_result: dict[str, Any] | None = None
+        if not dns_only:
+            takeover_subs_arg = ",".join(all_subs[:subdomain_max])
+            takeover_result = takeover.subdomain_takeover_check(
+                domain=domain, subdomains=takeover_subs_arg
+            )
 
         # 7. Cloud assets.
         cloud_result: dict[str, Any] | None = None
@@ -320,6 +347,7 @@ def domain_recon_pipeline(  # noqa: PLR0913
             "domain": domain,
             "generated_at": datetime.now(UTC).isoformat(),
             "phase_id": phase_id,
+            "dns_only": dns_only,
             "summary": {
                 "subdomains_discovered": len(all_subs),
                 "subdomains_live": len(live_targets),

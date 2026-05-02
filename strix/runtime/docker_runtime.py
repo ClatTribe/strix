@@ -149,6 +149,14 @@ class DockerRuntime(AbstractRuntime):
                         "TOOL_SERVER_TOKEN": self._tool_server_token,
                         "STRIX_SANDBOX_EXECUTION_TIMEOUT": str(execution_timeout),
                         "HOST_GATEWAY": HOST_GATEWAY_HOSTNAME,
+                        # Forward scan-mode flags set on the host (e.g. by
+                        # `--dns-only`) into the sandbox so tool implementations
+                        # running inside the container see the same intent.
+                        **(
+                            {"STRIX_DNS_ONLY": os.environ["STRIX_DNS_ONLY"]}
+                            if os.environ.get("STRIX_DNS_ONLY") == "1"
+                            else {}
+                        ),
                     },
                     extra_hosts={HOST_GATEWAY_HOSTNAME: "host-gateway"},
                     tty=True,
