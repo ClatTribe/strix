@@ -496,6 +496,135 @@ def create_agent(
         }
 
 
+_DEFAULT_WEBAPP_SUBTEAM_SKILLS = "xss,sql_injection,authentication_jwt,ssrf,idor"
+
+
+_DEFAULT_WEBAPP_SUBTEAM_TASK_TEMPLATE = (
+    "Web-application penetration test scoped to a single subdomain handed off "
+    "from the domain-recon orchestrator's pivot-triage step.\n\n"
+    "Target host: {host}\n"
+    "Authoritative URL: {url}\n\n"
+    "The host was classified as `deep` by the upstream triage classifier — it "
+    "responded as a web application or auth-protected surface. Run a focused "
+    "exploitation pass:\n"
+    "1. Reconnaissance against this host only (paths, params, auth scheme).\n"
+    "2. Vulnerability classes loaded via skills (XSS, SQLi, auth/JWT, SSRF, "
+    "IDOR) — load additional skills via `load_skill` when the surface "
+    "demands.\n"
+    "3. Verify and document each finding with PoC where authorization "
+    "permits.\n"
+    "4. When complete, return findings via `agent_finish`.\n\n"
+    "Stay strictly within this single host's scope. Do not pivot to other "
+    "subdomains — the parent orchestrator is responsible for cross-target "
+    "coordination."
+)
+
+
+@register_tool(sandbox_execution=False)
+def spawn_webapp_subteam(
+    agent_state: Any,
+    deep_targets: str,
+    skills: str = _DEFAULT_WEBAPP_SUBTEAM_SKILLS,
+    max_subteams: int = 5,
+    category: str = "webapp-attacker",
+) -> dict[str, Any]:
+    """Cross-team handoff — spawn a web-app sub-team per `deep` subdomain.
+
+    Roadmap §8.3. The `domain_recon_pipeline` orchestrator's pivot-triage
+    classifier flags some subdomains as `deep` (200/3xx HTML/JSON or
+    401/403). This tool turns those classifications into actual sub-agent
+    spawns, one per host, each scoped to that subdomain.
+
+    Args:
+        deep_targets: comma-separated list of subdomain hosts (typically
+                      the `deep_targets` field from the orchestrator's
+                      surface_map). The agent may pass through what it
+                      received verbatim.
+        skills: comma-separated skill list for each sub-agent.
+                Default: a 5-skill web-app starter set
+                (xss, sql_injection, authentication_jwt, ssrf, idor).
+                Each sub-agent can pull additional skills via
+                `load_skill` when its target surface demands.
+        max_subteams: hard cap on number of sub-agents spawned. Default
+                      5; raise carefully — each sub-agent runs in its own
+                      LLM context and consumes tokens accordingly.
+        category: role tag stamped on every spawned sub-agent's
+                  `agent.created` event. Default "webapp-attacker".
+
+    Returns:
+        {
+          success,
+          spawned: [{agent_id, host, category, name}, ...],
+          skipped: [{host, reason}, ...],
+          total_spawned, max_subteams,
+          message
+        }
+
+    Always returns `success=True` even when the deep_targets list is
+    empty or every spawn fails — the agent is supposed to read the
+    structured result and decide what to do next, not branch on success.
+    """
+    hosts: list[str] = [h.strip().lower() for h in (deep_targets or "").split(",") if h.strip()]
+
+    spawned: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+
+    capped_hosts = hosts[: max(1, max_subteams)]
+    for over in hosts[max(1, max_subteams):]:
+        skipped.append({"host": over, "reason": "max_subteams cap"})
+
+    seen: set[str] = set()
+    for host in capped_hosts:
+        if host in seen:
+            skipped.append({"host": host, "reason": "duplicate"})
+            continue
+        seen.add(host)
+
+        # Default to https — most modern apps redirect anyway and the
+        # agent will follow the redirect chain.
+        url = f"https://{host}"
+        task = _DEFAULT_WEBAPP_SUBTEAM_TASK_TEMPLATE.format(host=host, url=url)
+        name = f"WebApp: {host}"
+
+        try:
+            result = create_agent(
+                agent_state=agent_state,
+                task=task,
+                name=name,
+                inherit_context=False,
+                skills=skills,
+                category=category,
+            )
+        except Exception as e:  # noqa: BLE001
+            skipped.append({"host": host, "reason": f"spawn_failed: {e}"})
+            continue
+
+        if not result.get("success"):
+            skipped.append({"host": host, "reason": result.get("error") or "spawn returned non-success"})
+            continue
+
+        spawned.append(
+            {
+                "agent_id": result.get("agent_id"),
+                "host": host,
+                "category": (result.get("agent_info") or {}).get("category") or category,
+                "name": name,
+            }
+        )
+
+    return {
+        "success": True,
+        "spawned": spawned,
+        "skipped": skipped,
+        "total_spawned": len(spawned),
+        "max_subteams": max_subteams,
+        "message": (
+            f"Spawned {len(spawned)} web-app sub-team(s) of {len(hosts)} requested "
+            f"(cap: {max_subteams}; skipped: {len(skipped)})."
+        ),
+    }
+
+
 @register_tool(sandbox_execution=False)
 def send_message_to_agent(
     agent_state: Any,

@@ -126,6 +126,55 @@ Only create a new agent if no existing agent is handling the specific task.</des
   </function>
     </examples>
   </tool>
+  <tool name="spawn_webapp_subteam">
+    <description>Cross-team handoff — spawn a focused web-app sub-team per `deep` subdomain.
+
+The `domain_recon_pipeline` orchestrator's pivot-triage step classifies live subdomains
+as `deep` (200/3xx HTML/JSON or 401/403 — auth-protected web apps) vs. `shallow`
+(redirects, static content) vs. `skip` (no DNS / 5xx). This tool turns the deep
+classifications into actual sub-agent spawns: one agent per host, scoped to that
+single subdomain, with a 5-skill web-app starter set loaded.
+
+Use this immediately after `domain_recon_pipeline` returns, passing
+`surface_map.deep_targets` (or any subset you want to scope tightly) into the
+`deep_targets` parameter. Each spawned sub-agent runs independently in its own
+LLM context — token cost scales linearly with the count, so the `max_subteams`
+cap (default 5) protects against runaway spawning on broad scans.
+
+Each spawned agent is stamped with category="webapp-attacker" by default so the
+`agent.created` event stream surfaces named specialists (§1 roadmap item).</description>
+    <parameters>
+      <parameter name="deep_targets" type="string" required="true">
+        <description>Comma-separated list of subdomain hosts to hand off (typically copied from `surface_map.deep_targets`). Each host gets its own sub-agent.</description>
+      </parameter>
+      <parameter name="skills" type="string" required="false">
+        <description>Comma-separated skill list for each spawned sub-agent (max 5). Default: `xss,sql_injection,authentication_jwt,ssrf,idor`. Each sub-agent can pull more skills via `load_skill` once it sees its target's surface.</description>
+      </parameter>
+      <parameter name="max_subteams" type="integer" required="false">
+        <description>Hard cap on number of sub-agents spawned. Default 5. Hosts beyond the cap are reported in `skipped`.</description>
+      </parameter>
+      <parameter name="category" type="string" required="false">
+        <description>Role tag stamped on every spawned sub-agent's `agent.created` event. Default `webapp-attacker`. Override when spawning a more specialized cohort (e.g. `auth-attacker` if all deep targets share a common auth surface).</description>
+      </parameter>
+    </parameters>
+    <returns type="Dict[str, Any]">
+      <description>Returns {success, spawned: [{agent_id, host, category, name}, ...], skipped: [{host, reason}, ...], total_spawned, max_subteams, message}. Always success=True — read the structured fields rather than branching on success.</description>
+    </returns>
+    <examples>
+  # Typical handoff right after domain_recon_pipeline returns:
+  <function=spawn_webapp_subteam>
+  <parameter=deep_targets>api.example.com,admin.example.com,app.example.com</parameter>
+  </function>
+
+  # Tighter scope with a custom skill set:
+  <function=spawn_webapp_subteam>
+  <parameter=deep_targets>auth.example.com,sso.example.com</parameter>
+  <parameter=skills>authentication_jwt,business_logic,csrf</parameter>
+  <parameter=category>auth-attacker</parameter>
+  <parameter=max_subteams>2</parameter>
+  </function>
+    </examples>
+  </tool>
   <tool name="send_message_to_agent">
     <description>Send a message to another agent in the graph for coordination and communication.</description>
     <details>This enables agents to communicate with each other during execution, but should be used only when essential:
