@@ -19,6 +19,7 @@ from .fingerprint import fingerprint_tech_stack
 from .org_recon import org_fingerprint
 from .passive_dns import passive_dns_history
 from .phase import record_phase
+from .subdomain_enum_tool import subdomain_enum
 from .takeover import subdomain_takeover_check
 
 
@@ -30,5 +31,6 @@ __all__ = [
     "org_fingerprint",
     "passive_dns_history",
     "record_phase",
+    "subdomain_enum",
     "subdomain_takeover_check",
 ]

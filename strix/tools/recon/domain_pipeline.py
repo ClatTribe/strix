@@ -269,8 +269,15 @@ def domain_recon_pipeline(  # noqa: PLR0913
         if enable_passive_dns:
             passive_dns_result = passive_dns.passive_dns_history(domain)
 
-        # 4. Subdomain enumeration.
-        subfinder_subs = _subfinder_enumerate(domain)
+        # 4. Subdomain enumeration — multi-source via subdomain_enum tool
+        # (subfinder + amass + dns_bruteforce + wayback + permutations).
+        # Per-source budget bounds total network volume.
+        from . import subdomain_enum_tool as _subdomain_enum_mod
+
+        enum_result = _subdomain_enum_mod.subdomain_enum(
+            domain, max_per_source=max(subdomain_max, 100)
+        )
+        enum_subs = enum_result.get("subdomains", []) if enum_result.get("success") else []
         passive_dns_subs = (
             (passive_dns_result or {}).get("merged_subdomains", []) or []
             if isinstance(passive_dns_result, dict) and passive_dns_result.get("success")
@@ -278,10 +285,12 @@ def domain_recon_pipeline(  # noqa: PLR0913
         )
         # Always include the apex and www. Bound by subdomain_max.
         all_subs = _merge_subdomains(
-            subfinder_subs,
+            enum_subs,
             passive_dns_subs,
             [domain, f"www.{domain}"],
         )[:subdomain_max]
+        # Track per-source counts for the surface map summary.
+        enum_per_source = enum_result.get("per_source_counts", {}) if enum_result.get("success") else {}
 
         # 5. Triage each subdomain.
         triage_results: list[dict[str, Any]] = []
@@ -324,7 +333,7 @@ def domain_recon_pipeline(  # noqa: PLR0913
             "dns_hygiene": _strip_for_handoff(dns_result),
             "passive_dns": _strip_for_handoff(passive_dns_result) if passive_dns_result else None,
             "subdomain_enum": {
-                "from_subfinder": len(subfinder_subs),
+                "per_source": enum_per_source,
                 "from_passive_dns": len(passive_dns_subs),
                 "all_unique": len(all_subs),
                 "subdomains": all_subs,
