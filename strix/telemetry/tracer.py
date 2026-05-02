@@ -129,6 +129,73 @@ _OTEL_BOOTSTRAPPED = False
 _OTEL_REMOTE_ENABLED = False
 
 
+def _build_summary_text(
+    *,
+    targets: list[dict[str, str]],
+    duration_seconds: float,
+    findings_total: int,
+    by_severity: dict[str, int],
+    by_category: dict[str, int],
+    check_summary: dict[str, Any],
+) -> str:
+    """One-paragraph plain-English headline of how the scan went.
+
+    Roadmap §1. Designed for direct rendering in CI exit logs, dashboard
+    cards, and Slack notifications. Avoids markdown so it survives any
+    plain-text channel.
+    """
+    parts: list[str] = []
+
+    # Targets opener.
+    if targets:
+        if len(targets) == 1:
+            t = targets[0]
+            label = f"{t['value']}" + (f" ({t.get('type')})" if t.get("type") else "")
+            parts.append(f"Scanned {label}")
+        else:
+            parts.append(f"Scanned {len(targets)} targets")
+    else:
+        parts.append("Scan completed")
+
+    # Duration.
+    if duration_seconds >= 60:
+        mins = duration_seconds / 60
+        parts.append(f"in {mins:.1f}m")
+    elif duration_seconds > 0:
+        parts.append(f"in {duration_seconds:.0f}s")
+
+    # Findings.
+    if findings_total == 0:
+        parts.append("with no findings")
+    else:
+        sev_pieces: list[str] = []
+        for sev in ("critical", "high", "medium", "low", "info"):
+            count = by_severity.get(sev) or by_severity.get(sev.upper())
+            if count:
+                sev_pieces.append(f"{count} {sev}")
+        sev_str = ", ".join(sev_pieces) if sev_pieces else f"{findings_total} total"
+        parts.append(f"with {findings_total} finding(s): {sev_str}")
+
+    # Top categories — most-hit category names, capped at 3.
+    if by_category:
+        top_cats = sorted(by_category.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        cat_str = ", ".join(c for c, _ in top_cats)
+        parts.append(f"primarily in {cat_str}")
+
+    # Negative-coverage signal (so the summary is honest about what was
+    # checked even when no findings landed).
+    by_result = (check_summary or {}).get("by_result") or {}
+    not_vuln = by_result.get("not_vulnerable", 0)
+    inconclusive = by_result.get("inconclusive", 0)
+    total_checks = (check_summary or {}).get("total", 0)
+    if total_checks:
+        parts.append(
+            f"{total_checks} check(s) ran ({not_vuln} clean, {inconclusive} inconclusive)"
+        )
+
+    return "; ".join(parts) + "."
+
+
 def get_global_tracer() -> Optional["Tracer"]:
     return _global_tracer
 
@@ -391,6 +458,104 @@ class Tracer:
                 "remote_export_enabled": self._remote_export_enabled,
             },
             status="running",
+            include_run_metadata=True,
+        )
+
+    def build_run_summary(self) -> dict[str, Any]:
+        """Assemble the run-summary payload from final tracer state.
+
+        Roadmap §1. Headline answer for "how did the scan go" — consumable
+        by CI logs, dashboard cards, and Slack notifications without
+        re-parsing the markdown report.
+
+        Always-present fields:
+        - schema_version, run_id, run_name, duration_seconds
+        - targets: [{value, type}, ...] (from scan_config when available)
+        - findings_summary: {total, by_severity, by_category}
+        - top_findings: up to 5 findings sorted by severity
+        - checks: get_check_summary() output (may be empty when no
+          deterministic check events were emitted)
+        - summary_text: a short plain-English headline
+        """
+        # Targets — pull from scan_config (set by `set_scan_config`).
+        targets: list[dict[str, str]] = []
+        config = self.scan_config or {}
+        for raw in (config.get("targets") or []):
+            if isinstance(raw, dict):
+                value = raw.get("value") or raw.get("target") or raw.get("original")
+                target_type = raw.get("type") or raw.get("target_type")
+                if value:
+                    entry = {"value": str(value)}
+                    if target_type:
+                        entry["type"] = str(target_type)
+                    targets.append(entry)
+            elif isinstance(raw, str):
+                targets.append({"value": raw})
+
+        # Findings rollup.
+        by_severity: dict[str, int] = {}
+        by_category: dict[str, int] = {}
+        for r in self.vulnerability_reports:
+            sev = (r.get("severity") or "unknown").lower()
+            by_severity[sev] = by_severity.get(sev, 0) + 1
+            cat = (r.get("category") or "uncategorized").lower()
+            by_category[cat] = by_category.get(cat, 0) + 1
+
+        severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+        sorted_findings = sorted(
+            self.vulnerability_reports,
+            key=lambda r: (severity_order.get((r.get("severity") or "").lower(), 5), r.get("timestamp", "")),
+        )
+        top_findings = [
+            {
+                "id": r.get("id"),
+                "title": r.get("title"),
+                "severity": r.get("severity"),
+                "category": r.get("category"),
+                "cwe": r.get("cwe"),
+                "endpoint": r.get("endpoint"),
+            }
+            for r in sorted_findings[:5]
+        ]
+
+        check_summary = self.get_check_summary()
+        duration = self._calculate_duration()
+        summary_text = _build_summary_text(
+            targets=targets,
+            duration_seconds=duration,
+            findings_total=len(self.vulnerability_reports),
+            by_severity=by_severity,
+            by_category=by_category,
+            check_summary=check_summary,
+        )
+
+        return {
+            "schema_version": 1,
+            "run_id": self.run_id,
+            "run_name": self.run_name,
+            "duration_seconds": duration,
+            "targets": targets,
+            "findings_summary": {
+                "total": len(self.vulnerability_reports),
+                "by_severity": by_severity,
+                "by_category": by_category,
+            },
+            "top_findings": top_findings,
+            "checks": check_summary,
+            "summary_text": summary_text,
+        }
+
+    def _emit_run_summary_event(self, payload: dict[str, Any] | None = None) -> None:
+        """Emit the run.summary event. Pass `payload` to skip rebuild
+        when the caller already has the dict (e.g. when persisting
+        `run_summary.json` alongside)."""
+        if not self._telemetry_enabled:
+            return
+        self._emit_event(
+            "run.summary",
+            payload=payload if payload is not None else self.build_run_summary(),
+            status="completed",
+            source="strix.run",
             include_run_metadata=True,
         )
 
@@ -1390,6 +1555,19 @@ class Tracer:
 
             logger.info("📊 Essential scan data saved to: %s", run_dir)
             if mark_complete and not self._run_completed_emitted:
+                # Emit run.summary first so consumers receiving events in
+                # order see the structured summary before the terminal
+                # run.completed signal. Also persist run_summary.json so
+                # filesystem consumers (CI, dashboard scrapers) see the
+                # same payload without parsing events.jsonl.
+                summary_payload = self.build_run_summary()
+                try:
+                    summary_path = run_dir / "run_summary.json"
+                    with summary_path.open("w", encoding="utf-8") as f:
+                        json.dump(summary_payload, f, indent=2, ensure_ascii=False, default=str)
+                except OSError:
+                    logger.exception("failed to write run_summary.json")
+                self._emit_run_summary_event(summary_payload)
                 self._emit_event(
                     "run.completed",
                     payload={
