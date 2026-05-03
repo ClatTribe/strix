@@ -1,0 +1,66 @@
+<tools>
+  <tool name="authz_matrix_check">
+    <description>Authorization-matrix prober. For each (role × endpoint) cell, dispatch the
+same request as that role and compare outcomes. Detects unauthenticated bypass and
+vertical privilege escalation.
+
+The classical pen-test approach to authorization. Today the agent fragments this across
+many sessions; gaps are inevitable. This tool turns it into one deterministic call.
+
+Compose with:
+- `bfs_crawl` (the endpoint inventory) — pass its `endpoints` field verbatim
+- Cluster-A safety middleware — auth-injection on top of role headers, exclude-path,
+  rate-limit; all applied automatically per request
+
+Roles:
+Each role is `{name, headers, privilege?}` where `headers` is the role's auth headers
+(Cookie/Authorization/X-API-Key/etc.). The headers cross only into the proxy's request
+— they are NEVER logged in events.jsonl, finding bodies, or tool outputs. Only the role
+*name* (which is an operator-chosen label) appears in finding evidence.
+
+Convention: include an `unauth` role with empty `headers: {}` to detect anonymous
+bypass. Include 2+ authenticated roles with distinct `privilege` values (typically 50
+for `user` and 100 for `admin`) to detect vertical privilege escalation on admin-shaped
+paths.
+
+Findings:
+- **High** (CWE-862, missing_authorization) — `unauth` role gets the same response
+  signature (status + body length) as ANY authenticated role on the same endpoint.
+- **High** (CWE-285, improper_authorization) — lower-privilege role gets the same
+  response as higher-privilege role on an admin-shaped path (default heuristics:
+  /admin, /internal, /private, /manage, /superuser, /staff, /_admin, /sudo, /root —
+  override via `admin_path_patterns`).
+
+`verification_status=needs_review` on every finding because the heuristic relies on
+response-signature equality; the agent should fetch the underlying responses to
+verify before treating the finding as confirmed.</description>
+    <parameters>
+      <parameter name="endpoints" type="string" required="true">
+        <description>JSON-encoded list of endpoints. Accepts either bfs_crawl's `[{url, method, ...}]` shape verbatim or a flat URL list (implicit method=GET). Duplicates removed.</description>
+      </parameter>
+      <parameter name="roles" type="string" required="true">
+        <description>JSON-encoded list of roles. Each: `{name: str, headers: dict, privilege?: int}`. `name` is the operator-chosen label that appears in findings. `headers` is the role's auth header set (NEVER logged). `privilege` is optional integer (default 50 for named roles, 0 for `unauth`/`anonymous`/`anon`). Roles are probed in privilege order, lowest first.</description>
+      </parameter>
+      <parameter name="timeout" type="integer" required="false">
+        <description>Per-request timeout in seconds. Default 12.</description>
+      </parameter>
+      <parameter name="max_cells" type="integer" required="false">
+        <description>Hard cap on (role × endpoint) cells probed. Default 200, hard-capped at 2000. Bounds total request count + protects rate-limit budget.</description>
+      </parameter>
+      <parameter name="admin_path_patterns" type="string" required="false">
+        <description>Comma-separated regex list overriding the default admin-path heuristics. Example: `/api/v1/admin/.*,/internal/.*`. Used only for vertical priv-esc detection — `unauth_bypass` detection runs against every endpoint regardless.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, endpoints_count, roles, cells: [{role, url, method, status, body_length, signature, skipped?, error?}], stats}. Findings are emitted as side effects via the tracer (see `verification_status` and `category` fields on each finding).</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<authz_matrix_check>
+<parameter=endpoints>[{"url":"https://app.example.com/api/users","method":"GET"},{"url":"https://app.example.com/admin/users","method":"GET"}]</parameter>
+<parameter=roles>[{"name":"unauth","headers":{}},{"name":"user","headers":{"Cookie":"session=user-tok"},"privilege":50},{"name":"admin","headers":{"Cookie":"session=admin-tok"},"privilege":100}]</parameter>
+</authz_matrix_check>
+]]>
+    </example_usage>
+  </tool>
+</tools>
