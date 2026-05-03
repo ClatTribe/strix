@@ -1,0 +1,55 @@
+<tools>
+  <tool name="request_smuggling_check">
+    <description>Probe a URL for HTTP request smuggling / desync via differential Transfer-Encoding header detection. Catches CL.TE / TE.CL / TE.TE class vulnerabilities by exposing parser disagreement between front-end (CDN / load-balancer / WAF) and back-end (origin) without ever sending an actual smuggled second request.
+
+Methodology (one TCP connection per probe; uses raw sockets because HTTP libraries auto-normalize headers):
+
+1. Send a baseline POST with `Transfer-Encoding: chunked` and a chunked-empty body (`0\r\n\r\n`).
+2. Send 8 obfuscated TE variants (same body, mutated TE header):
+   - `te_xchunked` — `Transfer-Encoding: xchunked`
+   - `te_space_after_value` — trailing space
+   - `te_tab_after_value` — trailing tab
+   - `te_chunked_uppercase` — mixed case
+   - `te_dual_value` — `chunked, identity`
+   - `te_obscure_separator` — vertical tab in header name
+   - `te_dup_header` — two TE headers (chunked + identity)
+   - `cl_te_present` — Content-Length + Transfer-Encoding both present
+3. Diff each variant's `(status, body_length)` against the baseline.
+
+Findings:
+
+- **High** (CWE-444, http_request_smuggling) — any variant returns a different status class than baseline (2xx vs 4xx, etc.). Direct evidence of parser disagreement; this IS the smuggling primitive.
+- **Medium** (CWE-444) — same status class but body length differs by more than 20% AND both responses are 2xx / 4xx (5xx pairs filtered because both tiers may be timing out independently).
+
+Each finding includes `description_plain` + `recommended_action`. Recommendation is universal: front the application with a single HTTP parser end-to-end; reject CL+TE combinations at the edge; reject `Transfer-Encoding` values other than exact-match `chunked`. `verification_status=needs_review` since header-level differential detection is a strong signal but not equivalent to a confirmed smuggle — the agent should follow up with PortSwigger's full timing-based methodology.
+
+Safe by default: every probe sends a benign chunked-empty body (`0\r\n\r\n`) — even if a back-end interpreted the body as a smuggled second request, `0\r\n` is not a valid HTTP request line and would be rejected with a 400. No actual smuggled requests are dispatched.
+
+Composes with cluster-A safety (manual integration since we bypass proxy_manager): `is_path_excluded` checked before each connect; `throttle_for_rate_limit` called before each connect; auth headers from `STRIX_AUTH_*` env added via `inject_auth_headers`.</description>
+    <parameters>
+      <parameter name="target" type="string" required="true">
+        <description>URL to probe. Bare hostnames are auto-prefixed with `https://`. Default ports: 443 (https), 80 (http). Examples: `example.com`, `https://app.example.com/login`, `https://api.example.com:8443/health`.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-probe timeout in seconds. Default 10.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target_url, target_host, target_port, baseline: {status, body_length, error?, skipped?}, probes: [{label, mutation_note, status, body_length, error?, differs_status_class, body_length_delta_pct, finding_severity, evidence}, ...], findings_emitted}.
+
+The agent should follow up high-severity findings with PortSwigger's full timing-based methodology (CL.TE / TE.CL probes via Burp Repeater) before treating the desync vector as a confirmed exploit.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<request_smuggling_check>
+<parameter=target>https://app.example.com/</parameter>
+</request_smuggling_check>
+
+<request_smuggling_check>
+<parameter=target>example.com</parameter>
+<parameter=timeout>20</parameter>
+</request_smuggling_check>
+]]>
+    </example_usage>
+  </tool>
+</tools>
