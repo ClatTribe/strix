@@ -1,0 +1,63 @@
+<tools>
+  <tool name="cache_deception_check">
+    <description>Probe a URL for web cache deception. Detects whether a CDN / front-end cache will cache an authenticated response when the URL is suffixed with a static-asset-shaped extension or path-traversal-style delimiter — the classic Omer Gil 2017 vector for harvesting other users' authed content.
+
+Methodology (single pass per scan, auth-injection from `--auth-*` flags applied automatically):
+
+1. Fetch the canonical authed path → baseline (status, body, cacheability).
+2. Generate ~15 deception-shaped variants and fetch each with the same auth.
+3. Flag variants where body fuzzy-matches baseline (length ±5% AND token Jaccard ≥ 0.85) AND response is cacheable.
+
+Variants:
+
+| Class | Variants |
+|---|---|
+| static-extension confusion | `<path>.css`, `<path>.js`, `<path>.png`, `<path>.jpg`, `<path>.ico` |
+| delimiter path-traversal | `<path>/x.css`, `<path>/.css`, `<path>%2fx.css`, `<path>//x.css` |
+| matrix-URI / Tomcat | `<path>;.css`, `<path>;x.css` |
+| byte-truncation | `<path>%00.css`, `<path>%0d.css`, `<path>%23.css` |
+| query-strip | `<path>?x=.css` |
+
+Severity tuning:
+
+- **High** (CWE-525, web_cache_deception) — body matches baseline AND cacheability is `cacheable_explicit` (Cache-Control: public / max-age) or `cached_already` (Age, X-Cache HIT, CF-Cache-Status HIT).
+- **Medium** (CWE-525) — body matches baseline AND cacheability is `ambiguous` (no explicit Cache-Control, no cache-hit signals; absent explicit `no-store` real-world CDNs default-cache static-extension responses).
+- *(no finding)* — body diverges from baseline (origin correctly distinguishes paths) OR variant returns 4xx / redirect / error OR Cache-Control: no-store/private.
+
+Per-class dedup: at most one finding per (severity × variant class) so a `dot_css` + `dot_js` + `dot_png` static-extension cohort generates one finding, not three.
+
+Skip / soft-fail:
+- Baseline not 200 (nothing to cache-deceive).
+- Baseline body < 80 bytes (too short for fuzzy-match).
+- Baseline excluded by `--exclude-path`.
+
+Each finding includes `description_plain` + `recommended_action` (the §11 non-tech UX fields) — recommends back-end refusal of non-canonical extensions, CDN cache-key configuration to match only `/static/*` / `/assets/*`, OR `Cache-Control: no-store` on every authenticated dynamic endpoint.
+
+Read-only (GET only, no follow-redirects). Composes with cluster-A safety: `--exclude-path` / `--rate-limit` / `--auth-*` apply to every variant automatically.</description>
+    <parameters>
+      <parameter name="target" type="string" required="true">
+        <description>URL to probe — typically an authenticated page (e.g. `https://app.example.com/account`). Bare hostnames are auto-prefixed with `https://`.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-request timeout in seconds. Default 12.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target_url, target_host, baseline: {status, body_length, body_hash, cacheability}, variants: [{label, url, mutation_note, class_, status, body_match: {match, length_ratio, jaccard}, cacheability, finding_severity, evidence}, ...], findings_emitted}.
+
+The agent should follow up high-severity findings by fetching the same variant URL anonymously (no auth) and confirming the cached authenticated body is returned to a fresh client.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<cache_deception_check>
+<parameter=target>https://app.example.com/account</parameter>
+</cache_deception_check>
+
+<cache_deception_check>
+<parameter=target>https://api.example.com/v1/profile</parameter>
+<parameter=timeout>20</parameter>
+</cache_deception_check>
+]]>
+    </example_usage>
+  </tool>
+</tools>
