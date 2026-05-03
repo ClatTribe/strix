@@ -1,0 +1,68 @@
+<tools>
+  <tool name="tls_audit">
+    <description>Audit TLS / SSL configuration on a target host — emits findings for weak protocols,
+weak ciphers, and certificate problems.
+
+Standard pentest deliverable; clients always expect a TLS section. Implementation uses
+Python's `ssl` module + `cryptography` for certificate parsing rather than shelling
+out to `openssl s_client` — cleaner, no subprocess overhead, full Python error
+handling.
+
+Probes (one connection each, all bounded by `timeout`):
+
+| Test | Trigger | Severity |
+|---|---|---|
+| TLS 1.0 / 1.1 acceptance | Server completes handshake at that version | medium (CWE-326) |
+| TLS 1.2 / 1.3 acceptance | (Informational — confirms modern support) | info |
+| NULL / aNULL ciphers | Cipher cohort accepted | high (CWE-327) |
+| EXPORT-grade ciphers | Cipher cohort accepted | high (CWE-327) |
+| RC4 | Cipher cohort accepted | high (CWE-327) |
+| 3DES (Sweet32) | Cipher cohort accepted | high (CWE-327) |
+| Single-DES | Cipher cohort accepted | high (CWE-327) |
+| Certificate expired | `now > notAfter` | high (CWE-298) |
+| Certificate expiring soon | within 30 days | low (CWE-298) |
+| Self-signed certificate | issuer == subject | medium (CWE-295) |
+| Hostname mismatch | host doesn't match CN or SANs | high (CWE-297) |
+
+Each finding includes `description_plain` + `recommended_action` (the §11 non-tech UX
+fields) so the wrapper renders dashboard cards with concrete fix instructions per
+issue (nginx / Apache / Let's Encrypt / certbot config snippets).
+
+Side-effect output: certificate SANs are returned in `result.certificate.sans` —
+feed these back into `subdomain_enum` or the surface map for additional subdomain
+discovery.
+
+Composes with cluster-A safety: rate-limit applies to each connection. Exclude-path
+isn't path-relative for TLS audit (the audit is on host:port, not a URL path) so
+that flag is a no-op for this tool.</description>
+    <parameters>
+      <parameter name="target" type="string" required="true">
+        <description>Hostname / hostname:port / URL. Default port 443. Examples: `example.com`, `example.com:8443`, `https://example.com/`. Path component (if any) is dropped — TLS audit is host:port-scoped.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-probe timeout in seconds. Default 6.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target, host, port, protocols: {"TLS 1.0": {accepted, error}, ...}, weak_ciphers: {"RC4": {accepted, negotiated_cipher, ...}, ...}, certificate: {present, subject_cn, issuer_cn, sans, expired, days_until_expiry, self_signed, hostname_match, ...}, findings_emitted}.
+
+`certificate.sans` is a list of DNS names from the cert's Subject Alternative Names extension — the agent should feed this list into `subdomain_enum` to extend the discovered surface.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<tls_audit>
+<parameter=target>example.com</parameter>
+</tls_audit>
+
+<tls_audit>
+<parameter=target>api.example.com:8443</parameter>
+<parameter=timeout>10</parameter>
+</tls_audit>
+
+<tls_audit>
+<parameter=target>https://app.example.com/</parameter>
+</tls_audit>
+]]>
+    </example_usage>
+  </tool>
+</tools>
