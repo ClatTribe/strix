@@ -1,0 +1,62 @@
+<tools>
+  <tool name="open_redirect_check">
+    <description>Probe a URL for open-redirect vulnerabilities. Sweeps the redirect-shaped parameters in the URL with the standard 11-payload bypass cohort and detects attacker-host placement in 30x `Location` / `Content-Location` / `Refresh` headers, body `<meta http-equiv="refresh">` redirects, and body `window.location` assignments. Standard pentest deliverable.
+
+Methodology:
+
+1. **Discover redirect-shaped params** in the target URL — names matched against a 40-name lexicon (`next`, `redirect`, `return`, `goto`, `dest`, `url`, `redirect_uri`, `callback`, `image_url`, `successurl`, etc.). If the URL has no redirect-shaped params, falls back to probing 6 default names appended to the URL.
+2. **Replay each candidate parameter** with the 11-payload bypass cohort (direct https / direct http / protocol-relative / backslash / userinfo confusion / userinfo+# / subdomain confusion / query-bypass / encoded slash / javascript: scheme / data: scheme).
+3. **Detect attacker host** in `Location` / `Content-Location` / `Refresh` headers, body `<meta http-equiv=refresh>`, or body `window.location` assignment.
+
+Severity tuning:
+
+- **High** (CWE-601, open_redirect) — attacker host in `Location` / `Content-Location` / `Refresh` response header (3xx redirect or refresh).
+- **Medium** (CWE-601) — attacker host in body `<meta http-equiv="refresh">` content URL or in `window.location` / `location.href` / `location.replace` assignment.
+- **Medium** (CWE-601) — `javascript:` or `data:` scheme reflected in a Location header (severity capped at medium because most browsers block 30x to javascript: now).
+
+Per-param dedup: at most one finding per (param_name × severity) so an 11-payload cohort against a single vulnerable param produces ONE report. Per-probe verdicts still live in the result dict for the agent.
+
+The matcher checks the netloc segment of the redirect target, not raw substring — so a session token containing `evil.example` characters in the response body doesn't false-positive. A `target.com.evil.example` netloc matches (suffix check); `target.com/evil.example` doesn't (it's a path on target.com).
+
+Composes with cluster-A safety (auth-injection / exclude-path / rate-limit) automatically. Read-only: GET only, follow_redirects=False so the 30x decision is observable.
+
+Each finding includes `description_plain` + `recommended_action` (maintain a server-side allow-list of redirect targets; reject any client-supplied target that isn't on the list; prefer relative paths over full URLs; treat `//host`, `\\host`, and userinfo forms as absolute URLs during validation, not relative paths). `verification_status=needs_review` since reflected attacker-host in the response is a strong signal but the agent should confirm victim-side browser behavior (some intermediate WAFs / browser mitigations block the redirect even when the server emits it).
+
+Probe attacker host gets a unique random `strix-<nonce>.evil.example` prefix per run for log auditability.</description>
+    <parameters>
+      <parameter name="target_url" type="string" required="true">
+        <description>URL to probe. Bare hostnames are auto-prefixed with `https://`. If the URL has a query string, the tool looks for redirect-shaped param names in it. If the URL has no query string, the tool falls back to probing 6 default names appended to the URL. Examples: `https://app.example.com/login?next=/dashboard`, `https://app.example.com/oauth/callback?redirect_uri=...`, `https://app.example.com/logout` (default-fallback).</description>
+      </parameter>
+      <parameter name="extra_param_names" type="list" required="false">
+        <description>Additional redirect-shaped param names to probe regardless of whether the URL already has them. Useful when the agent has discovered a non-standard redirect param via crawl analysis (e.g. `myredirect`, `forward_to`).</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-probe timeout in seconds. Default 10.</description>
+      </parameter>
+      <parameter name="attacker_host" type="string" required="false">
+        <description>Override the base attacker host used in payloads (default `evil.example`). A unique random `strix-<nonce>.` prefix is auto-prepended so probes are auditable in target logs and don't collide with any pre-existing references.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target_url, target_host, attacker_host, probed_params, probes: [{param, label, class_, payload, status, evidence: {header_redirect, header_value, scheme_in_header, meta_refresh, window_location}, finding_severity}, ...], findings_emitted}.
+
+The agent should verify high-severity findings by manually following the 30x with a browser-like client and confirming the final landing host is attacker-controlled. Some intermediate WAFs / browser mitigations block the actual redirect even when the server emits it.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<open_redirect_check>
+<parameter=target_url>https://app.example.com/login?next=/dashboard</parameter>
+</open_redirect_check>
+
+<open_redirect_check>
+<parameter=target_url>https://app.example.com/logout</parameter>
+</open_redirect_check>
+
+<open_redirect_check>
+<parameter=target_url>https://app.example.com/redirect?u=https://example.com</parameter>
+<parameter=extra_param_names>["myredirect", "forward_to"]</parameter>
+</open_redirect_check>
+]]>
+    </example_usage>
+  </tool>
+</tools>
