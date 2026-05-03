@@ -37,7 +37,9 @@ Output is deterministic — same input + same target state = same endpoint list.
         <description>Comma-separated extra start URLs in addition to the target. CLI: `--seed-url` (repeatable) sets `STRIX_SEED_URLS` which the tool reads automatically; this parameter is for cases where the agent wants to seed additional URLs at runtime (e.g. after recon discovers an admin panel).</description>
       </parameter>
       <parameter name="openapi_url" type="string" required="false">
-        <description>OpenAPI 2.x or 3.x spec URL (JSON only — YAML not supported in the sandbox). When set, paths from the spec are seeded into the crawl. CLI: `--openapi` sets `STRIX_OPENAPI_URL` which the tool reads automatically.</description>
+        <description>OpenAPI 2.x or 3.x spec URL (JSON only — YAML not supported in the sandbox). When set, paths from the spec are seeded into the crawl. CLI: `--openapi` sets `STRIX_OPENAPI_URL` which the tool reads automatically.
+
+The crawler also auto-fetches `/robots.txt` and `/sitemap.xml` (and any `Sitemap:` URLs declared in robots.txt) on every run — no parameter needed. Discovered paths get seeded with `discovered_via=robots_disallow` or `discovered_via=sitemap` so downstream consumers can identify them.</description>
       </parameter>
     </parameters>
     <returns type="dict">

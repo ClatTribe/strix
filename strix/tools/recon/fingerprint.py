@@ -365,6 +365,122 @@ def _probe_graphql(target_url: str) -> Detection | None:
     return None
 
 
+# OpenAPI / Swagger spec discovery. Probes the standard publishing paths.
+# When a JSON spec is found, captures the path-count for downstream tools
+# (`bfs_crawl(openapi_url=...)` can then ingest the full endpoint list).
+_OPENAPI_PATHS: tuple[str, ...] = (
+    "/openapi.json",
+    "/swagger.json",
+    "/swagger-ui.html",
+    "/swagger/v1/swagger.json",
+    "/api/openapi.json",
+    "/api/swagger.json",
+    "/v3/api-docs",
+    "/v2/api-docs",
+    "/api-docs",
+    "/api-docs.json",
+    "/docs",
+    "/api/docs",
+    "/redoc",
+)
+
+
+def _probe_openapi(target_url: str) -> Detection | None:
+    """Probe the standard OpenAPI / Swagger publishing paths.
+
+    Returns a Detection when:
+    - A JSON spec is found (200 + parses as a dict with `paths` or `openapi`/`swagger` key),
+      OR
+    - A Swagger-UI HTML page is found (200 + body contains a `swagger-ui` reference).
+
+    The detection's `evidence` includes the discovered URL and the path count
+    when JSON-parsed, so the agent can decide whether to invoke
+    `bfs_crawl(openapi_url=...)` to ingest the full endpoint list.
+    """
+    try:
+        import httpx
+    except ImportError:
+        return None
+    parsed = urlparse(target_url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    spec_url: str | None = None
+    spec_path_count: int = 0
+    swagger_ui_url: str | None = None
+    try:
+        with httpx.Client(timeout=_HTTP_TIMEOUT_SECONDS, follow_redirects=False) as c:
+            for path in _OPENAPI_PATHS:
+                url = base + path
+                try:
+                    r = c.get(url)
+                except Exception:  # noqa: BLE001
+                    continue
+                if r.status_code != 200:
+                    continue
+                # Headers may be a plain dict or a CaseInsensitiveDict; check both.
+                ct_raw = (
+                    r.headers.get("content-type")
+                    or r.headers.get("Content-Type")
+                    or ""
+                )
+                ct = ct_raw.split(";")[0].strip().lower()
+                body = r.text or ""
+                # JSON spec — most reliable signal.
+                if "json" in ct or path.endswith(".json"):
+                    try:
+                        import json as _json
+
+                        data = _json.loads(body)
+                    except (ValueError, TypeError):
+                        continue
+                    if not isinstance(data, dict):
+                        continue
+                    # OpenAPI 3.x / Swagger 2.x both have `paths` dict.
+                    is_openapi_3 = isinstance(data.get("openapi"), str)
+                    is_swagger_2 = isinstance(data.get("swagger"), str)
+                    paths = data.get("paths")
+                    if (is_openapi_3 or is_swagger_2) and isinstance(paths, dict):
+                        spec_url = url
+                        spec_path_count = len(paths)
+                        break
+                    # Some servers serve the spec with no `openapi`/`swagger`
+                    # version key but with a `paths` object — accept it as a
+                    # weaker signal.
+                    if isinstance(paths, dict) and any(p.startswith("/") for p in paths.keys()):
+                        spec_url = url
+                        spec_path_count = len(paths)
+                        break
+                # Swagger-UI HTML page — secondary signal; the spec URL is
+                # usually loaded from the page but we don't parse the page.
+                elif "html" in ct and "swagger-ui" in body.lower():
+                    swagger_ui_url = url
+    except Exception:  # noqa: BLE001
+        return None
+
+    if spec_url:
+        evidence = [
+            f"GET {spec_url} returned an OpenAPI / Swagger spec",
+            f"{spec_path_count} path(s) declared in the spec",
+        ]
+        if swagger_ui_url:
+            evidence.append(f"Swagger UI also exposed at {swagger_ui_url}")
+        return Detection(
+            technology="openapi",
+            label=f"OpenAPI / Swagger spec ({spec_path_count} paths)",
+            confidence="high",
+            evidence=evidence,
+            skill=None,  # No dedicated skill — the agent feeds the URL into bfs_crawl.
+        )
+    if swagger_ui_url:
+        return Detection(
+            technology="swagger_ui",
+            label="Swagger UI page",
+            confidence="medium",
+            evidence=[f"GET {swagger_ui_url} returned a Swagger UI HTML page"],
+            skill=None,
+        )
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Skill selection — the "deterministic" part.
 # ---------------------------------------------------------------------------
@@ -539,11 +655,68 @@ def fingerprint_tech_stack(
             existing.evidence = sorted(set(existing.evidence + det.evidence))
     detections = list(by_tech.values())
 
-    # Optional GraphQL probe.
+    # Optional GraphQL + OpenAPI probes — both are network-cost-bounded
+    # (≤ ~13 GETs each) but skipped in shallow mode for speed.
     if deep:
         gql = _probe_graphql(target)
         if gql and gql.technology not in by_tech:
             detections.append(gql)
+        openapi_det = _probe_openapi(target)
+        if openapi_det and openapi_det.technology not in by_tech:
+            detections.append(openapi_det)
+            # Emit an info-severity finding so the wrapper sees this surface
+            # like any other recon hit. The agent's downstream move is to
+            # call `bfs_crawl(openapi_url=<discovered_url>)` to ingest paths.
+            try:
+                from strix.telemetry.tracer import get_global_tracer
+
+                tracer = get_global_tracer()
+                if tracer is not None:
+                    spec_url = next(
+                        (line.split(" ")[1] for line in (openapi_det.evidence or [])
+                         if line.startswith("GET ")),
+                        None,
+                    )
+                    tracer.add_vulnerability_report(
+                        title=f"{openapi_det.label} discovered on {target}",
+                        severity="info",
+                        category="info_disclosure",
+                        cwe="CWE-200",
+                        target=target,
+                        endpoint=spec_url or target,
+                        description=(
+                            f"{openapi_det.label} is reachable from this target. "
+                            "Public OpenAPI / Swagger specs are recon goldmines: "
+                            "every documented endpoint, parameter, and auth scheme "
+                            "is enumerated up front. Feed this URL into "
+                            "`bfs_crawl(openapi_url=...)` to ingest the full "
+                            "endpoint inventory.\n\nEvidence:\n- "
+                            + "\n- ".join(openapi_det.evidence or [])
+                        ),
+                        impact=(
+                            "API documentation in production is not a vulnerability "
+                            "on its own, but it removes a layer of obscurity and "
+                            "accelerates downstream reconnaissance / fuzzing. "
+                            "OWASP API9 (Improper Inventory Management) — when the "
+                            "spec includes deprecated / internal / debug endpoints, "
+                            "those become first-class attack candidates."
+                        ),
+                        remediation_steps=(
+                            "If the spec is published intentionally for client "
+                            "tooling, no action needed. If it's a framework default "
+                            "left enabled in production (Django REST `coreapi` / "
+                            "FastAPI `/docs` / Spring `springdoc`), gate it behind "
+                            "auth or strip from the production build."
+                        ),
+                        description_plain=(
+                            "We found the API documentation page. This isn't broken — "
+                            "it's a normal published file — but it lists every URL the "
+                            "API exposes, which speeds up further testing."
+                        ),
+                        verification_status="verified",
+                    )
+            except Exception:  # noqa: BLE001
+                logger.debug("OpenAPI finding emission failed", exc_info=True)
 
     skill_candidates = _select_skills(detections)
     skill_load_result = _load_skills_into_agent(agent_state, skill_candidates)

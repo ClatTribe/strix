@@ -265,6 +265,88 @@ def _extract_js_paths(body: str, base: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# robots.txt + sitemap.xml — auto-seed paths the crawler would never otherwise
+# reach. Agents improvise this; making it deterministic guarantees coverage.
+# Roadmap §7.3 expert-pentester gap audit.
+# ---------------------------------------------------------------------------
+
+
+# Disallow / Allow lines may include `*` or `$` glob hints. Normalize to a
+# concrete URL, drop wildcards (we'd hit a non-existent path).
+_ROBOTS_LINE_RE = re.compile(
+    r"^\s*(disallow|allow|sitemap)\s*:\s*(\S+?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_SITEMAP_LOC_RE = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>", re.IGNORECASE)
+
+
+def _fetch_robots_txt(target_base: str) -> tuple[list[str], list[str]]:
+    """Fetch `<base>/robots.txt`. Returns (paths, sitemap_urls).
+
+    Paths are absolute URLs derived from `Disallow:` / `Allow:` lines.
+    Wildcards (`*`, `$`) are dropped — we only enqueue concrete paths.
+    """
+    base_root = _origin_root(target_base)
+    if not base_root:
+        return [], []
+    robots_url = urljoin(base_root, "/robots.txt")
+    status, headers, body = _http_get(robots_url, max_bytes=128 * 1024)
+    if status != 200 or not body:
+        return [], []
+    paths: list[str] = []
+    sitemaps: list[str] = []
+    for match in _ROBOTS_LINE_RE.finditer(body):
+        directive = match.group(1).lower()
+        value = match.group(2).strip()
+        if not value:
+            continue
+        if directive == "sitemap":
+            normalized = _normalize_url(value, base_root)
+            if normalized:
+                sitemaps.append(normalized)
+            continue
+        # Disallow / Allow — drop wildcards and patterns; keep concrete paths.
+        if "*" in value or "$" in value:
+            continue
+        normalized = _normalize_url(value, base_root)
+        if normalized:
+            paths.append(normalized)
+    # Dedup preserving order.
+    seen: set[str] = set()
+    unique_paths = [p for p in paths if not (p in seen or seen.add(p))]
+    seen2: set[str] = set()
+    unique_sitemaps = [s for s in sitemaps if not (s in seen2 or seen2.add(s))]
+    return unique_paths, unique_sitemaps
+
+
+def _fetch_sitemap_xml(sitemap_url: str, target_base: str) -> list[str]:
+    """Fetch + parse a sitemap.xml. Returns absolute URLs from `<loc>` tags.
+
+    Tolerant of sitemap-index format (`<sitemapindex>` containing nested
+    `<sitemap><loc>` entries) — we treat both alike since for crawler purposes
+    they're all URLs to add to the queue.
+    """
+    status, _headers, body = _http_get(sitemap_url, max_bytes=2 * 1024 * 1024)
+    if status != 200 or not body:
+        return []
+    urls: list[str] = []
+    for match in _SITEMAP_LOC_RE.finditer(body):
+        normalized = _normalize_url(match.group(1), target_base)
+        if normalized:
+            urls.append(normalized)
+    seen: set[str] = set()
+    return [u for u in urls if not (u in seen or seen.add(u))]
+
+
+def _origin_root(url: str) -> str | None:
+    """Return `scheme://host/` from any URL, or None on parse failure."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}/"
+
+
+# ---------------------------------------------------------------------------
 # OpenAPI consumption
 # ---------------------------------------------------------------------------
 
@@ -402,11 +484,62 @@ def bfs_crawl(
                     seen_seeds.add(ep["url"])
                     normalized_seeds.append(ep["url"])
 
+    # robots.txt + sitemap.xml — auto-discovery of paths the crawler would
+    # never find via link extraction. Each in-scope concrete path becomes
+    # a seed with `discovered_via` tagged appropriately. Failures are silent
+    # (surfaced in the result's `errors[]` list).
+    robots_paths: list[str] = []
+    sitemap_urls: list[str] = []
+    sitemap_paths_total: list[str] = []
+    try:
+        robots_paths, robots_sitemaps = _fetch_robots_txt(target)
+        for path in robots_paths:
+            if _in_scope(path, allowed_hosts) and path not in seen_seeds:
+                seen_seeds.add(path)
+                normalized_seeds.append(path)
+        # Try the explicit sitemap URLs from robots first, then the default
+        # `/sitemap.xml` if no robots-listed sitemaps exist.
+        candidate_sitemaps = list(robots_sitemaps)
+        if not candidate_sitemaps:
+            base_root = _origin_root(target)
+            if base_root:
+                candidate_sitemaps.append(urljoin(base_root, "/sitemap.xml"))
+        for sm_url in candidate_sitemaps:
+            if not _in_scope(sm_url, allowed_hosts):
+                continue
+            if sm_url in sitemap_urls:
+                continue
+            sitemap_urls.append(sm_url)
+            sm_paths = _fetch_sitemap_xml(sm_url, target)
+            for path in sm_paths:
+                if _in_scope(path, allowed_hosts):
+                    sitemap_paths_total.append(path)
+                    if path not in seen_seeds:
+                        seen_seeds.add(path)
+                        normalized_seeds.append(path)
+    except Exception:  # noqa: BLE001
+        logger.debug("robots/sitemap fetch failed", exc_info=True)
+
     started_at = datetime.now(UTC).isoformat()
 
     visited: set[str] = set()
     queue: deque[tuple[str, int]] = deque((s, 0) for s in normalized_seeds)
     endpoints: list[dict[str, Any]] = list(openapi_endpoints)
+    # Tag the robots-discovered paths so downstream consumers can see they
+    # came from a /robots.txt Disallow line (often higher-value endpoints).
+    endpoint_keys: set[tuple[str, str]] = {(e["url"], e["method"]) for e in endpoints}
+    for path in robots_paths:
+        if _in_scope(path, allowed_hosts) and (path, "GET") not in endpoint_keys:
+            endpoint_keys.add((path, "GET"))
+            endpoints.append({
+                "url": path, "method": "GET", "depth": 0, "discovered_via": "robots_disallow",
+            })
+    for path in sitemap_paths_total:
+        if (path, "GET") not in endpoint_keys:
+            endpoint_keys.add((path, "GET"))
+            endpoints.append({
+                "url": path, "method": "GET", "depth": 0, "discovered_via": "sitemap",
+            })
     forms: list[dict[str, Any]] = []
     js_bundles: list[str] = []
     js_bundles_parsed = 0
@@ -414,9 +547,8 @@ def bfs_crawl(
     if openapi_error:
         errors.append(openapi_error)
 
-    # Track endpoint dedup separately from `visited` because a single URL
-    # may be reached as both a HTML page and a discovered link.
-    endpoint_keys: set[tuple[str, str]] = {(e["url"], e["method"]) for e in endpoints}
+    # endpoint_keys was already populated above with the OpenAPI / robots
+    # / sitemap entries; we just reuse it for HTML / form / JS additions.
 
     def _record_endpoint(url: str, method: str, depth: int, source: str) -> None:
         key = (url, method)
@@ -507,6 +639,8 @@ def bfs_crawl(
         "endpoints": endpoints,
         "forms": forms,
         "js_bundles": js_bundles,
+        "robots_paths": robots_paths,
+        "sitemap_urls": sitemap_urls,
         "errors": errors,
         "stats": {
             "pages_visited": len(visited),
@@ -514,5 +648,7 @@ def bfs_crawl(
             "forms_found": len(forms),
             "js_bundles_parsed": js_bundles_parsed,
             "openapi_endpoints_imported": len(openapi_endpoints),
+            "robots_paths_discovered": len(robots_paths),
+            "sitemap_paths_discovered": len(sitemap_paths_total),
         },
     }

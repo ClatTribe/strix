@@ -1,0 +1,54 @@
+<tools>
+  <tool name="well_known_harvest">
+    <description>Probe the standard `.well-known/` paths on a target host and emit one info-severity
+finding per hit (CWE-200, info_disclosure).
+
+Modern domains have 5–15 well-known endpoints that leak architecture cleanly:
+- `security.txt` (RFC 9116) — security contact + disclosure policy + scope
+- `openid-configuration` — OpenID Connect tenant ID, OAuth endpoints, JWKS URL
+- `oauth-authorization-server` — OAuth 2.0 metadata
+- `change-password` (RFC 8615) — password-mgr-friendly redirect
+- `host-meta` (XRD / JSON) — WebFinger
+- `assetlinks.json` — Android digital asset link verification
+- `apple-app-site-association` — iOS universal-link / app-binding
+- `gpc.json` — Global Privacy Control declaration
+- Plus legacy: `/security.txt` (pre-RFC), `/humans.txt`, `/.well-known/dnt-policy.txt`
+
+Hits are NOT vulns on their own — they're publicly-designed endpoints — but they
+reveal architecture which accelerates downstream reconnaissance and exploit
+chaining. The agent should read the parsed metadata and use it to plan deeper
+testing (e.g. OAuth endpoints from openid-configuration become targets for
+authz_matrix_check; security.txt's `contact` becomes the disclosure channel).
+
+Composes with cluster-A safety (auth-injection / exclude-path / rate-limit)
+automatically — every fetch routes through the proxy or the direct fallback.
+
+For domain-target scans, use this after `bfs_crawl` confirms the host is up;
+`bfs_crawl` itself doesn't probe these paths (it only crawls links it sees).</description>
+    <parameters>
+      <parameter name="target" type="string" required="true">
+        <description>Target URL or hostname (e.g. `https://example.com` or `example.com`). The tool builds `<origin>/.well-known/<path>` URLs from this — only the origin (scheme + host) matters; any path on the input is dropped.</description>
+      </parameter>
+      <parameter name="include_legacy" type="boolean" required="false">
+        <description>When true (default), also probes legacy non-RFC-8615 locations: `/security.txt` (pre-RFC root), `/humans.txt`, `/.well-known/dnt-policy.txt`. Disable for strict RFC 8615 compliance.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target, probed, hits: [{path, label, status, content_type, parsed, body_excerpt}], errors, stats}.
+
+`parsed` is a small dict of structured fields (typically the OAuth endpoints from openid-configuration, the contact + policy fields from security.txt, the asset link relations from assetlinks.json, etc.). Findings are emitted as side effects via the tracer.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<well_known_harvest>
+<parameter=target>https://example.com</parameter>
+</well_known_harvest>
+
+<well_known_harvest>
+<parameter=target>api.example.com</parameter>
+<parameter=include_legacy>false</parameter>
+</well_known_harvest>
+]]>
+    </example_usage>
+  </tool>
+</tools>
