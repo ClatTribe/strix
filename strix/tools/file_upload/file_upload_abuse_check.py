@@ -673,7 +673,10 @@ def _normalize_url(url: str) -> str | None:
     return url
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1190", "T1059"],  # Public-Facing App + Command/Scripting
+)
 def file_upload_abuse_check(
     upload_url: str,
     field_name: str = "file",

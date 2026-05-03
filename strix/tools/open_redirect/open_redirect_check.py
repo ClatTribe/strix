@@ -525,7 +525,10 @@ def _complete_check(check_id: str | None, result: str, evidence: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1204.001"],  # User Execution: Malicious Link
+)
 def open_redirect_check(
     target_url: str,
     extra_param_names: list[str] | None = None,

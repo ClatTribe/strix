@@ -215,7 +215,10 @@ def _bing_search(
     return status, results, None
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1593"],  # Search Open Websites/Domains
+)
 def saas_leak_discovery(
     org_name: str,
     providers: str | None = None,

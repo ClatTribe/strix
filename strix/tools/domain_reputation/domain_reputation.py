@@ -613,7 +613,10 @@ def _abuseipdb_severity(verdict: dict[str, Any]) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1596"],  # Search Open Technical Databases
+)
 def domain_reputation(
     target: str,
     timeout: float = _DEFAULT_TIMEOUT,

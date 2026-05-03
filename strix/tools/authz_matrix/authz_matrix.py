@@ -202,7 +202,10 @@ def _outcome_signature(response: dict[str, Any]) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1078", "T1078.004"],  # Valid Accounts + Cloud Accounts (authz)
+)
 def authz_matrix_check(  # noqa: PLR0913
     endpoints: str,
     roles: str,

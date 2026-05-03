@@ -430,7 +430,10 @@ def _complete_check(check_id: str | None, result: str, evidence: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1199", "T1190"],  # Trusted Relationship + Public-Facing App
+)
 def cache_deception_check(
     target: str,
     timeout: float = _DEFAULT_TIMEOUT,

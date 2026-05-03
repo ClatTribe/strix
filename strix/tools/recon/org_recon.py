@@ -344,7 +344,10 @@ def _check_typosquat(candidate: str) -> _TyposquatResult:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1591"],  # Gather Victim Org Information
+)
 def org_fingerprint(domain: str, skip_typosquats: bool = False) -> dict[str, Any]:
     """Org-level external-recon fingerprint.
 

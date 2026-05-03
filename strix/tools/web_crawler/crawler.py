@@ -411,7 +411,10 @@ def _fetch_and_parse_openapi(spec_url: str, target_base: str) -> tuple[list[dict
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1595", "T1083"],  # Active Scanning + File/Directory Discovery
+)
 def bfs_crawl(
     target: str,
     max_pages: int = _DEFAULT_MAX_PAGES,

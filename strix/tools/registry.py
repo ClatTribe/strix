@@ -1,6 +1,7 @@
 import inspect
 import logging
 import os
+import re
 from collections.abc import Callable
 from functools import wraps
 from inspect import signature
@@ -193,7 +194,20 @@ def register_tool(
     sandbox_execution: bool = True,
     requires_browser_mode: bool = False,
     requires_web_search_mode: bool = False,
+    mitre_techniques: list[str] | None = None,
 ) -> Callable[..., Any]:
+    """Register a tool.
+
+    `mitre_techniques` (roadmap §10) — optional list of MITRE ATT&CK
+    technique IDs (e.g. `["T1190", "T1592.002"]`) describing the
+    primary attacker behaviours this tool models / probes for. Surfaces
+    on `tool.execution.started` events so defensive consumers can map
+    a Strix scan into their own ATT&CK telemetry. Validated against
+    the `T<digits>(.<digits>)?` shape; non-matching entries dropped
+    (logged at debug level). Tools without explicit techniques get an
+    empty list (the field is always present on the event for schema
+    stability).
+    """
     def decorator(f: Callable[..., Any]) -> Callable[..., Any]:
         if not _should_register_tool(
             sandbox_execution=sandbox_execution,
@@ -203,11 +217,13 @@ def register_tool(
             return f
 
         sandbox_mode = _is_sandbox_mode()
+        normalized_techniques = _normalize_mitre_techniques(mitre_techniques)
         func_dict = {
             "name": f.__name__,
             "function": f,
             "module": _get_module_name(f),
             "sandbox_execution": sandbox_execution,
+            "mitre_techniques": normalized_techniques,
         }
 
         if not sandbox_mode:
@@ -260,6 +276,48 @@ def get_tool_names() -> list[str]:
 
 def get_tool_param_schema(name: str) -> dict[str, Any] | None:
     return _tool_param_schemas.get(name)
+
+
+# Roadmap §10 — MITRE ATT&CK technique IDs follow `T<digits>(.<digits>)?`
+# (e.g. `T1190`, `T1592.002`). We accept the standard shape and drop
+# anything else (with a debug log) so registry data stays clean.
+_MITRE_TECHNIQUE_RE = re.compile(r"^T\d{4}(?:\.\d{3})?$")
+
+
+def _normalize_mitre_techniques(raw: list[str] | None) -> list[str]:
+    """Return a deduplicated, validated, upper-cased list of technique IDs."""
+    if not raw:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for entry in raw:
+        if not isinstance(entry, str):
+            continue
+        norm = entry.strip().upper()
+        if not _MITRE_TECHNIQUE_RE.match(norm):
+            logger.debug("dropping non-conforming MITRE technique id: %r", entry)
+            continue
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+    return out
+
+
+def get_tool_mitre_techniques(name: str) -> list[str]:
+    """Return the MITRE ATT&CK technique IDs registered for a tool.
+
+    Empty list when the tool isn't registered with techniques (or
+    isn't registered at all). Surfaces in `tool.execution.started`
+    events via `Tracer.log_tool_execution_start`.
+    """
+    for tool in tools:
+        if tool.get("name") == name:
+            techniques = tool.get("mitre_techniques") or []
+            if isinstance(techniques, list):
+                return [str(t) for t in techniques]
+            return []
+    return []
 
 
 def needs_agent_state(tool_name: str) -> bool:

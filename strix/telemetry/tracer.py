@@ -1483,13 +1483,29 @@ class Tracer:
         if agent_id in self.agents:
             self.agents[agent_id]["tool_executions"].append(execution_id)
 
+        # Roadmap §10 — surface MITRE ATT&CK techniques per tool. Lets
+        # defensive consumers map a Strix scan into their own ATT&CK
+        # telemetry. Field is always present (empty list when the tool
+        # isn't annotated) so downstream parsers don't need to handle
+        # absence.
+        mitre_techniques: list[str] = []
+        try:
+            from strix.tools.registry import get_tool_mitre_techniques
+
+            mitre_techniques = list(get_tool_mitre_techniques(tool_name))
+        except Exception:  # noqa: BLE001
+            logger.debug("MITRE technique lookup failed", exc_info=True)
+
+        actor: dict[str, Any] = {
+            "agent_id": agent_id,
+            "tool_name": tool_name,
+            "execution_id": execution_id,
+            "mitre_techniques": mitre_techniques,
+        }
+
         self._emit_event(
             "tool.execution.started",
-            actor={
-                "agent_id": agent_id,
-                "tool_name": tool_name,
-                "execution_id": execution_id,
-            },
+            actor=actor,
             payload={"args": args},
             status="running",
             source="strix.tools",

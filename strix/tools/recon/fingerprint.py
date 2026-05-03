@@ -620,7 +620,10 @@ def _load_skills_into_agent(agent_state: Any, skill_names: list[str]) -> dict[st
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=False)
+@register_tool(
+    sandbox_execution=False,
+    mitre_techniques=["T1592.002"],  # Gather Victim Host Information: Software
+)
 def fingerprint_tech_stack(
     agent_state: Any,
     target: str,

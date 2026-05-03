@@ -432,7 +432,10 @@ _VALID_SOURCES = (
 )
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1590.005"],  # Gather Victim Network Information: IP Addresses
+)
 def subdomain_enum(  # noqa: PLR0913
     domain: str,
     sources: str | None = None,

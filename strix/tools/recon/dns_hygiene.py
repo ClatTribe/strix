@@ -776,7 +776,10 @@ def _verdict_for_check(check_id: str, result: dict[str, Any]) -> tuple[str, str 
     return "inconclusive", None
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1590.002"],  # Gather Victim Network Information: DNS
+)
 def dns_hygiene_check(domain: str, checks: str | None = None) -> dict[str, Any]:
     """Run a battery of DNS hygiene checks on a domain.
 

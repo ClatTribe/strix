@@ -590,7 +590,10 @@ def _complete_check(check_id: str | None, result: str, evidence: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1595", "T1593"],  # Active Scanning + Search Open Websites
+)
 def attack_surface_intel(
     target: str,
     timeout: float = _DEFAULT_TIMEOUT,

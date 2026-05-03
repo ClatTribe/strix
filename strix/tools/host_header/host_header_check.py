@@ -577,7 +577,10 @@ def _emit_for_verdict(
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1659", "T1190"],  # Content Injection + Public-Facing App exploit
+)
 def host_header_check(
     target: str,
     timeout: float = _DEFAULT_TIMEOUT,
