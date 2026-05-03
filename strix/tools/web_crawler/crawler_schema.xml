@@ -1,0 +1,69 @@
+<tools>
+  <tool name="bfs_crawl">
+    <description>Breadth-first crawl of a web target with JS-bundle endpoint extraction and OpenAPI consumption.
+
+The agent's natural depth-first improvisation through a SPA misses most of the attack
+surface — it lives bundled inside JS files the agent never reaches. This tool runs a
+deterministic breadth-first crawl, mines JS bundles for path-shaped string literals
+(LinkFinder-style), parses any supplied OpenAPI spec, and produces a flat endpoint
+inventory for the rest of the web-app team to pivot off.
+
+Composes with the cluster-A safety middleware: every fetch goes through the same path
+that honors `--auth-cookie` / `--auth-bearer` / `--auth-basic` / `--header` (auto-inject)
++ `--exclude-path` (hard skip BEFORE dispatch) + `--rate-limit` (throttle). The agent
+does not need to thread credentials through manually.
+
+Use this near the start of any web_application target:
+1. (External step) `fingerprint_tech_stack(target)` first — auto-loads framework skills.
+2. **This tool** — produces the endpoint inventory.
+3. The agent enters exploit phase, picking endpoints to attack from the inventory.
+
+Typical use after a domain-target handoff: `spawn_webapp_subteam` (#34) gives each
+sub-agent a single in-scope subdomain; the sub-agent's first move is `bfs_crawl` on
+that host.
+
+Output is deterministic — same input + same target state = same endpoint list.</description>
+    <parameters>
+      <parameter name="target" type="string" required="true">
+        <description>The in-scope target URL. Plain hostnames get https:// prefixed automatically.</description>
+      </parameter>
+      <parameter name="max_pages" type="integer" required="false">
+        <description>Cap on pages visited. Default 200, hard-capped at 2000. Each page costs 1 request (subject to rate-limit).</description>
+      </parameter>
+      <parameter name="max_depth" type="integer" required="false">
+        <description>BFS depth cap. Default 3, hard-capped at 8. Most app surface lives at depth ≤ 3 from the homepage.</description>
+      </parameter>
+      <parameter name="seed_urls" type="string" required="false">
+        <description>Comma-separated extra start URLs in addition to the target. CLI: `--seed-url` (repeatable) sets `STRIX_SEED_URLS` which the tool reads automatically; this parameter is for cases where the agent wants to seed additional URLs at runtime (e.g. after recon discovers an admin panel).</description>
+      </parameter>
+      <parameter name="openapi_url" type="string" required="false">
+        <description>OpenAPI 2.x or 3.x spec URL (JSON only — YAML not supported in the sandbox). When set, paths from the spec are seeded into the crawl. CLI: `--openapi` sets `STRIX_OPENAPI_URL` which the tool reads automatically.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target, started_at, ended_at, seed_urls, openapi_url, config, endpoints: [{url, method, depth, discovered_via}], forms: [{url, method, action, fields}], js_bundles, errors, stats}.
+
+`discovered_via` is one of: `seed` (initial URL), `html` (anchor / link), `form` (HTML form action), `js_bundle` (LinkFinder regex on JS source), `openapi` (path from the spec).
+
+Always returns success=True even when individual fetches fail — failures are listed in `errors[]`.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<bfs_crawl>
+<parameter=target>https://app.example.com</parameter>
+</bfs_crawl>
+
+<bfs_crawl>
+<parameter=target>https://api.example.com</parameter>
+<parameter=max_pages>500</parameter>
+<parameter=openapi_url>https://api.example.com/openapi.json</parameter>
+</bfs_crawl>
+
+<bfs_crawl>
+<parameter=target>https://app.example.com</parameter>
+<parameter=seed_urls>https://app.example.com/admin,https://app.example.com/api/users</parameter>
+</bfs_crawl>
+]]>
+    </example_usage>
+  </tool>
+</tools>
