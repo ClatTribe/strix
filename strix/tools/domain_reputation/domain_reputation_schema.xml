@@ -1,0 +1,62 @@
+<tools>
+  <tool name="domain_reputation">
+    <description>Look up a domain or IP across 5 free public reputation sources. High-signal context: a "clean" target with an IP on URLhaus is a real finding (someone else compromised the shared host); a flagged domain you own is an incident-response lead.
+
+| Source | Covers | Auth |
+|---|---|---|
+| **URLhaus** (abuse.ch) | domain + IP | none |
+| **Spamhaus DBL** | domain | none (low-volume) |
+| **Spamhaus ZEN** | IP | none (low-volume) |
+| **Google Safe Browsing** | domain + URL | `STRIX_GSB_KEY` |
+| **AbuseIPDB** | IP | `STRIX_ABUSEIPDB_KEY` |
+
+The tool auto-detects whether `target` is a domain or an IP. For domains, it also resolves up to 3 A records and runs the IP-only sources (ZEN, AbuseIPDB) against each — catches "clean domain pointed at compromised shared host" cases. URL-shaped input is auto-stripped to its hostname. Private / loopback / link-local IPs are rejected.
+
+Severity tuning:
+- **High** (CWE-453, malicious_target) — URLhaus active listing OR AbuseIPDB confidence ≥ 75%.
+- **Medium** — Spamhaus DBL listed; Google Safe Browsing flagged; AbuseIPDB confidence 25–74%.
+- **Low** — URLhaus historical entry; Spamhaus ZEN listed; AbuseIPDB confidence 1–24%.
+
+Per-source dedup: at most one finding per (severity × source-id) so multiple URLhaus URLs collapse to ONE URLhaus finding. Per-source verdicts still live in `result["sources"]` for the agent.
+
+Each finding carries `description_plain` + `recommended_action` tailored to the source: URLhaus / GSB hits → assume compromised, trigger IR workflow; Spamhaus DBL hits → fix root cause (SPF/DMARC misconfig + compromised mailbox) then request delisting; AbuseIPDB high-confidence hits → audit for compromised hosts, rotate keys, request delisting.
+
+`verification_status=needs_review` since reputation lists can carry stale entries; the agent should follow up by inspecting the URLhaus / GSB references in the finding before treating any single hit as a confirmed compromise.
+
+Cache: per-target JSON cache under `~/.strix/domain_rep_cache/`, 6-hour TTL. Stale-cache served on full-source failure (fail-open with `error` populated). Disable with `STRIX_DOMAIN_REP_NO_CACHE=1`.
+
+Composes with cluster-A safety: rate-limit applies to outbound HTTP requests; DNS-RBL queries are throttled by the DNS resolver's own timeout. `--exclude-path` doesn't apply since the URLs are URLhaus / Google / AbuseIPDB / Spamhaus, not the customer's domain.</description>
+    <parameters>
+      <parameter name="target" type="string" required="true">
+        <description>Domain (e.g. `example.com`, `app.example.com`) or IPv4 address (e.g. `198.51.100.42`). URL-shaped input (`https://example.com/`) is auto-stripped to the hostname. Private / loopback / link-local IPs are rejected.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-source timeout in seconds. Default 12.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target, target_type, queried_at, from_cache, sources: {urlhaus: {listed, status, urls_count, ...}, spamhaus_dbl: {listed, codes, kinds} | {skipped}, spamhaus_zen: [{ip, listed, codes, kinds}, ...], google_safe_browsing: {listed, threats} | {skipped, reason}, abuseipdb: [{ip, listed, abuse_confidence, total_reports, ...}, ...], resolved_ips: [...]}, source_errors, findings_emitted}.
+
+The agent should:
+1. Surface high-severity findings prominently — they're actionable IR signals.
+2. Note `source_errors.google_safe_browsing.skipped` / `abuseipdb[*].skipped` when keys aren't configured — coverage is partial in that case.
+3. For shared-hosting cases (clean domain + flagged IP), distinguish "your code is fine, your host is compromised" in the report.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<domain_reputation>
+<parameter=target>example.com</parameter>
+</domain_reputation>
+
+<domain_reputation>
+<parameter=target>198.51.100.42</parameter>
+</domain_reputation>
+
+<domain_reputation>
+<parameter=target>https://app.example.com/</parameter>
+<parameter=timeout>20</parameter>
+</domain_reputation>
+]]>
+    </example_usage>
+  </tool>
+</tools>
