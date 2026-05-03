@@ -264,6 +264,10 @@ def create_vulnerability_report(  # noqa: PLR0912, PLR0913
     category: str | None = None,
     verification_status: str | None = None,
     kill_chain: str | None = None,
+    description_plain: str | None = None,
+    business_impact_plain: str | None = None,
+    recommended_action: str | None = None,
+    fix_time_estimate: str | None = None,
 ) -> dict[str, Any]:
     validation_errors = _validate_required_fields(
         title=title,
@@ -368,6 +372,10 @@ def create_vulnerability_report(  # noqa: PLR0912, PLR0913
                 category=category,
                 verification_status=verification_status,
                 kill_chain=parsed_kill_chain,
+                description_plain=description_plain,
+                business_impact_plain=business_impact_plain,
+                recommended_action=recommended_action,
+                fix_time_estimate=fix_time_estimate,
             )
 
             return {

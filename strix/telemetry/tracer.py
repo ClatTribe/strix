@@ -177,6 +177,84 @@ def _normalize_kill_chain(raw: Any) -> list[dict[str, Any]] | None:
     return out or None
 
 
+_VALID_FIX_TIME_ESTIMATES: tuple[str, ...] = ("5min", "1hr", "1day", "1week+")
+
+
+def _normalize_fix_time_estimate(raw: Any) -> str | None:
+    """Coerce a fix_time_estimate value into the canonical bucket set.
+
+    Tolerant of common variants (`'5 min'`, `'5 minutes'`, `'1 hour'`,
+    `'1 day'`, `'1 week'`, etc.) — any longer-than-week input clamps to
+    `1week+`.
+    """
+    if not isinstance(raw, str):
+        return None
+    normalized = raw.strip().lower().replace(" ", "")
+    if normalized in _VALID_FIX_TIME_ESTIMATES:
+        return normalized
+    if normalized in ("5min", "5minutes", "5m", "fewminutes", "minutes"):
+        return "5min"
+    if normalized in ("1hour", "1hr", "hour", "fewhours", "hours"):
+        return "1hr"
+    if normalized in ("1day", "day", "1d", "fewdays"):
+        return "1day"
+    if normalized in ("1week", "1w", "week", "1week+", "manydays", "weeks"):
+        return "1week+"
+    return None
+
+
+def _derive_priority_label(
+    severity: str | None,
+    *,
+    is_kev: bool,
+    fix_time_estimate: str | None,
+) -> str:
+    """Auto-derive a user-time-aware priority distinct from technical severity.
+
+    Precedence:
+    - critical OR KEV → fix-now
+    - high → fix-this-week
+    - medium → plan-a-fix
+    - low / info → informational
+    - fix_time_estimate of `5min` or `1hr` bumps the result up one tier
+      (it's cheap to fix; do it now rather than queue it).
+    """
+    sev = (severity or "").lower().strip()
+    if sev == "critical" or is_kev:
+        return "fix-now"
+    base = {
+        "high": "fix-this-week",
+        "medium": "plan-a-fix",
+        "low": "informational",
+        "info": "informational",
+    }.get(sev, "informational")
+    if fix_time_estimate in ("5min", "1hr"):
+        bump = {
+            "fix-this-week": "fix-now",
+            "plan-a-fix": "fix-this-week",
+            "informational": "plan-a-fix",
+        }
+        return bump.get(base, base)
+    return base
+
+
+def _derive_exploitation_in_wild_plain(report: dict[str, Any]) -> str | None:
+    """Plain-English summary of KEV / actively-exploited status.
+
+    Reads existing threat-intel enrichment (set by `threat_intel.enrich`)
+    and renders the same signal in language a non-engineer can read.
+    """
+    if report.get("kev"):
+        cve = report.get("cve")
+        suffix = f" (CVE {cve})" if cve else ""
+        return (
+            "This is being actively attacked in the real world today"
+            f"{suffix}. CISA has it in their Known Exploited Vulnerabilities "
+            "catalog — fix this before tackling lower-risk findings."
+        )
+    return None
+
+
 def _normalize_target_for_events(raw: Any) -> dict[str, str] | None:
     """Coerce a scan_config target entry into a {value, type?} dict.
 
@@ -600,6 +678,15 @@ class Tracer:
                 "category": r.get("category"),
                 "cwe": r.get("cwe"),
                 "endpoint": r.get("endpoint"),
+                # Roadmap §11 non-tech-output fields surfaced on the
+                # wrapper's dashboard card. Optional — only present when
+                # the agent populated them.
+                "description_plain": r.get("description_plain"),
+                "business_impact_plain": r.get("business_impact_plain"),
+                "recommended_action": r.get("recommended_action"),
+                "fix_time_estimate": r.get("fix_time_estimate"),
+                "priority_label": r.get("priority_label"),
+                "exploitation_in_wild_plain": r.get("exploitation_in_wild_plain"),
             }
             for r in sorted_findings[:5]
         ]
@@ -753,6 +840,10 @@ class Tracer:
         category: str | None = None,
         verification_status: str | None = None,
         kill_chain: list[dict[str, Any]] | None = None,
+        description_plain: str | None = None,
+        business_impact_plain: str | None = None,
+        recommended_action: str | None = None,
+        fix_time_estimate: str | None = None,
     ) -> str:
         report_id = f"vuln-{len(self.vulnerability_reports) + 1:04d}"
 
@@ -813,6 +904,22 @@ class Tracer:
         if normalized_chain:
             report["kill_chain"] = normalized_chain
 
+        # Roadmap §11 non-tech-output fields. These are the wrapper's
+        # primary dashboard surface — non-engineer audience reads
+        # description_plain / business_impact_plain / recommended_action
+        # instead of the technical fields. Agent-supplied; never auto-
+        # generated to avoid the agent shipping a placeholder.
+        if isinstance(description_plain, str) and description_plain.strip():
+            report["description_plain"] = description_plain.strip()
+        if isinstance(business_impact_plain, str) and business_impact_plain.strip():
+            report["business_impact_plain"] = business_impact_plain.strip()
+        if isinstance(recommended_action, str) and recommended_action.strip():
+            report["recommended_action"] = recommended_action.strip()
+        if isinstance(fix_time_estimate, str):
+            normalized_estimate = _normalize_fix_time_estimate(fix_time_estimate)
+            if normalized_estimate:
+                report["fix_time_estimate"] = normalized_estimate
+
         # Threat-intel enrichment — fail-open. CWE → OWASP/MITRE comes from
         # static maps; CVE → KEV from CISA's catalog (cached on disk for 24h).
         try:
@@ -823,6 +930,23 @@ class Tracer:
                 report.update(enrichment)
         except Exception:  # noqa: BLE001
             logger.warning("threat-intel enrichment failed", exc_info=True)
+
+        # Roadmap §11 — auto-derive non-tech-output fields from the
+        # signals we now have. priority_label is user-time-aware
+        # (severity + KEV + how cheap the fix is). exploitation_in_wild_plain
+        # is the plain-English KEV alert the wrapper renders verbatim
+        # ("This is being actively attacked in the real world today").
+        try:
+            wild_plain = _derive_exploitation_in_wild_plain(report)
+            if wild_plain:
+                report["exploitation_in_wild_plain"] = wild_plain
+            report["priority_label"] = _derive_priority_label(
+                report.get("severity"),
+                is_kev=bool(report.get("kev")),
+                fix_time_estimate=report.get("fix_time_estimate"),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("non-tech-output derivation failed", exc_info=True)
 
         # Stable finding fingerprint (roadmap §11). Computed once at write time
         # over normalized (cwe, endpoint|file, first-80-chars-of-title). The
