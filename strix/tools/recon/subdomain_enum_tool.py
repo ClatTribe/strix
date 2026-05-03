@@ -301,11 +301,135 @@ def _enum_wayback(domain: str, max_results: int) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Source: Certificate Transparency logs (crt.sh + certspotter)
+# ---------------------------------------------------------------------------
+#
+# CT logs every TLS cert ever issued for a domain. For most orgs this
+# surfaces 5-10× more subdomains than passive-DNS sources alone — every
+# internal service that ever got a Let's Encrypt cert is in there, even
+# if it never appeared in DNS-source-of-truth feeds.
+#
+# Subfinder hits crt.sh internally as one of its many sources, but it's
+# not deterministic which CT logs subfinder's plugins query, and the
+# per-source counts can't tell us what CT actually contributed. Adding
+# crt.sh + certspotter as explicit sources guarantees coverage and lets
+# the pipeline report "we got N subdomains from CT".
+#
+# Both APIs are free and require no authentication.
+
+
+# Strip wildcard prefix (`*.foo.example.com` → `foo.example.com`) and
+# leading whitespace; cap to a reasonable hostname length.
+_CT_WILDCARD_PREFIX = "*."
+
+
+def _normalize_ct_hostname(raw: Any, apex: str) -> str | None:
+    """Validate + scope-filter a CT-derived hostname.
+
+    Returns the lowercased hostname when it ends with `.apex` (or equals
+    `apex`); otherwise None. Wildcard prefix stripped.
+    """
+    if not isinstance(raw, str):
+        return None
+    host = raw.strip().lower()
+    if host.startswith(_CT_WILDCARD_PREFIX):
+        host = host[len(_CT_WILDCARD_PREFIX):]
+    host = host.rstrip(".")
+    if not host or len(host) > 253:
+        return None
+    apex_lower = apex.lower()
+    if host == apex_lower or host.endswith(f".{apex_lower}"):
+        return host
+    return None
+
+
+def _enum_crtsh(domain: str, max_results: int) -> list[str]:
+    """Query crt.sh for every certificate ever issued for `*.<domain>`.
+
+    crt.sh returns one JSON record per cert; the `name_value` field is a
+    newline-separated list of SANs. We dedup across records and scope-
+    filter to the apex.
+
+    Free, no key required, but the public endpoint is rate-limited so
+    we apply a generous bytes cap and treat 504 / 429 as soft failures.
+    """
+    url = f"https://crt.sh/?q=%25.{domain}&output=json"
+    status, body = http_get_text(url, max_bytes=4 * 1024 * 1024)
+    if status != 200 or not body:
+        return []
+    try:
+        import json
+
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    seen: set[str] = set()
+    for record in data:
+        if not isinstance(record, dict):
+            continue
+        for field in ("common_name", "name_value"):
+            value = record.get(field)
+            if isinstance(value, str):
+                # name_value is newline-separated; common_name is a single name.
+                for line in value.splitlines():
+                    norm = _normalize_ct_hostname(line, domain)
+                    if norm:
+                        seen.add(norm)
+        if len(seen) >= max_results * 4:
+            # Stop scanning records once we have plenty — sort + cap below.
+            break
+    return sorted(seen)[:max_results]
+
+
+def _enum_certspotter(domain: str, max_results: int) -> list[str]:
+    """Query SSLMate's certspotter API for issuances against the apex.
+
+    Free for unauthenticated callers (rate-limited per source IP).
+    `include_subdomains=true` returns SANs across the apex's whole tree;
+    `expand=dns_names` includes the per-cert SAN list inline.
+    """
+    url = (
+        f"https://api.certspotter.com/v1/issuances?domain={domain}"
+        "&include_subdomains=true&expand=dns_names"
+    )
+    status, body = http_get_text(url, max_bytes=4 * 1024 * 1024)
+    if status != 200 or not body:
+        return []
+    try:
+        import json
+
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    seen: set[str] = set()
+    for issuance in data:
+        if not isinstance(issuance, dict):
+            continue
+        names = issuance.get("dns_names")
+        if not isinstance(names, list):
+            continue
+        for name in names:
+            norm = _normalize_ct_hostname(name, domain)
+            if norm:
+                seen.add(norm)
+        if len(seen) >= max_results * 4:
+            break
+    return sorted(seen)[:max_results]
+
+
+# ---------------------------------------------------------------------------
 # Public tool
 # ---------------------------------------------------------------------------
 
 
-_VALID_SOURCES = ("subfinder", "amass", "dns_bruteforce", "wayback", "permutations")
+_VALID_SOURCES = (
+    "subfinder", "amass", "dns_bruteforce", "wayback", "permutations",
+    "crtsh", "certspotter",
+)
 
 
 @register_tool(sandbox_execution=True)
@@ -343,7 +467,10 @@ def subdomain_enum(  # noqa: PLR0913
     if sources is None or sources.strip().lower() == "all":
         active_sources = list(_VALID_SOURCES)
     elif sources.strip().lower() == "default":
-        active_sources = ["subfinder", "amass", "dns_bruteforce", "wayback"]
+        active_sources = [
+            "subfinder", "amass", "dns_bruteforce", "wayback",
+            "crtsh", "certspotter",
+        ]
     else:
         active_sources = [s.strip().lower() for s in sources.split(",") if s.strip()]
         unknown = [s for s in active_sources if s not in _VALID_SOURCES]
@@ -388,6 +515,16 @@ def subdomain_enum(  # noqa: PLR0913
     if "wayback" in active_sources:
         per_source_results["wayback"] = _run(
             "wayback", lambda: _enum_wayback(domain, max_per_source)
+        )
+
+    if "crtsh" in active_sources:
+        per_source_results["crtsh"] = _run(
+            "crtsh", lambda: _enum_crtsh(domain, max_per_source)
+        )
+
+    if "certspotter" in active_sources:
+        per_source_results["certspotter"] = _run(
+            "certspotter", lambda: _enum_certspotter(domain, max_per_source)
         )
 
     # Permutations need seeds — either explicit or accumulated from other sources.

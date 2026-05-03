@@ -2,7 +2,7 @@
   <tool name="subdomain_enum">
     <description>Multi-source subdomain enumeration with bounded per-source budgets.
 
-Replaces single-source subfinder enumeration with five complementary sources:
+Replaces single-source subfinder enumeration with seven complementary sources:
 
 - **subfinder** — passive (CT logs, common providers). ~5–50 results typical.
 - **amass** — deeper active+passive enum. Bigger, slower, finds more.
@@ -10,6 +10,11 @@ Replaces single-source subfinder enumeration with five complementary sources:
   Default wordlist is ~150 common names. Custom wordlist via `wordlist=<path>`.
 - **wayback** — query archive.org's CDX API for historical URLs containing
   the apex; extract subdomains. No API key required.
+- **crtsh** — query crt.sh for every TLS cert ever issued for `*.<apex>`. Every
+  internal service that ever got a Let's Encrypt cert is in here, even if it
+  never appeared in DNS. Free, no key required.
+- **certspotter** — query SSLMate's certspotter API for the same CT data via
+  a different log set. Free, no key required (rate-limited).
 - **permutations** — apply `prod-` / `staging-` / `-internal` etc. transformations
   to already-discovered seeds; resolve each candidate. Auto-uses results from
   the other sources as seeds; can be overridden via `permutation_seeds`.
@@ -28,7 +33,7 @@ source enumeration step).</description>
         <description>Apex domain to enumerate (e.g. "example.com").</description>
       </parameter>
       <parameter name="sources" type="string" required="false">
-        <description>Comma-separated subset of {subfinder, amass, dns_bruteforce, wayback, permutations}. Default: "default" runs subfinder + amass + dns_bruteforce + wayback (permutations auto-runs after if seeds were found). "all" runs everything explicitly. Subset like "subfinder,wayback" restricts.</description>
+        <description>Comma-separated subset of {subfinder, amass, dns_bruteforce, wayback, crtsh, certspotter, permutations}. Default: "default" runs subfinder + amass + dns_bruteforce + wayback + crtsh + certspotter (permutations auto-runs after if seeds were found). "all" runs everything explicitly. Subset like "crtsh,certspotter" restricts to CT-only.</description>
       </parameter>
       <parameter name="wordlist" type="string" required="false">
         <description>Path to a custom wordlist file (one entry per line, # comments). Used by dns_bruteforce. Defaults to a built-in ~150-name list of common subdomain prefixes.</description>
