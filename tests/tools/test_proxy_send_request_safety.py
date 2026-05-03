@@ -162,3 +162,78 @@ def test_rate_limit_applied_to_consecutive_dispatched_requests(monkeypatch) -> N
     elapsed = time.monotonic() - start
     # 10 qps = ≥ 0.1s between calls.
     assert elapsed >= 0.08
+
+
+# ---------------------------------------------------------------------------
+# Direct-HTTP fallback when the sandbox proxy is unreachable
+# ---------------------------------------------------------------------------
+
+
+def test_send_simple_request_falls_back_direct_when_proxy_unreachable(monkeypatch):
+    """When Caido isn't running (host-side validation runs), the request
+    should retry without the proxy and return the real response."""
+    from strix.tools.proxy.proxy_manager import ProxyManager
+    import requests as _requests
+
+    call_log: list[bool] = []  # records whether each call used proxy
+
+    def fake_request(method, url, headers, data, proxies, timeout, verify):
+        call_log.append(proxies is not None)
+        if proxies is not None:
+            # Proxy unreachable.
+            raise _requests.exceptions.ProxyError("connection refused")
+        # Direct succeeds.
+        class _R:
+            status_code = 200
+            headers = {"Content-Type": "text/html"}
+            text = "<html>direct fallback</html>"
+            url = "https://example.com/"
+        return _R()
+
+    monkeypatch.setattr(_requests, "request", fake_request)
+    pm = ProxyManager()
+    result = pm.send_simple_request("GET", "https://example.com/")
+    # Proxy attempted first, then direct.
+    assert call_log == [True, False]
+    assert result["status_code"] == 200
+    assert result["proxy_used"] is False
+    assert "fallback" in result["body"]
+
+
+def test_send_simple_request_proxy_path_works_when_proxy_up(monkeypatch):
+    """Sanity: when the proxy is up (no exception), we DON'T also fire a
+    direct request — single network call, proxy path only."""
+    from strix.tools.proxy.proxy_manager import ProxyManager
+    import requests as _requests
+
+    call_log: list[bool] = []
+
+    def fake_request(method, url, headers, data, proxies, timeout, verify):
+        call_log.append(proxies is not None)
+        class _R:
+            status_code = 200
+            headers = {}
+            text = "ok"
+            url = "https://example.com/"
+        return _R()
+
+    monkeypatch.setattr(_requests, "request", fake_request)
+    pm = ProxyManager()
+    result = pm.send_simple_request("GET", "https://example.com/")
+    assert call_log == [True]  # only the proxy attempt
+    assert result["proxy_used"] is True
+
+
+def test_send_simple_request_both_paths_fail(monkeypatch):
+    """Proxy unreachable + direct also fails → returns the error dict."""
+    from strix.tools.proxy.proxy_manager import ProxyManager
+    import requests as _requests
+
+    def fake_request(method, url, headers, data, proxies, timeout, verify):
+        raise _requests.exceptions.RequestException("network down")
+
+    monkeypatch.setattr(_requests, "request", fake_request)
+    pm = ProxyManager()
+    result = pm.send_simple_request("GET", "https://example.com/")
+    assert "error" in result
+    assert "RequestException" in result["error"]
