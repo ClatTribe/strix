@@ -1,0 +1,70 @@
+<tools>
+  <tool name="cve_intel_search">
+    <description>Query Perplexity for fresh CVE intelligence on a specific `(tech, version)` pair. Augments `cve_lookup` (#61, OSV-backed) with web-indexed content — vendor advisories not yet in OSV, in-the-wild exploitation reports, recent PoCs.
+
+Why this complements `cve_lookup`:
+- OSV.dev lags vendor advisories by hours-to-days. A 0-day disclosed Tuesday morning shows up in Perplexity's web-indexed corpus before OSV picks it up.
+- Vendor advisories that aren't formally CVE-numbered (GHSA / RHSA / vendor security bulletins) appear in Perplexity but may not show up in OSV.
+- "In the wild" exploitation reports (KEV-adjacent) come up in Perplexity even when KEV hasn't yet listed the CVE.
+
+Auth: `PERPLEXITY_API_KEY` env var (the same key gating the existing `web_search` tool). Without it, returns `success=False` with a clear error so the agent knows to fall back to `cve_lookup` only.
+
+Methodology:
+1. Build a structured prompt: "List all publicly-disclosed CVEs affecting `<tech> <version>` as of `<today>`. For each: CVE ID, severity, summary, exploit PoC URL, KEV status, fixed version. Don't make up CVE IDs."
+2. POST to `https://api.perplexity.ai/chat/completions` with the `sonar-pro` model (better quality + citations than `sonar`).
+3. Extract CVE IDs from the response content via `CVE-\d{4}-\d{4,}` regex (case-insensitive, deduped, sorted, capped at 50).
+4. Capture Perplexity-supplied `citations[]` + URLs found inline in the response body.
+
+The tool is **display-only** — does NOT emit findings. Perplexity output is LLM-generated and may include hallucinated CVE IDs. The agent's workflow:
+1. `fingerprint_tech_stack` detects `(tech, version)`.
+2. `cve_lookup` queries OSV (authoritative) for known CVEs.
+3. `cve_intel_search` (this tool) queries Perplexity for FRESH intel.
+4. The agent compares: any CVE mentioned by Perplexity but not OSV gets a follow-up `cve_lookup` query (in case OSV was stale) OR is flagged for human review.
+
+Cache: per-(tech, version, model) JSON cache under `~/.strix/cve_intel_cache/`, 12-hour TTL. Stale-cache served on network failure (fail-open with `error` populated). Disable with `STRIX_CVE_INTEL_NO_CACHE=1`.
+
+Composes with cluster-A safety: rate-limit applies to the Perplexity request. `--exclude-path` doesn't apply (URL is api.perplexity.ai, not the customer's domain).</description>
+    <parameters>
+      <parameter name="tech" type="string" required="true">
+        <description>Software / framework name (e.g. `Apache`, `Log4j`, `OpenSSL`). Free-text — Perplexity does its own fuzzy matching. Pair with the version detected by `fingerprint_tech_stack`.</description>
+      </parameter>
+      <parameter name="version" type="string" required="true">
+        <description>Exact version string (e.g. `2.4.49`, `2.14.1`).</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-request timeout in seconds. Default 60 (Sonar queries take 10-30s; budget more than typical HTTP).</description>
+      </parameter>
+      <parameter name="model" type="string" required="false">
+        <description>Perplexity model to use. Default `sonar-pro` (better quality + citations). Alternatives: `sonar` (faster + cheaper), `sonar-reasoning-pro` (deeper reasoning, slower).</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, tech, version, model, queried_at, from_cache, cves: [CVE-XXXX-XXXX, ...], citations: [url, ...] (Perplexity-supplied), inline_urls: [url, ...] (URLs in content body), summary: <full LLM response text>, error?}.
+
+The agent should:
+1. Cross-reference each CVE in `cves[]` with `cve_lookup` to verify it's a real CVE (not hallucinated).
+2. For CVEs not yet in OSV, treat as a candidate worth manual review.
+3. Use `citations[]` + `inline_urls[]` to surface authoritative sources to the user.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<cve_intel_search>
+<parameter=tech>log4j</parameter>
+<parameter=version>2.14.1</parameter>
+</cve_intel_search>
+
+<cve_intel_search>
+<parameter=tech>OpenSSL</parameter>
+<parameter=version>3.0.7</parameter>
+<parameter=timeout>120</parameter>
+</cve_intel_search>
+
+<cve_intel_search>
+<parameter=tech>Apache HTTP Server</parameter>
+<parameter=version>2.4.49</parameter>
+<parameter=model>sonar</parameter>
+</cve_intel_search>
+]]>
+    </example_usage>
+  </tool>
+</tools>
