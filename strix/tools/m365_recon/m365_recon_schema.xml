@@ -1,0 +1,53 @@
+<tools>
+  <tool name="m365_tenant_recon">
+    <description>Detect Microsoft 365 / Azure AD (Entra ID) tenant + federation posture for a domain.
+
+Probes two public Microsoft endpoints (no authentication required):
+
+1. **OpenID Connect discovery** — `https://login.microsoftonline.com/<domain>/.well-known/openid-configuration`
+   When the domain is a registered Entra tenant, returns the standard OIDC discovery
+   JSON. The `issuer` URL contains the tenant GUID — the pivot key for every
+   downstream Azure-resource probe.
+
+2. **GetUserRealm** — `https://login.microsoftonline.com/getuserrealm.srf?login=user@<domain>&xml=1`
+   Returns XML with `NameSpaceType` (Managed / Federated / Unknown), `FederationBrandName`
+   (when federated; names the IdP — ADFS / Okta / Ping / etc.), and the canonical
+   domain (Microsoft's view of the tenant's primary domain).
+
+Findings:
+- **Info** (CWE-200, info_disclosure) when the domain is a confirmed Entra tenant.
+  The finding includes the tenant ID, federation type, and IdP brand. Tailored
+  `description_plain` + `recommended_action` based on whether the tenant is
+  Managed (direct M365), Federated (third-party IdP via SAML/WS-Fed), or Unknown.
+
+Use during the recon phase for any `domain` target that the agent suspects might
+have email / collaboration on M365. The two probes are cheap (one GET each) and
+add no false positives — Microsoft definitively answers "is this domain an Entra
+tenant?" via these endpoints.
+
+Composes with cluster-A safety. The probe targets Microsoft endpoints (not the
+customer), so `--exclude-path` against the customer's domain doesn't apply, but
+`--rate-limit` still throttles outbound calls.</description>
+    <parameters>
+      <parameter name="domain" type="string" required="true">
+        <description>Apex domain to probe (e.g. `example.com` or `contoso.onmicrosoft.com`). Bare hostnames only — schemes are stripped if accidentally included.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, domain, is_m365_tenant, tenant_id, openid_configuration: {url, present, status, tenant_id, issuer, authorization_endpoint, token_endpoint, jwks_uri, ...}, user_realm: {url, present, status, namespace_type, federation_brand, federation_protocol, auth_url, canonical_domain, ...}}.
+
+`is_m365_tenant=True` when EITHER probe confirms (some tenants only respond to one). `tenant_id` is the GUID extracted from the OIDC issuer URL; None when only the realm probe succeeded.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<m365_tenant_recon>
+<parameter=domain>example.com</parameter>
+</m365_tenant_recon>
+
+<m365_tenant_recon>
+<parameter=domain>contoso.onmicrosoft.com</parameter>
+</m365_tenant_recon>
+]]>
+    </example_usage>
+  </tool>
+</tools>
