@@ -1,0 +1,85 @@
+<tools>
+  <tool name="cve_lookup">
+    <description>Query OSV.dev (the Open Source Vulnerability database) for known CVEs affecting a `(package_name, version, ecosystem)` triple. Designed to run right after `fingerprint_tech_stack` resolves a technology version — closes the loop between recon-time detection and the catalog of known-vulnerable releases without spending agent tokens.
+
+Each `vulns[]` entry returned by OSV emits one finding tagged with the CVE ID. The tracer's existing KEV enrichment (CISA Known-Exploited-Vulnerabilities catalog) auto-decorates these findings with `is_kev=True`, `kev_due_date`, and `ransomware_use` flags — no extra integration needed in this tool.
+
+Severity derivation:
+- `database_specific.severity` → GHSA enum (CRITICAL/HIGH/MODERATE/LOW) → mapped to (critical/high/medium/low).
+- `database_specific.cvss.score` → CVSS bands (>=9 critical / >=7 high / >=4 medium / else low).
+- `severity[].score` → numeric or vector. Numeric goes through CVSS bands; vector with `AV:N + AC:L` → high, otherwise medium.
+- Default: medium when no signal.
+
+Caching:
+- Per-(ecosystem, name, version) JSON cache under `~/.strix/cve_lookup_cache/`, 6-hour TTL.
+- Stale cache served on network failure (fail-open).
+- Disable with `STRIX_CVE_LOOKUP_NO_CACHE=1`.
+
+Composes with cluster-A safety: rate-limit applies to the OSV request. `--exclude-path` doesn't apply (URL is OSV.dev, not the customer's domain).
+
+Recommended ecosystems for common fingerprint detections:
+
+| Tech | Ecosystem |
+|---|---|
+| express / react / vue / angular / next / lodash / etc. | `npm` |
+| django / flask / fastapi / starlette | `PyPI` |
+| rails / sinatra | `RubyGems` |
+| spring / log4j / tomcat / struts / jackson | `Maven` |
+| laravel / symfony / drupal | `Packagist` |
+| gin / echo | `Go` |
+| actix / rocket | `crates.io` |
+| nginx / apache / IIS / WordPress core | (no clean OSV mapping — use empty string) |
+
+For non-OSV-indexed software (server binaries, WordPress core), pass empty string for ecosystem; OSV will match by package name across ecosystems but coverage is limited.
+
+Each finding carries `description_plain` + `recommended_action` (upgrade to the OSV-published fix-version OR monitor the advisory if no fix published) and `verification_status=verified` since OSV's data is authoritative.</description>
+    <parameters>
+      <parameter name="name" type="string" required="true">
+        <description>Package name (e.g. `express`, `django`, `log4j-core`). For Maven packages, use the `groupId:artifactId` format (e.g. `org.apache.logging.log4j:log4j-core`).</description>
+      </parameter>
+      <parameter name="version" type="string" required="true">
+        <description>Exact version string (e.g. `4.16.0`, `1.11.5`, `2.14.1`). Pre-release suffixes (`-rc.1`, `-beta`) preserved verbatim.</description>
+      </parameter>
+      <parameter name="ecosystem" type="string" required="false">
+        <description>OSV ecosystem identifier. One of: `npm`, `PyPI`, `Maven`, `Go`, `RubyGems`, `crates.io`, `NuGet`, `Packagist`, `Hex`, `Pub`, `ConanCenter`, `SwiftURL`, plus Linux-distro names (`Debian`, `Ubuntu`, `Alpine`, etc.). Pass empty string to query without an ecosystem filter (OSV will match by name across ecosystems — lower precision but useful when the ecosystem is unknown).</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-request timeout in seconds. Default 15.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, name, version, ecosystem, osv_url, queried_at, cve_count, from_cache, vulnerabilities: [{id, cve, severity, severity_source: {source, value?}, summary, fix_versions, references, ghsa_id, alias_count}, ...], findings_emitted, error?}.
+
+The agent should:
+1. Sort vulnerabilities by severity for prioritisation.
+2. Highlight any CVE the tracer auto-tagged with `is_kev=True` (those are actively-exploited and fix-immediately).
+3. When the same package has multiple matching CVEs, prioritise the one with the cleanest fix-path.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<cve_lookup>
+<parameter=name>express</parameter>
+<parameter=version>4.16.0</parameter>
+<parameter=ecosystem>npm</parameter>
+</cve_lookup>
+
+<cve_lookup>
+<parameter=name>django</parameter>
+<parameter=version>3.2.5</parameter>
+<parameter=ecosystem>PyPI</parameter>
+</cve_lookup>
+
+<cve_lookup>
+<parameter=name>org.apache.logging.log4j:log4j-core</parameter>
+<parameter=version>2.14.1</parameter>
+<parameter=ecosystem>Maven</parameter>
+</cve_lookup>
+
+<cve_lookup>
+<parameter=name>some-internal-pkg</parameter>
+<parameter=version>1.2.3</parameter>
+</cve_lookup>
+]]>
+    </example_usage>
+  </tool>
+</tools>
