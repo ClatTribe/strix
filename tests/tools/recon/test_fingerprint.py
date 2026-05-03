@@ -480,3 +480,127 @@ def test_openapi_skipped_in_shallow_mode(monkeypatch, fake_agent_state) -> None:
     fingerprint.fingerprint_tech_stack(fake_agent_state, "https://example.com", deep=False)
     # No OpenAPI / Swagger paths probed in shallow mode.
     assert all("/openapi" not in u and "/swagger" not in u for u in captured_urls)
+
+
+# ---------------------------------------------------------------------------
+# Modern-SPA framework detection — patterns added after the OWASP Juice
+# Shop validation showed the original regex set missed Angular shells +
+# Remix / SvelteKit / Astro / SolidJS markers.
+# ---------------------------------------------------------------------------
+
+
+def test_angular_app_root_detected(monkeypatch, fake_agent_state) -> None:
+    """The default Angular CLI shell uses `<app-root></app-root>` — the
+    original `ng-version|angular[/\\.]\\d` regex missed it."""
+    body = "<html><body><app-root></app-root><script src='/runtime.js'></script></body></html>"
+    _patch_probe(monkeypatch, 200, {}, body)
+    out = fingerprint.fingerprint_tech_stack(fake_agent_state, "https://app.example.com")
+    techs = [d["technology"] for d in out["technologies"]]
+    assert "angular" in techs
+
+
+def test_angular_ng_version_attribute(monkeypatch, fake_agent_state) -> None:
+    """Angular's runtime adds `ng-version="17.0.0"` to the root component."""
+    body = '<html><body><app-root ng-version="17.0.0"></app-root></body></html>'
+    _patch_probe(monkeypatch, 200, {}, body)
+    out = fingerprint.fingerprint_tech_stack(fake_agent_state, "https://app.example.com")
+    techs = [d["technology"] for d in out["technologies"]]
+    assert "angular" in techs
+
+
+def test_remix_detected(monkeypatch, fake_agent_state) -> None:
+    body = "<html><script>window.__remixContext = {};window.__remixManifest = {};</script></html>"
+    _patch_probe(monkeypatch, 200, {}, body)
+    out = fingerprint.fingerprint_tech_stack(fake_agent_state, "https://app.example.com")
+    techs = [d["technology"] for d in out["technologies"]]
+    assert "remix" in techs
+
+
+def test_sveltekit_detected(monkeypatch, fake_agent_state) -> None:
+    body = (
+        "<html><script>window.__SVELTEKIT_PAYLOAD__ = {};</script>"
+        "<link rel='modulepreload' href='/_app/immutable/start-abc.js'></html>"
+    )
+    _patch_probe(monkeypatch, 200, {}, body)
+    out = fingerprint.fingerprint_tech_stack(fake_agent_state, "https://app.example.com")
+    techs = [d["technology"] for d in out["technologies"]]
+    assert "sveltekit" in techs
+
+
+def test_svelte_non_kit_detected(monkeypatch, fake_agent_state) -> None:
+    """Plain Svelte (without SvelteKit) — different markers."""
+    body = "<html><script>import 'svelte/internal';</script></html>"
+    _patch_probe(monkeypatch, 200, {}, body)
+    out = fingerprint.fingerprint_tech_stack(fake_agent_state, "https://app.example.com")
+    techs = [d["technology"] for d in out["technologies"]]
+    assert "svelte" in techs
+
+
+def test_solidjs_detected(monkeypatch, fake_agent_state) -> None:
+    body = "<html><script>import {createSignal} from 'solid-js/web';</script></html>"
+    _patch_probe(monkeypatch, 200, {}, body)
+    out = fingerprint.fingerprint_tech_stack(fake_agent_state, "https://app.example.com")
+    techs = [d["technology"] for d in out["technologies"]]
+    assert "solidjs" in techs
+
+
+def test_astro_detected_via_island(monkeypatch, fake_agent_state) -> None:
+    body = "<html><body><astro-island uid='abc'>...</astro-island></body></html>"
+    _patch_probe(monkeypatch, 200, {}, body)
+    out = fingerprint.fingerprint_tech_stack(fake_agent_state, "https://app.example.com")
+    techs = [d["technology"] for d in out["technologies"]]
+    assert "astro" in techs
+
+
+def test_nuxt3_detected(monkeypatch, fake_agent_state) -> None:
+    """Nuxt 3 uses __NUXT_DATA__ and /_nuxt/ asset path; original regex
+    only matched legacy __NUXT__."""
+    body = (
+        '<html><script id="__NUXT_DATA__">{}</script>'
+        '<link rel="stylesheet" href="/_nuxt/entry.css"></html>'
+    )
+    _patch_probe(monkeypatch, 200, {}, body)
+    out = fingerprint.fingerprint_tech_stack(fake_agent_state, "https://app.example.com")
+    techs = [d["technology"] for d in out["technologies"]]
+    assert "nuxtjs" in techs
+
+
+def test_vue3_data_v_attrs(monkeypatch, fake_agent_state) -> None:
+    """Vue 3 SFCs ship `data-v-<hash>` scope attributes — original regex
+    only matched Vue 2's `Vue.config` / `v-app`."""
+    body = '<html><body><div data-v-abc1234>Hello</div></body></html>'
+    _patch_probe(monkeypatch, 200, {}, body)
+    out = fingerprint.fingerprint_tech_stack(fake_agent_state, "https://app.example.com")
+    techs = [d["technology"] for d in out["technologies"]]
+    assert "vue" in techs
+
+
+def test_static_site_generators_detected(monkeypatch, fake_agent_state) -> None:
+    """Hugo / Jekyll / Gatsby / Astro via <meta generator>."""
+    for gen, expected in [("Hugo 0.115.0", "hugo"), ("Jekyll", "jekyll"), ("Gatsby 5.12.0", "gatsby"), ("Astro 4.0.0", "astro")]:
+        body = f"<html><head><meta name='generator' content='{gen}'></head></html>"
+        _patch_probe(monkeypatch, 200, {}, body)
+        out = fingerprint.fingerprint_tech_stack(fake_agent_state, "https://app.example.com")
+        techs = [d["technology"] for d in out["technologies"]]
+        assert expected in techs, f"{gen} not detected as {expected}"
+
+
+def test_react_modern_marker(monkeypatch, fake_agent_state) -> None:
+    """Modern React no longer ships `data-reactroot`; uses
+    `__REACT_DEVTOOLS_GLOBAL_HOOK__` + `_reactRootContainer`."""
+    body = "<html><script>window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = {};</script></html>"
+    _patch_probe(monkeypatch, 200, {}, body)
+    out = fingerprint.fingerprint_tech_stack(fake_agent_state, "https://app.example.com")
+    techs = [d["technology"] for d in out["technologies"]]
+    assert "react" in techs
+
+
+def test_next_via_static_path(monkeypatch, fake_agent_state) -> None:
+    """`/_next/static/` references in the HTML are a strong Next.js signal
+    even without the inline NEXT_DATA script (e.g. server-side-rendered
+    page where the data block lives elsewhere)."""
+    body = "<html><link rel='preload' as='script' href='/_next/static/chunks/main.js'></html>"
+    _patch_probe(monkeypatch, 200, {}, body)
+    out = fingerprint.fingerprint_tech_stack(fake_agent_state, "https://app.example.com")
+    techs = [d["technology"] for d in out["technologies"]]
+    assert "nextjs" in techs

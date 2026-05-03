@@ -294,19 +294,51 @@ def _detect_from_cookies(headers: dict[str, str]) -> list[Detection]:
 
 _BODY_SIGNALS: list[tuple[re.Pattern[str], str, str, str, str | None]] = [
     # (regex, technology, label, confidence, skill)
+    # CMS via <meta name="generator">
     (re.compile(r"<meta[^>]+name=[\"']generator[\"'][^>]+content=[\"']WordPress", re.IGNORECASE), "wordpress", "WordPress", "high", None),
     (re.compile(r"<meta[^>]+name=[\"']generator[\"'][^>]+content=[\"']Drupal", re.IGNORECASE), "drupal", "Drupal", "high", None),
     (re.compile(r"<meta[^>]+name=[\"']generator[\"'][^>]+content=[\"']Joomla", re.IGNORECASE), "joomla", "Joomla", "high", None),
+    (re.compile(r"<meta[^>]+name=[\"']generator[\"'][^>]+content=[\"']Hugo", re.IGNORECASE), "hugo", "Hugo (static site)", "high", None),
+    (re.compile(r"<meta[^>]+name=[\"']generator[\"'][^>]+content=[\"']Jekyll", re.IGNORECASE), "jekyll", "Jekyll (static site)", "high", None),
+    (re.compile(r"<meta[^>]+name=[\"']generator[\"'][^>]+content=[\"']Gatsby", re.IGNORECASE), "gatsby", "Gatsby", "high", None),
+    (re.compile(r"<meta[^>]+name=[\"']generator[\"'][^>]+content=[\"']Astro", re.IGNORECASE), "astro", "Astro", "high", None),
+
+    # BaaS / database services
     (re.compile(r"firebase-(?:app|auth|firestore|database)\.js|firebaseio\.com|gstatic\.com/firebasejs", re.IGNORECASE), "firebase", "Firebase", "high", "firebase_firestore"),
     (re.compile(r"\.supabase\.co|@supabase/supabase-js", re.IGNORECASE), "supabase", "Supabase", "high", "supabase"),
-    (re.compile(r"window\.__NUXT__|nuxt-link", re.IGNORECASE), "nuxtjs", "Nuxt.js", "high", None),
-    (re.compile(r"window\.__NEXT_DATA__|<script id=\"__NEXT_DATA__\"", re.IGNORECASE), "nextjs", "Next.js", "high", "nextjs"),
-    (re.compile(r"__webpack_require__|webpackJsonp", re.IGNORECASE), "webpack", "Webpack-bundled JS", "low", None),
-    (re.compile(r"angular[/\.]\d|ng-version", re.IGNORECASE), "angular", "Angular", "medium", None),
-    (re.compile(r"data-reactroot|react-dom", re.IGNORECASE), "react", "React", "medium", None),
-    (re.compile(r"Vue\.config|v-app", re.IGNORECASE), "vue", "Vue.js", "medium", None),
+
+    # SPA frameworks — modern markers first (more specific), then legacy fallbacks.
+    # Next.js
+    (re.compile(r"window\.__NEXT_DATA__|<script id=\"__NEXT_DATA__\"|/_next/static/", re.IGNORECASE), "nextjs", "Next.js", "high", "nextjs"),
+    # Nuxt 2 (`__NUXT__`) + Nuxt 3 (`__NUXT_DATA__`, `nuxt-build-id`)
+    (re.compile(r"window\.__NUXT__|window\.__NUXT_DATA__|<script id=\"__NUXT_DATA__\"|nuxt-link|/_nuxt/", re.IGNORECASE), "nuxtjs", "Nuxt.js", "high", None),
+    # Remix
+    (re.compile(r"window\.__remixContext|__remixManifest|__remixRouteModules|/build/manifest-[A-F0-9]+\.js", re.IGNORECASE), "remix", "Remix", "high", None),
+    # Astro (in addition to <meta generator>)
+    (re.compile(r"<astro-island\b|<astro-slot\b|astro-island.js", re.IGNORECASE), "astro", "Astro", "high", None),
+    # SvelteKit
+    (re.compile(r"window\.__SVELTEKIT_PAYLOAD__|/_app/immutable/|svelte-[a-z0-9]{6}\b", re.IGNORECASE), "sveltekit", "SvelteKit", "high", None),
+    # Svelte (non-kit)
+    (re.compile(r"__SVELTE__|svelte-hmr|svelte/internal", re.IGNORECASE), "svelte", "Svelte", "medium", None),
+    # SolidJS
+    (re.compile(r"_\$DX_DELEGATE\b|solid-js/web|solid-js/store", re.IGNORECASE), "solidjs", "SolidJS", "high", None),
+    # Webpack runtime (low — many frameworks bundle with Webpack)
+    (re.compile(r"__webpack_require__|webpackJsonp|webpackChunk_", re.IGNORECASE), "webpack", "Webpack-bundled JS", "low", None),
+    # Angular — multiple markers including `ng-version` ATTRIBUTE form +
+    # `<app-root>` (the default CLI shell) + ng-server-context.
+    (re.compile(r"\bng-version=|<app-root\b|<app-component\b|ng-server-context|@angular/", re.IGNORECASE), "angular", "Angular", "high", None),
+    # React: data-reactroot (legacy) + new `__REACT_DEVTOOLS_GLOBAL_HOOK__` +
+    # createRoot fingerprint.
+    (re.compile(r"data-reactroot|react-dom|__REACT_DEVTOOLS_GLOBAL_HOOK__|_reactRootContainer", re.IGNORECASE), "react", "React", "high", None),
+    # Vue 3 (`__VUE__` global, `data-v-` scope attrs) + Vue 2 (`Vue.config`, `v-app`).
+    (re.compile(r"\bdata-v-[a-f0-9]{6,}\b|window\.__VUE__|Vue\.config|\bv-app\b|<v-app\b", re.IGNORECASE), "vue", "Vue.js", "high", None),
+
+    # E-commerce
     (re.compile(r"shopify\.com|x-shopify", re.IGNORECASE), "shopify", "Shopify", "high", None),
-    (re.compile(r"<form[^>]+action=[\"'][^\"']*\"\?graphql", re.IGNORECASE), "graphql", "GraphQL", "medium", "graphql"),
+
+    # GraphQL — the dedicated _probe_graphql (deep mode) is more reliable;
+    # this body sniff just catches obvious form actions.
+    (re.compile(r"<form[^>]+action=[\"'][^\"']*\"?graphql", re.IGNORECASE), "graphql", "GraphQL", "medium", "graphql"),
 ]
 
 

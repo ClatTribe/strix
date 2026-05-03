@@ -50,25 +50,59 @@ _HTML_SCRIPT_SRC_RE = re.compile(
     r"""<script\b[^>]*?\bsrc\s*=\s*['"]([^'"]+)['"]""", re.IGNORECASE
 )
 
+# Modern SPAs (Next.js, Vite, Angular, Vue) ship most of their bundle
+# URLs via <link rel="modulepreload"> or <link rel="preload" as="script">
+# rather than inline <script> tags. The regex matches both patterns and
+# captures the href value.
+_HTML_LINK_PRELOAD_RE = re.compile(
+    r"""<link\b(?=[^>]*?\brel\s*=\s*['"](?:modulepreload|preload)['"])"""
+    r"""(?=[^>]*?\bhref\s*=\s*['"]([^'"]+)['"])"""
+    r"""(?:[^>]*?\bas\s*=\s*['"](script|module)['"])?[^>]*?>""",
+    re.IGNORECASE,
+)
+
+# Loose JS-source regex for URL-shaped strings inside inline <script>
+# blocks. Modern SPA shells embed an array of chunk URLs inside an inline
+# bootstrap script ("__NEXT_DATA__", "__VITE_PRELOAD__", build manifests).
+# We capture path-shaped string literals that end with `.js` (with optional
+# query / hash fragment).
+_INLINE_SCRIPT_BLOCK_RE = re.compile(
+    r"<script\b(?![^>]*\bsrc\s*=)[^>]*?>(.*?)</script>",
+    re.IGNORECASE | re.DOTALL,
+)
+_INLINE_JS_PATH_RE = re.compile(
+    r"""['"`]"""
+    r"""(/[A-Za-z0-9._/\-]+?\.[mc]?js(?:\?[^'"`]*)?)"""
+    r"""['"`]"""
+)
+
 # Common bundle-name candidates probed at the origin root and a few
 # well-known asset directories. Keeps the probe count bounded; agents
 # can supply additional URLs via `extra_urls`.
 _BUNDLE_NAME_CANDIDATES: tuple[str, ...] = (
+    # Generic / Webpack-default
     "/app.js.map",
     "/main.js.map",
     "/bundle.js.map",
     "/index.js.map",
     "/vendor.js.map",
     "/runtime.js.map",
+    # Create-React-App / Webpack production layout
     "/static/js/main.js.map",
     "/static/js/app.js.map",
     "/static/js/bundle.js.map",
     "/static/js/runtime.js.map",
+    "/static/js/runtime-main.js.map",
     "/static/js/vendors.js.map",
+    "/static/js/vendors~main.js.map",
+    "/static/js/2.chunk.js.map",
+    # Vite default layout
     "/assets/index.js.map",
     "/assets/main.js.map",
     "/assets/app.js.map",
     "/assets/vendor.js.map",
+    "/assets/index-legacy.js.map",
+    # General /dist/ /build/ /js/ asset roots
     "/dist/main.js.map",
     "/dist/bundle.js.map",
     "/dist/app.js.map",
@@ -77,6 +111,21 @@ _BUNDLE_NAME_CANDIDATES: tuple[str, ...] = (
     "/js/main.js.map",
     "/js/app.js.map",
     "/js/bundle.js.map",
+    # Angular CLI default layout (`/runtime.js.map` and `/vendor.js.map`
+    # are already covered above; Angular-specific additions only)
+    "/polyfills.js.map",
+    "/styles.js.map",
+    "/main-es2015.js.map",
+    "/main-es5.js.map",
+    # Next.js — best-effort guesses (chunk names are usually hashed)
+    "/_next/static/chunks/main.js.map",
+    "/_next/static/chunks/webpack.js.map",
+    "/_next/static/chunks/framework.js.map",
+    "/_next/static/chunks/pages/_app.js.map",
+    # Nuxt / Vue
+    "/_nuxt/main.js.map",
+    "/_nuxt/app.js.map",
+    "/_nuxt/entry.js.map",
 )
 
 # Reuse the secret-indicator regex used in code_search_for_domain. Without
@@ -157,28 +206,63 @@ def _in_same_origin(candidate: str, origin: str) -> bool:
 
 
 def _harvest_script_srcs(html_body: str, base: str) -> list[str]:
-    """Pull `<script src=...>` URLs out of HTML, resolve to absolute,
-    same-origin only."""
+    """Pull JS bundle URLs out of HTML, resolve to absolute, same-origin only.
+
+    Sources covered (in order, each contributes to the same dedup set):
+    1. `<script src="...">` — classic.
+    2. `<link rel="modulepreload" href="...">` — Vite, modern SPAs.
+    3. `<link rel="preload" as="script" href="...">` — Next.js, others.
+    4. JS path-shaped string literals inside inline `<script>` blocks —
+       Next.js / Nuxt / Vite ship a build-manifest array embedded in the
+       page bootstrap, listing every chunk URL. Bounded scan to keep
+       regex cost predictable.
+    """
     out: list[str] = []
     seen: set[str] = set()
-    for match in _HTML_SCRIPT_SRC_RE.finditer(html_body):
-        raw = match.group(1).strip()
+
+    def _accept(raw: str) -> None:
         if not raw or raw.startswith(("data:", "javascript:")):
-            continue
+            return
         absolute = urljoin(base, raw)
-        if not absolute.endswith((".js", ".mjs", ".cjs")):
-            # Webpack chunks sometimes have `?v=hash`; strip query to
-            # check the extension.
-            path = urlparse(absolute).path
-            if not path.endswith((".js", ".mjs", ".cjs")):
-                continue
+        path = urlparse(absolute).path
+        if not path.endswith((".js", ".mjs", ".cjs")):
+            return
         if not _in_same_origin(absolute, base):
-            continue
-        if absolute not in seen:
+            return
+        if absolute not in seen and len(out) < _MAX_HTML_SCRIPTS:
             seen.add(absolute)
             out.append(absolute)
+
+    # 1. <script src>
+    for match in _HTML_SCRIPT_SRC_RE.finditer(html_body):
         if len(out) >= _MAX_HTML_SCRIPTS:
             break
+        _accept(match.group(1).strip())
+
+    # 2. + 3. <link rel="modulepreload"> / <link rel="preload" as="script">
+    if len(out) < _MAX_HTML_SCRIPTS:
+        for match in _HTML_LINK_PRELOAD_RE.finditer(html_body):
+            if len(out) >= _MAX_HTML_SCRIPTS:
+                break
+            _accept(match.group(1).strip())
+
+    # 4. JS paths inside inline <script> blocks. Bounded total scan length
+    # so a 5 MB minified runtime doesn't slow this regex pass.
+    if len(out) < _MAX_HTML_SCRIPTS:
+        scanned_bytes = 0
+        scan_cap = 512 * 1024  # 512 KB cumulative across inline blocks
+        for block in _INLINE_SCRIPT_BLOCK_RE.finditer(html_body):
+            body = block.group(1) or ""
+            if scanned_bytes + len(body) > scan_cap:
+                body = body[: max(0, scan_cap - scanned_bytes)]
+            scanned_bytes += len(body)
+            for path_match in _INLINE_JS_PATH_RE.finditer(body):
+                if len(out) >= _MAX_HTML_SCRIPTS:
+                    break
+                _accept(path_match.group(1).strip())
+            if len(out) >= _MAX_HTML_SCRIPTS or scanned_bytes >= scan_cap:
+                break
+
     return out
 
 
