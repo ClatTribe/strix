@@ -221,6 +221,18 @@ Surfaces in the `finding.kill_chain` event with `report_id` linkage so triage UI
           </kill_chain>
         </format>
       </parameter>
+      <parameter name="description_plain" type="string" required="false">
+        <description>Plain-English summary of the finding for non-technical audiences (executives, ops staff, customer-success). 8th-grade reading level. ≤2 sentences. NO jargon — no CWE numbers, no acronyms unless explained, no "improperly neutralized special elements". Just "An attacker can read all data in your customer database by typing special characters into the login form." Distinct from `description` (which stays technical for engineers). The wrapper renders this on the dashboard card; if missing, the wrapper falls back to `description`.</description>
+      </parameter>
+      <parameter name="business_impact_plain" type="string" required="false">
+        <description>Plain-English worst-case impact, in terms a non-engineer leader cares about. ONE sentence. "If exploited, an attacker could read all customer email addresses and password hashes." or "An attacker can charge any user's saved credit card without their consent." Distinct from `impact` (which stays technical). Drives the priority-call on the wrapper's dashboard.</description>
+      </parameter>
+      <parameter name="recommended_action" type="string" required="false">
+        <description>Single imperative sentence — what the recipient should do RIGHT NOW. "Update the login form to use parameterized queries." / "Rotate this API key and replace it in `.env.production`." / "Disable GraphQL introspection on the production endpoint." Distinct from `remediation_steps` (which is the full multi-step fix guide). This is the dashboard card's primary call-to-action.</description>
+      </parameter>
+      <parameter name="fix_time_estimate" type="string" required="false">
+        <description>Coarse fix-time estimate from one of: `5min`, `1hr`, `1day`, `1week+`. Heuristic — choose by where the fix lands: config flag (5min) / single-file code change (1hr) / cross-cutting refactor (1day) / framework migration or vendor coordination (1week+). Drives the wrapper's "fix-now / fix-this-week / plan-a-fix" priority sort and feeds the auto-derived `priority_label`. When omitted, no estimate is recorded.</description>
+      </parameter>
     </parameters>
     <returns type="Dict[str, Any]">
       <description>Response containing:
