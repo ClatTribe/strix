@@ -1,0 +1,55 @@
+<tools>
+  <tool name="nuclei_template_update">
+    <description>Refresh the local Nuclei template database. Pulls the latest CVE detection templates from `projectdiscovery/nuclei-templates` so coverage doesn't degrade between sandbox image rebuilds. Templates ship daily; image-baked snapshots go stale within weeks.
+
+Mechanism: shells out to `nuclei -ut -silent` (modern shortcut) or `nuclei -update-templates -silent` (legacy fallback). The Nuclei CLI handles git-pull / cache-management / template-checksum verification internally; we capture stdout + stderr, parse the version markers, and return a structured summary. Subprocess invoked with `shell=False` and a list-form argv (no shell interpretation).
+
+Process discipline:
+- `nuclei` binary located via `shutil.which` (or `STRIX_NUCLEI_BIN` env override). Returns `success=False` with a clear error when the binary isn't installed.
+- Hard timeout (default 120s).
+- Output captured in memory, capped at 64 KiB (truncated suffix marked).
+
+Throttling:
+- Per-process throttle: refuses to run more than once every 30 minutes against the local Nuclei templates directory (cached state under `~/.strix/nuclei_template_meta.json`). Pass `force=True` to override.
+- Avoids redundant updates within a multi-target scan while keeping the data fresh enough to matter.
+
+Findings: emits a single info-severity finding (CWE-200, info_disclosure) with the update status. Useful for the run report / coverage assertions ("templates were refreshed at scan start; coverage is current as of `<timestamp>`") rather than for triage.
+
+MITRE technique: T1588.006 (Obtain Capabilities: Vulnerabilities) — keeping the local CVE-detection database fresh.
+
+Composes with cluster-A safety: `--exclude-path` doesn't apply (Nuclei talks to GitHub / projectdiscovery, not the customer's domain).</description>
+    <parameters>
+      <parameter name="timeout" type="number" required="false">
+        <description>Hard timeout for the nuclei subprocess in seconds. Default 120 (templates can be ~50MB and upstream may rate-limit slow connections).</description>
+      </parameter>
+      <parameter name="force" type="bool" required="false">
+        <description>When True, bypasses the throttle window and always invokes nuclei. Default False (re-runs within the throttle window are skipped to avoid redundant updates within a multi-target scan).</description>
+      </parameter>
+      <parameter name="throttle_seconds" type="number" required="false">
+        <description>Skip-update window in seconds. Default 1800 (30 minutes). Within this window, re-invocations are no-ops unless `force=True`.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, ran, throttled, updated, binary_path, args_used, version_before, version_after, template_count_after, duration_seconds, stdout, stderr, returncode, findings_emitted, error?}.
+
+The agent should:
+1. Invoke once at scan start (before deeper recon / vulnerability scanning) so the run uses up-to-date templates.
+2. Note the `version_after` field for inclusion in the run summary / coverage assertions.
+3. Treat `success=False` with `error` mentioning "nuclei binary not found" as a sandbox-image issue, not a target issue — the agent should document that CVE-detection coverage is reduced for this run.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<nuclei_template_update>
+</nuclei_template_update>
+
+<nuclei_template_update>
+<parameter=force>true</parameter>
+</nuclei_template_update>
+
+<nuclei_template_update>
+<parameter=timeout>240</parameter>
+</nuclei_template_update>
+]]>
+    </example_usage>
+  </tool>
+</tools>
