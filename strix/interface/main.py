@@ -420,6 +420,89 @@ Examples:
         ),
     )
 
+    auth_group = parser.add_argument_group(
+        "authentication",
+        (
+            "Credentials are forwarded to the sandbox as environment variables "
+            "and injected by the HTTP tool at request time. They are NEVER "
+            "written to events.jsonl, the agent's prompt, or tool outputs. "
+            "The agent receives a system-prompt note that credentials are "
+            "configured, not the values themselves."
+        ),
+    )
+    auth_group.add_argument(
+        "--auth-cookie",
+        type=str,
+        default=None,
+        metavar="VALUE",
+        help=(
+            "Cookie header value injected on every HTTP request to in-scope "
+            "targets (e.g. 'session=abc123; auth=xyz'). Use for cookie-based "
+            "session auth."
+        ),
+    )
+    auth_group.add_argument(
+        "--auth-bearer",
+        type=str,
+        default=None,
+        metavar="TOKEN",
+        help=(
+            "Bearer token injected as 'Authorization: Bearer <token>' on every "
+            "HTTP request to in-scope targets."
+        ),
+    )
+    auth_group.add_argument(
+        "--auth-basic",
+        type=str,
+        default=None,
+        metavar="USER:PASS",
+        help=(
+            "Basic-auth credentials injected as 'Authorization: Basic <b64>' on "
+            "every HTTP request to in-scope targets. Format: 'username:password'."
+        ),
+    )
+    auth_group.add_argument(
+        "--header",
+        action="append",
+        default=[],
+        metavar="NAME:VALUE",
+        help=(
+            "Custom header injected on every HTTP request to in-scope targets. "
+            "Repeatable. Use for API keys ('X-API-Key:abc'), WAF bypass, "
+            "X-Forwarded-For, etc. Sensitive values are forwarded via env (same "
+            "as --auth-* flags) and never logged."
+        ),
+    )
+
+    safety_group = parser.add_argument_group("production safety")
+    safety_group.add_argument(
+        "--exclude-path",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help=(
+            "Path glob the HTTP tool will REFUSE to request, regardless of "
+            "what the agent decides. Repeatable. Use for destructive endpoints: "
+            "'/api/billing/charge', '/admin/delete*', '/users/*/destroy'. "
+            "Hard rule, not a hint — emits a tool.skipped event with reason "
+            "'excluded' on attempted access. Glob syntax: fnmatch (* matches any "
+            "segment, ? matches one char). Path-only matching (query string "
+            "ignored)."
+        ),
+    )
+    safety_group.add_argument(
+        "--rate-limit",
+        type=float,
+        default=None,
+        metavar="QPS",
+        help=(
+            "Hard cap on outbound HTTP requests per second from the sandbox "
+            "(applies across the whole scan, not per-host). Enforced inside the "
+            "HTTP tool layer, not just hinted to the agent. Default: unlimited. "
+            "Recommended for production traffic: 5-10 qps."
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.instruction and args.instruction_file:
@@ -719,6 +802,87 @@ def main() -> None:  # noqa: PLR0912, PLR0915
         )
         args.instruction = (
             f"{dns_only_block}\n\n{args.instruction}" if args.instruction else dns_only_block
+        )
+
+    # Auth + production-safety flags. Values are forwarded to the sandbox
+    # as env vars (see docker_runtime.py) and read by the HTTP tool layer
+    # at request time. They are NEVER written to events.jsonl, the agent
+    # prompt, or tool outputs — only a content-free note is added to the
+    # instruction telling the agent that credentials are configured.
+    auth_configured = []
+    if args.auth_cookie:
+        os.environ["STRIX_AUTH_COOKIE"] = args.auth_cookie
+        auth_configured.append("session cookie (`--auth-cookie`)")
+    if args.auth_bearer:
+        os.environ["STRIX_AUTH_BEARER"] = args.auth_bearer
+        auth_configured.append("bearer token (`--auth-bearer`)")
+    if args.auth_basic:
+        os.environ["STRIX_AUTH_BASIC"] = args.auth_basic
+        auth_configured.append("HTTP basic auth (`--auth-basic`)")
+    if args.header:
+        # Forward as a JSON-encoded list to preserve ordering + colons in
+        # values. The HTTP-tool side parses it back.
+        import json as _json
+
+        os.environ["STRIX_HEADERS"] = _json.dumps(args.header)
+        # The header *names* are not sensitive (auditable); values stay in
+        # the env var. We surface the names in the instruction so the agent
+        # knows which headers it'll see on requests.
+        names = []
+        for h in args.header:
+            if ":" in h:
+                names.append(h.split(":", 1)[0].strip())
+        if names:
+            auth_configured.append(f"custom headers: {', '.join(names)}")
+
+    if args.exclude_path:
+        import json as _json
+
+        os.environ["STRIX_EXCLUDE_PATHS"] = _json.dumps(args.exclude_path)
+
+    if args.rate_limit is not None:
+        if args.rate_limit <= 0:
+            console = Console()
+            console.print("[red]--rate-limit must be a positive number (qps).[/red]")
+            sys.exit(2)
+        os.environ["STRIX_RATE_LIMIT"] = str(args.rate_limit)
+
+    instruction_blocks: list[str] = []
+    if auth_configured:
+        instruction_blocks.append(
+            "## Authentication credentials configured\n\n"
+            "The user has supplied credentials via --auth-* / --header flags. The "
+            "HTTP tool layer injects them automatically on every outbound "
+            "request to in-scope targets — you do NOT need to (and CANNOT) "
+            "construct the credential values yourself. The values are deliberately "
+            "withheld from your context for security.\n\n"
+            "Configured: " + "; ".join(auth_configured) + ".\n\n"
+            "Treat the application as authenticated for the duration of the scan. "
+            "If you see a login form or 401/403 response on a path that should be "
+            "accessible, that is a finding (auth not properly configured for that "
+            "surface), not a reason to ask the user for credentials."
+        )
+    if args.exclude_path:
+        instruction_blocks.append(
+            "## Excluded paths (production safety)\n\n"
+            "The HTTP tool layer will REFUSE to request the following path globs, "
+            "regardless of any reasoning you produce:\n\n"
+            + "\n".join(f"- `{p}`" for p in args.exclude_path)
+            + "\n\nDo not attempt to bypass via path-encoding tricks — the rule "
+            "is enforced after URL normalization. Respect the user's intent: "
+            "these paths are excluded because they are destructive or out-of-scope."
+        )
+    if args.rate_limit is not None:
+        instruction_blocks.append(
+            f"## Rate limit ({args.rate_limit:g} qps)\n\n"
+            f"The HTTP tool layer hard-throttles outbound requests at "
+            f"{args.rate_limit:g} requests/second. Plan your testing around this "
+            f"cap — don't burst-fan-out probes."
+        )
+    if instruction_blocks:
+        block = "\n\n".join(instruction_blocks)
+        args.instruction = (
+            f"{block}\n\n{args.instruction}" if args.instruction else block
         )
 
     is_whitebox = bool(args.local_sources)

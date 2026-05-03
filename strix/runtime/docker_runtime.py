@@ -149,14 +149,25 @@ class DockerRuntime(AbstractRuntime):
                         "TOOL_SERVER_TOKEN": self._tool_server_token,
                         "STRIX_SANDBOX_EXECUTION_TIMEOUT": str(execution_timeout),
                         "HOST_GATEWAY": HOST_GATEWAY_HOSTNAME,
-                        # Forward scan-mode flags set on the host (e.g. by
-                        # `--dns-only`) into the sandbox so tool implementations
-                        # running inside the container see the same intent.
-                        **(
-                            {"STRIX_DNS_ONLY": os.environ["STRIX_DNS_ONLY"]}
-                            if os.environ.get("STRIX_DNS_ONLY") == "1"
-                            else {}
-                        ),
+                        # Forward scan-mode flags + auth + safety env vars
+                        # set on the host into the sandbox so tool
+                        # implementations running inside the container see
+                        # the same intent. Auth values cross this boundary
+                        # exactly once (host env → container env); they are
+                        # never persisted in events.jsonl or the prompt.
+                        **{
+                            k: os.environ[k]
+                            for k in (
+                                "STRIX_DNS_ONLY",
+                                "STRIX_AUTH_COOKIE",
+                                "STRIX_AUTH_BEARER",
+                                "STRIX_AUTH_BASIC",
+                                "STRIX_HEADERS",
+                                "STRIX_EXCLUDE_PATHS",
+                                "STRIX_RATE_LIMIT",
+                            )
+                            if os.environ.get(k)
+                        },
                     },
                     extra_hosts={HOST_GATEWAY_HOSTNAME: "host-gateway"},
                     tty=True,
