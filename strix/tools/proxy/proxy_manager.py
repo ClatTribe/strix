@@ -268,35 +268,53 @@ class ProxyManager:
         # Roadmap §3: rate-limit before the network call.
         throttle_for_rate_limit()
 
-        try:
-            start_time = time.time()
-            response = requests.request(
-                method=method,
-                url=url,
-                headers=headers,
-                data=body or None,
-                proxies=self.proxies,
-                timeout=timeout,
-                verify=False,
-            )
-            response_time = int((time.time() - start_time) * 1000)
+        # Try via the sandbox Caido proxy first; if the proxy is unreachable
+        # (host-side test runs / sandbox without the proxy bring-up), fall
+        # back to a direct request. Either path applies the same auth /
+        # exclude / rate-limit middleware (the steps above), so the safety
+        # contract is unchanged.
+        for use_proxy in (True, False):
+            try:
+                start_time = time.time()
+                response = requests.request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    data=body or None,
+                    proxies=self.proxies if use_proxy else None,
+                    timeout=timeout,
+                    verify=False,
+                )
+                response_time = int((time.time() - start_time) * 1000)
 
-            body_content = response.text
-            if len(body_content) > 10000:
-                body_content = body_content[:10000] + "\n... [truncated]"
+                body_content = response.text
+                if len(body_content) > 10000:
+                    body_content = body_content[:10000] + "\n... [truncated]"
 
-            return {
-                "status_code": response.status_code,
-                "headers": dict(response.headers),
-                "body": body_content,
-                "response_time_ms": response_time,
-                "url": response.url,
-                "message": (
-                    "Request sent through proxy - check list_requests() for captured traffic"
-                ),
-            }
-        except (RequestException, ProxyError, Timeout) as e:
-            return {"error": f"Request failed: {type(e).__name__}", "details": str(e), "url": url}
+                return {
+                    "status_code": response.status_code,
+                    "headers": dict(response.headers),
+                    "body": body_content,
+                    "response_time_ms": response_time,
+                    "url": response.url,
+                    "proxy_used": use_proxy,
+                    "message": (
+                        "Request sent through proxy - check list_requests() for captured traffic"
+                        if use_proxy
+                        else "Request sent direct (proxy unreachable)"
+                    ),
+                }
+            except (RequestException, ProxyError, Timeout) as e:
+                if use_proxy:
+                    # Retry without proxy on the next loop iteration.
+                    continue
+                return {
+                    "error": f"Request failed: {type(e).__name__}",
+                    "details": str(e),
+                    "url": url,
+                }
+        # Unreachable; the for-loop returns above.
+        return {"error": "Request failed: unknown", "url": url}
 
     def repeat_request(
         self, request_id: str, modifications: dict[str, Any] | None = None
