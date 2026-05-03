@@ -1,0 +1,63 @@
+<tools>
+  <tool name="hibp_breach_check">
+    <description>Look up historical breaches affecting users at a domain via Have I Been Pwned. Adds context to authentication findings — "users at this domain were exposed in breach X 6 months ago" — and pairs naturally with `org_fingerprint` (#16). Public HIBP endpoint, **no API key required**.
+
+API: `GET https://haveibeenpwned.com/api/v3/breaches?domain=<d>` returns the breach metadata for breaches that included email addresses at that domain. Returns metadata only, never individual breached email addresses (the richer per-email API requires a paid key + verified domain ownership and is out of scope for this tool).
+
+Methodology:
+1. Validate the domain (apex-domain format, no IPs, no URLs).
+2. GET `breaches?domain=<d>` with a descriptive `User-Agent` header (HIBP returns 403 without one).
+3. Filter the breach list — drop entries with `IsFabricated=True` (mislabelled), `IsSpamList=True` (not a security breach), `IsRetired=True` (HIBP removed them).
+4. Score each breach:
+   - +1 if `DataClasses` includes "Passwords" or "Password hashes"
+   - +1 if `BreachDate` is within the last 12 months (recent enough to materially affect credential-stuffing risk)
+   - +1 if `PwnCount` ≥ 1,000,000 (mass breach — published widely, targeted by attackers)
+   - +1 if `IsSensitive=True` (HIBP's flag for adult/medical/etc. content where exposure adds real-world harm)
+   - score ≥ 3 → high; score 2 → medium; score 0-1 → low.
+5. **Per-severity dedup**: at most one finding per (domain × severity-tier). Each finding lists the top 5 breaches in that tier ordered by recency × pwn_count.
+
+Severity tuning:
+- **High** (CWE-200, breach_exposure) — breach_score ≥ 3 (recent + passwords + mass + sensitive sum to 3 or more).
+- **Medium** (CWE-200) — breach_score 2 (e.g. recent + passwords, or recent + mass without passwords).
+- **Low** (CWE-200) — any other genuine breach (after filtering fabricated / spam / retired).
+
+Each finding carries `description_plain` + `recommended_action` tailored to severity:
+- HIGH → "treat user accounts at this domain as credential-stuffing targets; force password rotation; enforce MFA; block known-compromised passwords at sign-in via HIBP's pwned-passwords API".
+- MEDIUM → "review affected users; advise password rotation for sensitive accounts; accelerate MFA rollout".
+- LOW → "older breaches still feed long-tail credential-stuffing attempts; maintain MFA on critical accounts".
+
+`verification_status=verified` since HIBP is the authoritative public source.
+
+Cache: per-domain JSON cache under `~/.strix/hibp_cache/`, 24-hour TTL. Stale cache served on network failure (fail-open with `error` populated). Disable with `STRIX_HIBP_NO_CACHE=1`.
+
+Composes with cluster-A safety: rate-limit applies to the HIBP request. `--exclude-path` doesn't apply (URL is haveibeenpwned.com, not the customer's domain).</description>
+    <parameters>
+      <parameter name="domain" type="string" required="true">
+        <description>Apex domain to query (e.g. `example.com`, `contoso.com`). URL-shaped input is auto-stripped to its hostname. Subdomains accepted but HIBP indexes by apex; passing a subdomain typically returns the same data as the apex.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-request timeout in seconds. Default 15.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, domain, queried_at, from_cache, breach_count, breaches: [{name, title, domain, breach_date, pwn_count, data_classes, has_passwords, is_recent, is_mass, is_sensitive, is_verified, score, severity}, ...], findings_emitted, error?}.
+
+The agent should:
+1. Surface high-severity findings prominently — they're actionable for credential-stuffing risk.
+2. Cross-reference breach data with auth findings — if the target has auth bugs AND breach exposure, the credential-stuffing risk multiplies.
+3. The `breaches` array is sorted by (severity, recency, pwn_count) so the most-exploitable is first.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<hibp_breach_check>
+<parameter=domain>example.com</parameter>
+</hibp_breach_check>
+
+<hibp_breach_check>
+<parameter=domain>contoso.com</parameter>
+<parameter=timeout>30</parameter>
+</hibp_breach_check>
+]]>
+    </example_usage>
+  </tool>
+</tools>
