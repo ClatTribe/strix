@@ -1,0 +1,83 @@
+<tools>
+  <tool name="file_upload_abuse_check">
+    <description>Probe a known multipart upload endpoint for the standard upload-bypass cohort. Iterates extension-switch / magic-byte-spoofing / content-type-spoofing / double-extension / null-byte / case-variant / SVG-XSS / HTML-XSS / path-traversal payloads and reports per-payload acceptance.
+
+Invoked when the agent has already discovered an upload endpoint via crawl + form analysis. The caller provides the URL, the file form-field name, and any extra form fields (CSRF token, etc.) the endpoint requires.
+
+Methodology (one HTTP request per probe, all bounded by `timeout`):
+
+1. **Control upload** — `strix-<nonce>-control.jpg` (PNG magic bytes + minimal valid PNG body). Establishes baseline (status, body length, body hash).
+2. **Bypass cohort** — 15 deterministic payload mutations (see table). Every payload carries `strix-<nonce>-` filename prefix so probe artifacts are auditable in target storage.
+3. **Per-bypass verdict** — same status class as control AND body-length within ±25% = "accepted". For accepted bypasses, attempt fetch-back: extract any URL/path containing the nonce from the response, GET it, and check whether the body contains the probe marker AND the served Content-Type.
+
+Bypass cohort:
+
+| Class | Variants |
+|---|---|
+| extension switch | `<n>.php`, `.phtml`, `.jsp`, `.aspx` |
+| magic-byte spoofing | PNG magic + PHP body, filename `<n>.php` |
+| content mismatch | `<n>.jpg` with PHP body |
+| double extension | `<n>.php.jpg`, `<n>.jpg.php` |
+| byte truncation | `<n>.php\x00.jpg` |
+| case variant | `<n>.PhP` |
+| filename normalization | `<n>.php.`, `<n>.php ` (trailing space) |
+| SVG / HTML XSS | `<n>.svg` with `<script>`, `<n>.html` with `<script>` |
+| filename injection | `../../../<n>.txt` |
+
+Severity tuning:
+
+- **High** (CWE-434, unrestricted_upload) — server-executable extension accepted (`.php`/`.phtml`/`.jsp`/`.aspx`); OR fetch-back-confirmed dangerous Content-Type (`application/x-php`, `text/html` for SVG, etc.) without `Content-Disposition: attachment`; OR magic-byte-spoofed PHP accepted under `.php` filename.
+- **Medium** (CWE-434) — content-mismatch / double-extension / null-byte / case-variant / SVG/HTML XSS accepted without fetch-back confirmation.
+- **Low** (CWE-434) — path-traversal filename accepted (weak filename validation; not directly exploitable).
+
+Per-class dedup: at most one finding per (severity × class) so a 4-variant extension-switch cohort generates one report, not four. Per-probe verdicts still live in the result dict for the agent.
+
+Skip / soft-fail:
+- Control upload returns non-2xx/3xx → endpoint requires fields not supplied → tool exits with `inconclusive` and no probe traffic.
+- Cluster-A `--exclude-path` blocks the upload URL → graceful no-op.
+
+Safety:
+- Every probe artifact has a unique `strix-<nonce>-` filename prefix (auditable + cleanable in target storage).
+- Payload bodies start with a clear test-artifact marker (`/* strix file-upload-abuse-check probe artifact - safe to delete */`).
+- Hard-capped at 4 KiB per probe — no DoS / decompression-bomb risk.
+- Read-only verification fetch-back (GET only, no follow-redirects, no execution).
+- Composes with cluster-A safety (auth-injection / exclude-path / rate-limit).
+
+Each finding carries `description_plain` + `recommended_action` (validate file contents server-side via libmagic / file-type sniffing not filename or Content-Type; maintain extension allow-list; serve uploads from a separate sandboxed origin without script execution; force `Content-Disposition: attachment`; rename files server-side with a controlled extension). `verification_status=needs_review` since the heuristic relies on response-shape similarity to control + best-effort fetch-back; the agent should manually trigger any uploaded payload to confirm exploitability before treating any finding as confirmed RCE / XSS.</description>
+    <parameters>
+      <parameter name="upload_url" type="string" required="true">
+        <description>The POST endpoint that accepts multipart/form-data uploads. Typically discovered via the BFS crawl + form analysis. Bare hostnames are auto-prefixed with `https://`. Examples: `https://app.example.com/api/upload`, `https://app.example.com/profile/avatar`, `https://app.example.com/documents/new`.</description>
+      </parameter>
+      <parameter name="field_name" type="string" required="false">
+        <description>The form field name for the uploaded file. Default `file`. Common alternatives: `attachment`, `image`, `upload`, `avatar`, `document`, `photo`. The crawl + form analysis usually surfaces this from the `<input type="file" name="...">` HTML attribute.</description>
+      </parameter>
+      <parameter name="extra_fields" type="dict" required="false">
+        <description>Additional form fields the endpoint requires for a successful upload (CSRF token, document-type selector, target folder, etc.). Pass these verbatim — round-tripped on every probe. Example: `{"csrf_token": "abc123", "doc_type": "image"}`.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-probe timeout in seconds. Default 30 (accounts for slow upload-processing back-ends).</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, upload_url, target_host, nonce, control: {status, status_class, body_length, accepted, error?, skipped?}, probes: [{label, class_, severity_if_accepted, filename, status, accepted, fetch_back: {url, status?, content_type?, disposition?, body_match?, skipped?}, finding_severity, evidence}, ...], findings_emitted}.
+
+The agent should:
+1. Confirm any `accepted=True` probe by fetching the artifact URL outside Strix (via Burp / browser) and checking server execution / rendering.
+2. Clean up probe artifacts in target storage by searching for the `strix-<nonce>-` filename prefix returned in `nonce`.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<file_upload_abuse_check>
+<parameter=upload_url>https://app.example.com/profile/avatar</parameter>
+</file_upload_abuse_check>
+
+<file_upload_abuse_check>
+<parameter=upload_url>https://app.example.com/api/documents/upload</parameter>
+<parameter=field_name>document</parameter>
+<parameter=extra_fields>{"csrf_token": "abc123def456", "doc_type": "image"}</parameter>
+<parameter=timeout>60</parameter>
+</file_upload_abuse_check>
+]]>
+    </example_usage>
+  </tool>
+</tools>
