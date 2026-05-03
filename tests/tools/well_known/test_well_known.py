@@ -346,3 +346,64 @@ def test_one_check_event_emitted(monkeypatch) -> None:
     summary = tracer_module.get_global_tracer().get_check_summary()
     assert summary["total"] == 1
     assert "well_known_harvest" in summary["by_category"]
+
+
+# ---------------------------------------------------------------------------
+# Wrapper UX baseline — every finding must have description_plain +
+# recommended_action populated, even when the parser couldn't extract
+# structured metadata.
+# ---------------------------------------------------------------------------
+
+
+def test_every_finding_has_plain_and_action(monkeypatch) -> None:
+    """When all 13 paths return SPA catch-all HTML (no structured data
+    extractable), every emitted finding should still carry a baseline
+    description_plain + recommended_action populated from the per-path
+    table."""
+    catch_all_response = {
+        "status": 200,
+        "headers": {"content-type": "text/html"},
+        "body": "<!DOCTYPE html><html><body>SPA catch-all</body></html>",
+    }
+    _patch_http(
+        monkeypatch,
+        {f"https://example.com{p}": catch_all_response for p, _, _, _ in wk._WELL_KNOWN_PATHS},
+    )
+    wk.well_known_harvest("https://example.com")
+    reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
+    assert len(reports) == len(wk._WELL_KNOWN_PATHS)
+    for r in reports:
+        assert r.get("description_plain"), f"missing description_plain on: {r['title']}"
+        assert r.get("recommended_action"), f"missing recommended_action on: {r['title']}"
+
+
+def test_parser_derived_plain_overrides_baseline(monkeypatch) -> None:
+    """When the parser successfully extracts structure (e.g. security.txt
+    with a `Contact:` field), the parser-derived `description_plain`
+    takes precedence over the baseline."""
+    _patch_http(
+        monkeypatch,
+        {
+            "https://example.com/.well-known/security.txt": {
+                "status": 200,
+                "headers": {"content-type": "text/plain"},
+                "body": "Contact: mailto:rich-summary@example.com\n",
+            },
+        },
+    )
+    wk.well_known_harvest("https://example.com")
+    reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
+    sec = next(r for r in reports if "security.txt" in r["title"])
+    # Parser-derived summary mentions the contact value verbatim.
+    assert "rich-summary@example.com" in sec["description_plain"]
+    # And the baseline `recommended_action` is still populated.
+    assert sec.get("recommended_action")
+
+
+def test_baseline_table_covers_every_path() -> None:
+    """Sanity: every path in _WELL_KNOWN_PATHS has a baseline entry. If
+    new paths are added without baseline texts, this test fails."""
+    paths_in_probe = {p for p, _, _, _ in wk._WELL_KNOWN_PATHS}
+    paths_in_baseline = set(wk._WELL_KNOWN_BASELINE_TEXTS.keys())
+    missing = paths_in_probe - paths_in_baseline
+    assert not missing, f"missing baseline texts for paths: {missing}"

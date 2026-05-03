@@ -476,3 +476,161 @@ def test_check_event_emitted(monkeypatch) -> None:
     summary = tracer_module.get_global_tracer().get_check_summary()
     assert summary["total"] == 1
     assert "source_map_probe" in summary["by_category"]
+
+
+# ---------------------------------------------------------------------------
+# Modern-SPA harvest extensions: <link rel="modulepreload"> + <link
+# rel="preload" as="script"> + inline <script> path mining.
+# ---------------------------------------------------------------------------
+
+
+def test_harvest_modulepreload_links(monkeypatch) -> None:
+    """Vite-style `<link rel="modulepreload" href="/assets/index-abc.js">`."""
+    html = (
+        "<html><head>"
+        "<link rel='modulepreload' href='/assets/index-abc123.js'>"
+        "<link rel='modulepreload' href='/assets/vendor-def456.js'>"
+        "</head></html>"
+    )
+    log = _patch_get(
+        monkeypatch,
+        {
+            "https://app.example.com": {
+                "status": 200, "headers": {"content-type": "text/html"}, "body": html,
+            },
+            "https://app.example.com/assets/index-abc123.js.map": {
+                "status": 200, "headers": {}, "body": _VALID_MAP,
+            },
+        },
+    )
+    out = sm.source_map_probe("https://app.example.com")
+    # Both modulepreload URLs should result in `.map` probes.
+    assert "https://app.example.com/assets/index-abc123.js.map" in log
+    assert "https://app.example.com/assets/vendor-def456.js.map" in log
+
+
+def test_harvest_preload_as_script_links(monkeypatch) -> None:
+    """Next.js-style `<link rel="preload" as="script" href="...">`."""
+    html = (
+        "<html><head>"
+        "<link rel='preload' as='script' href='/_next/static/chunks/main-abc.js'>"
+        "<link rel='preload' as='script' href='/_next/static/chunks/framework-def.js'>"
+        "<link rel='preload' as='style' href='/_next/static/css/main.css'>"
+        "</head></html>"
+    )
+    log = _patch_get(
+        monkeypatch,
+        {
+            "https://app.example.com": {
+                "status": 200, "headers": {"content-type": "text/html"}, "body": html,
+            },
+        },
+    )
+    sm.source_map_probe("https://app.example.com")
+    assert "https://app.example.com/_next/static/chunks/main-abc.js.map" in log
+    assert "https://app.example.com/_next/static/chunks/framework-def.js.map" in log
+    # `as="style"` ignored — only scripts get .map probed.
+    assert not any("/main.css.map" in u for u in log)
+
+
+def test_harvest_inline_script_chunks(monkeypatch) -> None:
+    """Next.js / Nuxt embed a build-manifest array inside an inline
+    <script> bootstrap. We mine path-shaped string literals from those
+    blocks so chunk URLs the framework loads dynamically still get probed."""
+    html = (
+        "<html><head>"
+        "<script>"
+        "self.__BUILD_MANIFEST = function(s,c,e,t){"
+        'return {"sortedPages":["/","/about"],'
+        '"/":["/_next/static/chunks/pages/index-abc123.js"],'
+        '"/about":["/_next/static/chunks/pages/about-def456.js"]'
+        "}};"
+        "</script>"
+        "</head></html>"
+    )
+    log = _patch_get(
+        monkeypatch,
+        {
+            "https://app.example.com": {
+                "status": 200, "headers": {"content-type": "text/html"}, "body": html,
+            },
+        },
+    )
+    sm.source_map_probe("https://app.example.com")
+    assert any("pages/index-abc123.js.map" in u for u in log)
+    assert any("pages/about-def456.js.map" in u for u in log)
+
+
+def test_modern_spa_combined_harvest(monkeypatch) -> None:
+    """End-to-end: a modern SPA that uses all 3 paths simultaneously
+    should surface every script."""
+    html = (
+        "<html><head>"
+        "<script src='/static/main.js'></script>"
+        "<link rel='modulepreload' href='/assets/vue-runtime.js'>"
+        "<link rel='preload' as='script' href='/_next/static/chunks/framework.js'>"
+        "<script>"
+        'window.__manifest__ = ["/static/inline-chunk.js"];'
+        "</script>"
+        "</head></html>"
+    )
+    log = _patch_get(
+        monkeypatch,
+        {
+            "https://app.example.com": {
+                "status": 200, "headers": {"content-type": "text/html"}, "body": html,
+            },
+        },
+    )
+    out = sm.source_map_probe("https://app.example.com")
+    # All four script URLs should produce .map probes.
+    assert any("static/main.js.map" in u for u in log)
+    assert any("vue-runtime.js.map" in u for u in log)
+    assert any("framework.js.map" in u for u in log)
+    assert any("inline-chunk.js.map" in u for u in log)
+    # scripts_from_html stat reflects all four.
+    assert out["stats"]["scripts_from_html"] >= 4
+
+
+def test_inline_block_off_origin_dropped(monkeypatch) -> None:
+    """Inline scripts with cross-origin URLs (e.g. CDN-hosted libs) are
+    NOT probed for .map — same-origin only."""
+    html = (
+        "<html><head><script>"
+        'window.__cdn__ = "https://cdn.example.org/lib.js";'
+        "</script></head></html>"
+    )
+    log = _patch_get(
+        monkeypatch,
+        {
+            "https://app.example.com": {
+                "status": 200, "headers": {"content-type": "text/html"}, "body": html,
+            },
+        },
+    )
+    sm.source_map_probe("https://app.example.com")
+    assert not any("cdn.example.org" in u for u in log)
+
+
+def test_framework_specific_bundle_candidates(monkeypatch) -> None:
+    """The expanded candidate list should probe Angular / Next / Vite / Nuxt
+    framework-specific paths even when the HTML has no script tags."""
+    log = _patch_get(
+        monkeypatch,
+        {
+            "https://app.example.com": {
+                "status": 200, "headers": {"content-type": "text/html"}, "body": "<html></html>",
+            },
+        },
+    )
+    sm.source_map_probe("https://app.example.com")
+    # Spot-check one path from each ecosystem.
+    expected = [
+        "/_next/static/chunks/main.js.map",  # Next.js
+        "/_nuxt/main.js.map",                # Nuxt
+        "/assets/index-legacy.js.map",       # Vite (legacy build)
+        "/polyfills.js.map",                 # Angular
+        "/static/js/runtime-main.js.map",    # CRA
+    ]
+    for path in expected:
+        assert any(u.endswith(path) for u in log), f"missing framework path: {path}"

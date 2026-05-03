@@ -60,6 +60,101 @@ _WELL_KNOWN_PATHS: tuple[tuple[str, str, str, str], ...] = (
     ("/security.txt", "security.txt (legacy root)", "text", "security_txt"),
 )
 
+
+# Baseline `description_plain` + `recommended_action` per path. The
+# wrapper renders these on the dashboard card; without baselines, 11 of
+# 13 well-known findings would ship with blank fields. Per-path text
+# explains what was found in lay terms + tells the reader whether to
+# act. The parser-derived plain summary (in the main code) takes
+# precedence when it can be populated; this map is the fallback.
+_WELL_KNOWN_BASELINE_TEXTS: dict[str, tuple[str, str]] = {
+    # path → (description_plain, recommended_action)
+    "/.well-known/security.txt": (
+        "This site publishes a security-disclosure policy. That's good — it "
+        "tells security researchers exactly where to send vulnerability reports.",
+        "If this is intentional, no action needed. If you didn't expect to see "
+        "a security.txt file, review what it contains and remove it if it's "
+        "leaking internal contacts.",
+    ),
+    "/.well-known/openid-configuration": (
+        "This site uses OpenID Connect / OAuth 2.0 for sign-in. The "
+        "configuration file lists every endpoint your authentication system "
+        "uses (login, token exchange, user-info, etc.).",
+        "If you do use OpenID Connect / OAuth, no action needed — this file "
+        "is meant to be public. If you don't, investigate why this URL "
+        "responds at all and remove it.",
+    ),
+    "/.well-known/oauth-authorization-server": (
+        "This site publishes OAuth 2.0 authorization-server metadata "
+        "(RFC 8414). Lists token endpoints and supported flows.",
+        "If you intentionally run an OAuth authorization server, no action "
+        "needed. Otherwise, remove this file from your deployment.",
+    ),
+    "/.well-known/change-password": (
+        "This site supports the password-manager standard for redirecting "
+        "users to its change-password page. Browsers / 1Password / etc. "
+        "will use this automatically — good user experience.",
+        "If this is intentional, no action needed. Otherwise check whether "
+        "the redirect target is correct and ideally HTTPS.",
+    ),
+    "/.well-known/host-meta": (
+        "Host-Meta XRD file (RFC 6415) — used by older WebFinger / OAuth "
+        "discovery flows.",
+        "If your service implements WebFinger or social-network federation, "
+        "no action needed. If not, remove this file.",
+    ),
+    "/.well-known/host-meta.json": (
+        "Host-Meta JSON variant (RFC 6415) — same purpose as host-meta but "
+        "machine-readable JSON.",
+        "If your service implements WebFinger or social-network federation, "
+        "no action needed. If not, remove this file.",
+    ),
+    "/.well-known/assetlinks.json": (
+        "This site is paired to an Android app (Digital Asset Links). The "
+        "file lists which Android apps are allowed to handle this site's URLs.",
+        "If you ship an Android app, no action needed. Otherwise remove this "
+        "file — it's unexpectedly hinting at an integration that doesn't exist.",
+    ),
+    "/.well-known/apple-app-site-association": (
+        "This site is paired to an iOS app via Apple's universal-link / "
+        "app-binding system. The file lists which iOS apps handle this "
+        "site's URLs and which paths.",
+        "If you ship an iOS app, no action needed. Otherwise remove this file.",
+    ),
+    "/.well-known/gpc.json": (
+        "This site declares a Global Privacy Control policy — a standard "
+        "way to honor user 'do not sell my data' signals.",
+        "If you intentionally publish a GPC policy, no action needed. If not, "
+        "remove the file.",
+    ),
+    "/.well-known/dnt-policy.txt": (
+        "This site publishes a Do Not Track policy.",
+        "Mostly informational. DNT itself has been deprecated; consider "
+        "moving to Global Privacy Control (gpc.json) instead.",
+    ),
+    "/.well-known/pki-validation/": (
+        "This is the path Let's Encrypt and other ACME certificate authorities "
+        "use to verify domain control during certificate issuance.",
+        "If you use ACME / Let's Encrypt for TLS certs, no action needed — "
+        "this directory should be writable by your ACME client. Make sure "
+        "individual files inside aren't world-readable for longer than the "
+        "validation window.",
+    ),
+    "/humans.txt": (
+        "This site has a humans.txt file — a friendly credits file for the "
+        "team that built the site.",
+        "Mostly harmless. Review the contents to make sure no internal "
+        "email addresses, employee names, or vendor relationships leak.",
+    ),
+    "/security.txt": (
+        "This site publishes a security-disclosure policy at the legacy "
+        "root path (`/security.txt`). The modern standard is "
+        "`/.well-known/security.txt`.",
+        "Move the file to `/.well-known/security.txt` (RFC 9116). Keep the "
+        "root-path version as a redirect for older scanners.",
+    ),
+}
+
 # security.txt key:value lines — case-insensitive on the key.
 _SECURITY_TXT_LINE_RE = re.compile(r"^\s*([A-Za-z][A-Za-z\-]*?)\s*:\s*(.+?)\s*$", re.MULTILINE)
 
@@ -186,6 +281,7 @@ def _emit_finding(
     impact: str,
     remediation: str,
     description_plain: str | None = None,
+    recommended_action: str | None = None,
 ) -> None:
     try:
         from strix.telemetry.tracer import get_global_tracer
@@ -205,6 +301,7 @@ def _emit_finding(
         impact=impact,
         remediation_steps=remediation,
         description_plain=description_plain,
+        recommended_action=recommended_action,
         verification_status="verified",
     )
 
@@ -347,6 +444,20 @@ def well_known_harvest(
         if excerpt:
             description_lines.append(f"Body excerpt: {excerpt[:300]}")
 
+        # Wrapper-UX baseline: every finding gets both plain text + action.
+        # The parser-derived plain summary takes precedence when populated;
+        # otherwise fall back to the per-path baseline. Recommended action
+        # always comes from the baseline table.
+        baseline = _WELL_KNOWN_BASELINE_TEXTS.get(path, ("", ""))
+        baseline_plain, baseline_action = baseline
+        final_plain = plain_summary or baseline_plain or None
+        final_action = baseline_action or (
+            "If the endpoint is intentionally published (security.txt, "
+            "openid-configuration, etc.), no action needed. If it leaked "
+            "by accident (debug toolbar, framework default, dev artifact), "
+            "remove or restrict it via WAF / config flag in production."
+        )
+
         _emit_finding(
             title=f"{label} discovered at {url}",
             severity="info",
@@ -365,13 +476,9 @@ def well_known_harvest(
                 "OAuth surface; `apple-app-site-association` reveals iOS "
                 "app pairings."
             ),
-            remediation=(
-                "If the endpoint is intentionally published (security.txt, "
-                "openid-configuration, etc.), no action needed. If it leaked "
-                "by accident (debug toolbar, framework default, dev artifact), "
-                "remove or restrict it via WAF / config flag in production."
-            ),
-            description_plain=plain_summary,
+            remediation=final_action,
+            description_plain=final_plain,
+            recommended_action=final_action,
         )
 
     _complete_check(
