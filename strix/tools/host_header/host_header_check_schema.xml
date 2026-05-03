@@ -1,0 +1,63 @@
+<tools>
+  <tool name="host_header_check">
+    <description>Probe a URL for host-header injection / cache-key trust issues. Detects whether the target trusts attacker-controlled values in `Host:` / `X-Forwarded-Host:` / `X-Forwarded-Server:` / `X-Host:` / `Forwarded:` / `X-Forwarded-For:` and reflects them into responses — the primitive behind password-reset link poisoning, cache poisoning, and cookie-scope leaks.
+
+Probes (each is one HTTP request, all bounded by `timeout`):
+
+| Probe | Mutation |
+|---|---|
+| `host_replace`   | `Host: <attacker>` |
+| `host_suffix`    | `Host: <target>.<attacker>` (suffix-anchored allowlist bypass) |
+| `xfh`            | `X-Forwarded-Host: <attacker>` |
+| `xfs`            | `X-Forwarded-Server: <attacker>` |
+| `x_host`         | `X-Host: <attacker>` |
+| `forwarded`      | `Forwarded: host=<attacker>` (RFC 7239) |
+| `xforig`         | `X-Forwarded-For: <attacker>` |
+| `dual_xfh`       | `Host:` + `X-Forwarded-Host:` together |
+
+Detection looks for the attacker host in:
+- `Location` / `Content-Location` / `Refresh` / `Link` headers → **high** (CWE-20, host_header_injection) — direct redirect-to-attacker primitive
+- `Set-Cookie` `Domain=` attribute → **high** (CWE-20) — cookie scope leak
+- response body → **medium** (CWE-20) — info_disclosure / link-building gadget
+- cached response with body-length variance under header mutation, no explicit reflection → **low** (CWE-444, cache_poisoning) — cache-key obliviousness candidate
+
+Each finding includes `description_plain` + `recommended_action` (the §11 non-tech UX fields) so the wrapper renders dashboard cards with concrete fix instructions (allow-list trusted host headers at the reverse-proxy edge; never derive cookie `Domain=` from `Host:` / `X-Forwarded-Host:`; configure a fixed base URL for password-reset / signup / OAuth callback URL builders).
+
+Read-only (GET only, no follow-redirects so reflected `Location` is observable). Probe payloads include a unique random subdomain per run so findings are auditable in the target's logs and don't collide with any pre-existing `attacker.example.com` references.
+
+Composes with cluster-A safety: `--exclude-path` / `--rate-limit` / `--auth-*` apply to every probe automatically.</description>
+    <parameters>
+      <parameter name="target" type="string" required="true">
+        <description>URL to probe. Bare hostnames are auto-prefixed with `https://`. Path component preserved (probes hit the same path as the baseline). Examples: `example.com`, `https://app.example.com/login`, `https://api.example.com:8443/`.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-request timeout in seconds. Default 12.</description>
+      </parameter>
+      <parameter name="attacker_host" type="string" required="false">
+        <description>Override the base attacker host used in probes (default `attacker.example.com`). A unique random subdomain is auto-prepended to make every run's probes uniquely identifiable in the target's logs.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target_url, target_host, attacker_host, baseline: {status, body_length, has_location, looks_cached}, probes: [{label, mutation_note, status, reflection: {body, location_header, cookie_domain_header, other_header}, cache_poison_signal, finding_severity, finding_kind, evidence}, ...], findings_emitted}.
+
+The agent should follow up high-severity `location_reflection` findings by manually triggering a flow that builds a link from the host header (password-reset, signup, OAuth callback) and confirming the link points at the attacker.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<host_header_check>
+<parameter=target>https://app.example.com/login</parameter>
+</host_header_check>
+
+<host_header_check>
+<parameter=target>example.com</parameter>
+<parameter=timeout>20</parameter>
+</host_header_check>
+
+<host_header_check>
+<parameter=target>https://api.example.com/v1/auth/reset</parameter>
+<parameter=attacker_host>burpcollab.example</parameter>
+</host_header_check>
+]]>
+    </example_usage>
+  </tool>
+</tools>
