@@ -1,0 +1,67 @@
+<tools>
+  <tool name="method_tamper_check">
+    <description>Probe a URL for HTTP verb / method tampering vulnerabilities. Bundles 4 deterministic checks plus an opt-in destructive cohort:
+
+**Default (read-only) cohort** — always runs:
+- `OPTIONS` — discovers Allow-header advertisement; flags WebDAV verbs (PROPFIND/MOVE/COPY/MKCOL/LOCK/UNLOCK) → medium CWE-200 webdav_exposure; flags advertised modifying methods (PUT/PATCH/DELETE) → low CWE-200 method_disclosure.
+- `TRACE` with custom request header → if response is 2xx and body reflects the custom header, XST primitive confirmed → medium CWE-200 xst.
+- `HEAD` — compared to GET. If GET returns 2xx but HEAD returns 405/501 → low CWE-200 method_disclosure (cache asymmetry).
+- `PROPFIND` — if response is 207 Multi-Status (or 200 with XML Content-Type), WebDAV is wired up to this URL → medium CWE-200 webdav_exposure (deduped against the OPTIONS-advertised case).
+
+**Destructive cohort** — only runs when `include_destructive=True`:
+- `X-HTTP-Method-Override: PUT/PATCH/DELETE` (POST with the override header) — if 2xx/3xx, framework respects override → high CWE-285 improper_authorization.
+- `_method=PUT/DELETE` form parameter (POST with `application/x-www-form-urlencoded`) — if 2xx/3xx, framework respects form-based override → high.
+- Direct `PUT`/`PATCH`/`DELETE` to the URL — if 2xx/3xx, route handler accepts state-changing methods → high.
+
+Per-class dedup on destructive findings: 3 override variants → ONE finding; 3 direct-verb variants → ONE finding; 2 form-method variants → ONE finding.
+
+Severity tuning:
+- **High** (CWE-285, improper_authorization) — destructive verb (direct or via override) returns 2xx/3xx on documented-GET endpoint.
+- **Medium** (CWE-200) — TRACE-with-reflection (XST), WebDAV-advertised, PROPFIND-succeeds.
+- **Low** (CWE-200) — OPTIONS reveals modifying methods; HEAD returns 405/501 vs GET 200.
+
+Skip cases:
+- Baseline GET non-2xx/3xx → endpoint can't be measured → graceful inconclusive.
+- Cluster-A `--exclude-path` blocks the URL → graceful no-op.
+
+**Safety**:
+- Read-only by default. `include_destructive=True` requires explicit operator consent — direct PUT/PATCH/DELETE and method-override probes can mutate state on a vulnerable target.
+- Cluster-A `--exclude-path` is the primary safety lever for blocking probes against specific endpoints.
+- All probes carry `description_plain` + `recommended_action` (implement explicit method allow-list at the route handler; strip `X-HTTP-Method-Override` and similar headers at the edge; disable TRACE; deploy WebDAV on a separate origin if needed) and `verification_status=needs_review` since 2xx-on-DELETE doesn't necessarily mean the resource was actually deleted (the framework may return 200 for an unhandled method).
+
+Composes with cluster-A safety: `--exclude-path` / `--rate-limit` / `--auth-*` apply to every probe.</description>
+    <parameters>
+      <parameter name="target_url" type="string" required="true">
+        <description>URL to probe. Bare hostnames are auto-prefixed with `https://`. Examples: `https://app.example.com/api/users/123`, `https://api.example.com/v1/profile`, `https://app.example.com/admin/`.</description>
+      </parameter>
+      <parameter name="include_destructive" type="bool" required="false">
+        <description>Whether to run the destructive cohort (X-HTTP-Method-Override / _method form / direct PUT/PATCH/DELETE). Default `False` (read-only cohort only). Set `True` only on staging targets where the operator has explicitly consented to state-changing probes.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-probe timeout in seconds. Default 10.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target_url, target_host, include_destructive, baseline: {status, status_class, body_length, error?, skipped?}, options_advertised: [method, ...], probes: [{label, method, class_, status, body_length, headers_subset, evidence, finding_severity}, ...], findings_emitted}.
+
+The agent should follow up high-severity destructive-verb findings by checking whether the request actually mutated state (was the resource really deleted? did the new value persist?) before treating the finding as a confirmed exploit.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<method_tamper_check>
+<parameter=target_url>https://app.example.com/api/users/123</parameter>
+</method_tamper_check>
+
+<method_tamper_check>
+<parameter=target_url>https://staging.example.com/api/users/123</parameter>
+<parameter=include_destructive>true</parameter>
+</method_tamper_check>
+
+<method_tamper_check>
+<parameter=target_url>https://app.example.com/static/</parameter>
+<parameter=timeout>20</parameter>
+</method_tamper_check>
+]]>
+    </example_usage>
+  </tool>
+</tools>
