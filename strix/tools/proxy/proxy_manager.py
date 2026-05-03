@@ -246,6 +246,28 @@ class ProxyManager:
     ) -> dict[str, Any]:
         if headers is None:
             headers = {}
+
+        # Roadmap §3: hard-rule exclude-path enforcement BEFORE the request
+        # is dispatched. The agent gets a structured "skipped" response so
+        # it can route around the block without retrying.
+        from .http_safety import (
+            excluded_response,
+            inject_auth_headers,
+            is_path_excluded,
+            throttle_for_rate_limit,
+        )
+
+        excluded, matched_glob = is_path_excluded(url)
+        if excluded:
+            return excluded_response(url, matched_glob or "")
+
+        # Roadmap §2: auth-header injection from --auth-cookie / --auth-bearer
+        # / --auth-basic / --header. Agent-supplied headers win on conflict.
+        headers = inject_auth_headers(headers)
+
+        # Roadmap §3: rate-limit before the network call.
+        throttle_for_rate_limit()
+
         try:
             start_time = time.time()
             response = requests.request(
