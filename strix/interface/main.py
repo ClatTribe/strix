@@ -474,6 +474,31 @@ Examples:
         ),
     )
 
+    crawl_group = parser.add_argument_group("crawl steering")
+    crawl_group.add_argument(
+        "--seed-url",
+        action="append",
+        default=[],
+        metavar="URL",
+        help=(
+            "Extra start URL for the BFS crawler in addition to the target. "
+            "Repeatable. Use to point the crawl at non-discoverable surfaces "
+            "(e.g. '--seed-url https://app/admin --seed-url https://app/api'). "
+            "Forwarded to bfs_crawl via STRIX_SEED_URLS env."
+        ),
+    )
+    crawl_group.add_argument(
+        "--openapi",
+        type=str,
+        default=None,
+        metavar="URL",
+        help=(
+            "OpenAPI 2.x / 3.x spec URL (JSON only — YAML not supported in the "
+            "sandbox). When supplied, paths from the spec are seeded into the "
+            "BFS crawl. Forwarded via STRIX_OPENAPI_URL env."
+        ),
+    )
+
     safety_group = parser.add_argument_group("production safety")
     safety_group.add_argument(
         "--exclude-path",
@@ -847,6 +872,14 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             sys.exit(2)
         os.environ["STRIX_RATE_LIMIT"] = str(args.rate_limit)
 
+    crawl_steering: list[str] = []
+    if args.seed_url:
+        os.environ["STRIX_SEED_URLS"] = ",".join(args.seed_url)
+        crawl_steering.append(f"{len(args.seed_url)} seed URL(s) (`--seed-url`)")
+    if args.openapi:
+        os.environ["STRIX_OPENAPI_URL"] = args.openapi
+        crawl_steering.append(f"OpenAPI spec at `{args.openapi}` (`--openapi`)")
+
     instruction_blocks: list[str] = []
     if auth_configured:
         instruction_blocks.append(
@@ -878,6 +911,19 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             f"The HTTP tool layer hard-throttles outbound requests at "
             f"{args.rate_limit:g} requests/second. Plan your testing around this "
             f"cap — don't burst-fan-out probes."
+        )
+    if crawl_steering:
+        steering_lines = "\n".join(f"- {s}" for s in crawl_steering)
+        if args.seed_url:
+            steering_lines += "\n\n  Seeds:\n" + "\n".join(f"  - `{u}`" for u in args.seed_url)
+        instruction_blocks.append(
+            "## Crawl steering configured\n\n"
+            "The user has supplied crawl-steering inputs that the `bfs_crawl` tool "
+            "consumes automatically (no need to thread them through manually):\n\n"
+            f"{steering_lines}\n\n"
+            "When you invoke `bfs_crawl(target=...)` for any web_application target, "
+            "these are picked up from the environment. Override only when the agent's "
+            "own reasoning surfaces additional URLs to seed."
         )
     if instruction_blocks:
         block = "\n\n".join(instruction_blocks)

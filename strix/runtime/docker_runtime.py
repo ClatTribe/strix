@@ -165,6 +165,8 @@ class DockerRuntime(AbstractRuntime):
                                 "STRIX_HEADERS",
                                 "STRIX_EXCLUDE_PATHS",
                                 "STRIX_RATE_LIMIT",
+                                "STRIX_SEED_URLS",
+                                "STRIX_OPENAPI_URL",
                             )
                             if os.environ.get(k)
                         },
