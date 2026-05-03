@@ -475,6 +475,157 @@ def test_openapi_url_from_env(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# robots.txt + sitemap.xml extraction
+# ---------------------------------------------------------------------------
+
+
+def test_robots_txt_disallow_paths_seeded(monkeypatch) -> None:
+    """Disallow lines in robots.txt → seeded into the crawl as endpoints
+    tagged `discovered_via=robots_disallow`."""
+    robots_body = (
+        "User-agent: *\n"
+        "Disallow: /admin\n"
+        "Disallow: /internal/api\n"
+        "Disallow: /backup.zip\n"
+        "Disallow: /admin/*\n"  # wildcard — should be dropped
+        "Allow: /admin/public\n"
+    )
+    _patch_http(
+        monkeypatch,
+        {
+            "https://example.com/": (200, {"Content-Type": "text/html"}, ""),
+            "https://example.com/robots.txt": (200, {"Content-Type": "text/plain"}, robots_body),
+            "https://example.com/admin": (200, {"Content-Type": "text/html"}, ""),
+            "https://example.com/internal/api": (200, {"Content-Type": "text/html"}, ""),
+            "https://example.com/backup.zip": (200, {"Content-Type": "application/zip"}, ""),
+            "https://example.com/admin/public": (200, {"Content-Type": "text/html"}, ""),
+            "https://example.com/sitemap.xml": (404, {}, ""),
+        },
+    )
+    out = cr.bfs_crawl("https://example.com")
+    robots_endpoints = [e for e in out["endpoints"] if e["discovered_via"] == "robots_disallow"]
+    robots_urls = {e["url"] for e in robots_endpoints}
+    assert "https://example.com/admin" in robots_urls
+    assert "https://example.com/internal/api" in robots_urls
+    assert "https://example.com/backup.zip" in robots_urls
+    # Allow-listed concrete path also seeded.
+    assert "https://example.com/admin/public" in robots_urls
+    # Wildcard pattern dropped.
+    assert "https://example.com/admin/*" not in robots_urls
+    # Stats reflect what was found.
+    assert out["stats"]["robots_paths_discovered"] >= 4
+
+
+def test_robots_txt_404_does_not_break_crawl(monkeypatch) -> None:
+    _patch_http(
+        monkeypatch,
+        {
+            "https://example.com/": (200, {"Content-Type": "text/html"}, ""),
+            "https://example.com/robots.txt": (404, {}, ""),
+            "https://example.com/sitemap.xml": (404, {}, ""),
+        },
+    )
+    out = cr.bfs_crawl("https://example.com")
+    assert out["success"] is True
+    assert out["robots_paths"] == []
+
+
+def test_sitemap_xml_default_location(monkeypatch) -> None:
+    """When robots.txt has no Sitemap: directive, the crawler falls back
+    to /sitemap.xml at the origin root."""
+    sitemap_body = """<?xml version="1.0" encoding="UTF-8"?>
+    <urlset>
+      <url><loc>https://example.com/page1</loc></url>
+      <url><loc>https://example.com/page2</loc></url>
+      <url><loc>https://attacker.com/external</loc></url>
+    </urlset>
+    """
+    _patch_http(
+        monkeypatch,
+        {
+            "https://example.com/": (200, {"Content-Type": "text/html"}, ""),
+            "https://example.com/robots.txt": (404, {}, ""),
+            "https://example.com/sitemap.xml": (200, {"Content-Type": "application/xml"}, sitemap_body),
+            "https://example.com/page1": (200, {"Content-Type": "text/html"}, ""),
+            "https://example.com/page2": (200, {"Content-Type": "text/html"}, ""),
+        },
+    )
+    out = cr.bfs_crawl("https://example.com")
+    sitemap_endpoints = [e for e in out["endpoints"] if e["discovered_via"] == "sitemap"]
+    urls = {e["url"] for e in sitemap_endpoints}
+    assert "https://example.com/page1" in urls
+    assert "https://example.com/page2" in urls
+    # Off-scope URL from sitemap dropped.
+    assert "https://attacker.com/external" not in urls
+    assert out["stats"]["sitemap_paths_discovered"] == 2
+
+
+def test_sitemap_url_from_robots_txt(monkeypatch) -> None:
+    """When robots.txt declares Sitemap: <url>, that URL is used instead
+    of the default /sitemap.xml."""
+    robots_body = "User-agent: *\nSitemap: https://example.com/custom-sitemap.xml\n"
+    sitemap_body = """<?xml version="1.0"?><urlset>
+      <url><loc>https://example.com/from-custom</loc></url>
+    </urlset>"""
+    _patch_http(
+        monkeypatch,
+        {
+            "https://example.com/": (200, {"Content-Type": "text/html"}, ""),
+            "https://example.com/robots.txt": (200, {"Content-Type": "text/plain"}, robots_body),
+            "https://example.com/custom-sitemap.xml": (
+                200, {"Content-Type": "application/xml"}, sitemap_body,
+            ),
+            "https://example.com/from-custom": (200, {"Content-Type": "text/html"}, ""),
+        },
+    )
+    out = cr.bfs_crawl("https://example.com")
+    assert "https://example.com/custom-sitemap.xml" in out["sitemap_urls"]
+    sitemap_urls = {e["url"] for e in out["endpoints"] if e["discovered_via"] == "sitemap"}
+    assert "https://example.com/from-custom" in sitemap_urls
+
+
+def test_sitemap_index_format(monkeypatch) -> None:
+    """Sitemap index files (`<sitemapindex>`) — we treat them like regular
+    sitemap files (extract any <loc>)."""
+    index_body = """<?xml version="1.0"?>
+    <sitemapindex>
+      <sitemap><loc>https://example.com/page-a</loc></sitemap>
+      <sitemap><loc>https://example.com/page-b</loc></sitemap>
+    </sitemapindex>
+    """
+    _patch_http(
+        monkeypatch,
+        {
+            "https://example.com/": (200, {"Content-Type": "text/html"}, ""),
+            "https://example.com/robots.txt": (404, {}, ""),
+            "https://example.com/sitemap.xml": (200, {"Content-Type": "application/xml"}, index_body),
+            "https://example.com/page-a": (200, {"Content-Type": "text/html"}, ""),
+            "https://example.com/page-b": (200, {"Content-Type": "text/html"}, ""),
+        },
+    )
+    out = cr.bfs_crawl("https://example.com")
+    sitemap_urls = {e["url"] for e in out["endpoints"] if e["discovered_via"] == "sitemap"}
+    assert "https://example.com/page-a" in sitemap_urls
+    assert "https://example.com/page-b" in sitemap_urls
+
+
+def test_robots_off_scope_paths_dropped(monkeypatch) -> None:
+    """A Disallow line that resolves off-scope (rare but possible) is dropped."""
+    robots_body = "Disallow: //attacker.com/x\n"
+    _patch_http(
+        monkeypatch,
+        {
+            "https://example.com/": (200, {"Content-Type": "text/html"}, ""),
+            "https://example.com/robots.txt": (200, {"Content-Type": "text/plain"}, robots_body),
+            "https://example.com/sitemap.xml": (404, {}, ""),
+        },
+    )
+    out = cr.bfs_crawl("https://example.com")
+    robots_endpoints = [e for e in out["endpoints"] if e["discovered_via"] == "robots_disallow"]
+    assert all("attacker.com" not in e["url"] for e in robots_endpoints)
+
+
 def test_excluded_path_skipped_during_crawl(monkeypatch) -> None:
     """When a discovered link matches --exclude-path, the crawler's fallback
     HTTP path returns (0, {}, '') and the URL is skipped (no 'fetch failed'

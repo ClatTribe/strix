@@ -266,3 +266,217 @@ def test_target_url_strips_path(monkeypatch, fake_agent_state) -> None:
     )
     # The probe always hits the root URL.
     assert captured == ["https://example.com/"]
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI / Swagger probe (deep mode)
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_httpx_module(responses):
+    """Build a fake httpx module whose Client.get returns based on URL."""
+    import types as _types
+
+    class _FakeResponse:
+        def __init__(self, status_code, headers=None, text=""):
+            self.status_code = status_code
+            self.headers = headers or {}
+            self.text = text
+
+    class _FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url):
+            if url not in responses:
+                return _FakeResponse(404)
+            return _FakeResponse(*responses[url])
+
+        def post(self, url, **kw):
+            return _FakeResponse(404)
+
+    fake_httpx = _types.SimpleNamespace(Client=_FakeClient)
+    return fake_httpx
+
+
+def test_openapi_spec_discovered_emits_finding(monkeypatch, fake_agent_state) -> None:
+    """When `/openapi.json` returns a valid 3.x spec, _probe_openapi reports
+    it and the tool emits an info-severity finding."""
+    import json as _json
+    spec_body = _json.dumps({
+        "openapi": "3.0.0",
+        "paths": {"/users": {"get": {}}, "/users/{id}": {"get": {}, "delete": {}}},
+    })
+    fake_httpx = _make_fake_httpx_module({
+        "https://example.com/openapi.json": (
+            200, {"Content-Type": "application/json"}, spec_body,
+        ),
+    })
+    # Patch the import inside _probe_openapi by stubbing the import.
+    import sys as _sys
+    monkeypatch.setitem(_sys.modules, "httpx", fake_httpx)
+    _patch_probe(monkeypatch, 200, {}, "<html></html>")
+
+    # Tracer setup.
+    from strix.telemetry import tracer as tracer_module
+    from strix.telemetry import utils as telemetry_utils
+    from strix.telemetry.tracer import Tracer, set_global_tracer
+    monkeypatch.setattr(tracer_module, "_global_tracer", None)
+    monkeypatch.setattr(tracer_module, "_OTEL_BOOTSTRAPPED", False)
+    monkeypatch.setattr(tracer_module, "_OTEL_REMOTE_ENABLED", False)
+    telemetry_utils.reset_events_write_locks()
+    monkeypatch.setenv("STRIX_KEV_DISABLED", "1")
+    t = Tracer("openapi-test")
+    set_global_tracer(t)
+
+    out = fingerprint.fingerprint_tech_stack(fake_agent_state, "https://example.com", deep=True)
+    techs = [d["technology"] for d in out["technologies"]]
+    assert "openapi" in techs
+    openapi_det = next(d for d in out["technologies"] if d["technology"] == "openapi")
+    assert "2 paths" in openapi_det["label"]
+
+    reports = t.get_existing_vulnerabilities()
+    openapi_findings = [r for r in reports if "OpenAPI" in r.get("title", "") or "Swagger" in r.get("title", "")]
+    assert len(openapi_findings) == 1
+    assert openapi_findings[0]["severity"] == "info"
+    assert openapi_findings[0]["category"] == "info_disclosure"
+
+
+def test_openapi_swagger_2x_detected(monkeypatch, fake_agent_state) -> None:
+    """OpenAPI 2.x (Swagger) uses `swagger: "2.0"` instead of `openapi`."""
+    import json as _json
+    spec_body = _json.dumps({
+        "swagger": "2.0",
+        "host": "api.example.com",
+        "basePath": "/v1",
+        "paths": {"/health": {"get": {}}},
+    })
+    fake_httpx = _make_fake_httpx_module({
+        "https://example.com/swagger.json": (
+            200, {"Content-Type": "application/json"}, spec_body,
+        ),
+    })
+    import sys as _sys
+    monkeypatch.setitem(_sys.modules, "httpx", fake_httpx)
+    _patch_probe(monkeypatch, 200, {}, "<html></html>")
+
+    from strix.telemetry import tracer as tracer_module
+    from strix.telemetry import utils as telemetry_utils
+    from strix.telemetry.tracer import Tracer, set_global_tracer
+    monkeypatch.setattr(tracer_module, "_global_tracer", None)
+    monkeypatch.setattr(tracer_module, "_OTEL_BOOTSTRAPPED", False)
+    monkeypatch.setattr(tracer_module, "_OTEL_REMOTE_ENABLED", False)
+    telemetry_utils.reset_events_write_locks()
+    monkeypatch.setenv("STRIX_KEV_DISABLED", "1")
+    t = Tracer("swagger2x-test")
+    set_global_tracer(t)
+
+    out = fingerprint.fingerprint_tech_stack(fake_agent_state, "https://example.com", deep=True)
+    techs = [d["technology"] for d in out["technologies"]]
+    assert "openapi" in techs
+
+
+def test_swagger_ui_html_detected_when_no_json(monkeypatch, fake_agent_state) -> None:
+    """If only a Swagger UI HTML page exists (no JSON spec), still detect it
+    (medium confidence)."""
+    fake_httpx = _make_fake_httpx_module({
+        "https://example.com/swagger-ui.html": (
+            200, {"Content-Type": "text/html"},
+            "<html><body><script src='swagger-ui.bundle.js'></script></body></html>",
+        ),
+    })
+    import sys as _sys
+    monkeypatch.setitem(_sys.modules, "httpx", fake_httpx)
+    _patch_probe(monkeypatch, 200, {}, "<html></html>")
+
+    from strix.telemetry import tracer as tracer_module
+    from strix.telemetry import utils as telemetry_utils
+    from strix.telemetry.tracer import Tracer, set_global_tracer
+    monkeypatch.setattr(tracer_module, "_global_tracer", None)
+    monkeypatch.setattr(tracer_module, "_OTEL_BOOTSTRAPPED", False)
+    monkeypatch.setattr(tracer_module, "_OTEL_REMOTE_ENABLED", False)
+    telemetry_utils.reset_events_write_locks()
+    monkeypatch.setenv("STRIX_KEV_DISABLED", "1")
+    t = Tracer("swagger-ui-only")
+    set_global_tracer(t)
+
+    out = fingerprint.fingerprint_tech_stack(fake_agent_state, "https://example.com", deep=True)
+    techs = [d["technology"] for d in out["technologies"]]
+    assert "swagger_ui" in techs
+    swagger_ui = next(d for d in out["technologies"] if d["technology"] == "swagger_ui")
+    assert swagger_ui["confidence"] == "medium"
+
+
+def test_no_openapi_no_finding(monkeypatch, fake_agent_state) -> None:
+    """Every probe path 404s → no detection, no finding."""
+    fake_httpx = _make_fake_httpx_module({})  # all 404
+    import sys as _sys
+    monkeypatch.setitem(_sys.modules, "httpx", fake_httpx)
+    _patch_probe(monkeypatch, 200, {}, "<html></html>")
+
+    from strix.telemetry import tracer as tracer_module
+    from strix.telemetry import utils as telemetry_utils
+    from strix.telemetry.tracer import Tracer, set_global_tracer
+    monkeypatch.setattr(tracer_module, "_global_tracer", None)
+    monkeypatch.setattr(tracer_module, "_OTEL_BOOTSTRAPPED", False)
+    monkeypatch.setattr(tracer_module, "_OTEL_REMOTE_ENABLED", False)
+    telemetry_utils.reset_events_write_locks()
+    monkeypatch.setenv("STRIX_KEV_DISABLED", "1")
+    t = Tracer("no-openapi")
+    set_global_tracer(t)
+
+    out = fingerprint.fingerprint_tech_stack(fake_agent_state, "https://example.com", deep=True)
+    techs = [d["technology"] for d in out["technologies"]]
+    assert "openapi" not in techs
+    assert "swagger_ui" not in techs
+    reports = t.get_existing_vulnerabilities()
+    assert all("OpenAPI" not in r.get("title", "") and "Swagger" not in r.get("title", "") for r in reports)
+
+
+def test_openapi_skipped_in_shallow_mode(monkeypatch, fake_agent_state) -> None:
+    """deep=False skips the OpenAPI probe (saves ~13 GETs)."""
+    captured_urls: list[str] = []
+
+    fake_httpx = _make_fake_httpx_module({
+        "https://example.com/openapi.json": (
+            200, {"Content-Type": "application/json"},
+            '{"openapi":"3.0.0","paths":{"/x":{"get":{}}}}',
+        ),
+    })
+
+    # Wrap the fake to record any get() call — should be zero in shallow mode.
+    original_get = fake_httpx.Client().get
+
+    class _RecordingClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url):
+            captured_urls.append(url)
+            return original_get(url)
+
+        def post(self, url, **kw):
+            captured_urls.append(url)
+            return _types_module.SimpleNamespace(status_code=404, headers={}, text="")
+
+    import types as _types_module
+    fake_httpx.Client = _RecordingClient
+    import sys as _sys
+    monkeypatch.setitem(_sys.modules, "httpx", fake_httpx)
+    _patch_probe(monkeypatch, 200, {}, "<html></html>")
+
+    fingerprint.fingerprint_tech_stack(fake_agent_state, "https://example.com", deep=False)
+    # No OpenAPI / Swagger paths probed in shallow mode.
+    assert all("/openapi" not in u and "/swagger" not in u for u in captured_urls)
