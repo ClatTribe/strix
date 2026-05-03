@@ -1,0 +1,61 @@
+<tools>
+  <tool name="attack_surface_intel">
+    <description>Look up Shodan + Censys attack-surface intelligence for a domain or IP target. Surfaces the attacker's-view of the asset's internet exposure: open ports, service banners, software versions, historical scan timestamps, and CVE matches. Complements `reverse_ip_discovery` (#23) and `domain_reputation` (#63) with operational intelligence.
+
+| Source | Auth | API | Free tier |
+|---|---|---|---|
+| **Shodan** | `STRIX_SHODAN_KEY` | `GET https://api.shodan.io/shodan/host/<ip>?key=...` | 100 queries/month |
+| **Censys** | `STRIX_CENSYS_API_ID` + `STRIX_CENSYS_API_SECRET` | `GET https://search.censys.io/api/v2/hosts/<ip>` (Basic auth) | 250 queries/month |
+
+Both sources skipped silently when keys aren't configured. Without any keys the tool is a no-op (returns success=True with both sources skipped).
+
+Auto-detects target type. For domain targets, resolves up to 3 A records and queries each IP through both sources. URL-shaped input auto-stripped to hostname. Private / loopback / link-local IPs rejected.
+
+Findings (severity tuned to attacker-impact):
+
+- **High** (CWE-200, attack_surface_disclosure) — high-risk service exposed on public IP. Detection from product/service-name fingerprints OR well-known port mapping. Catches: SSH, Telnet, RDP, VNC, SMB, rsync, FTP, MySQL, PostgreSQL, MSSQL, MongoDB, Redis, Elasticsearch, Memcached, Kibana, Docker API, Kubernetes API, etcd. Per-IP dedup so a host running both ssh and telnet emits ONE high-risk-service finding listing both.
+- **High** (CWE-1395, vulnerable_software) — Shodan-tagged CVE on the host. One finding per CVE (capped at 20 per IP). The tracer's KEV enrichment auto-decorates these.
+- **Medium** (CWE-200) — broad attack surface (>10 distinct ports exposed). Signals poorly-segmented host.
+- **Low** (CWE-200) — service version disclosure in banners. Feeds-forward to `cve_lookup` (#61) rather than acting on directly. Aggregates all version disclosures per IP into ONE low finding.
+
+Per-host dedup keys: `(ip, severity, class)` so each detection class emits at most one finding per IP. Per-detection verdicts still live in `result["per_ip"]` for the agent.
+
+`verification_status=needs_review` since Shodan / Censys can carry stale data (services may have been firewalled / decommissioned since the last scan).
+
+Cache: per-target JSON cache under `~/.strix/attack_surface_cache/`, 6-hour TTL. Stale cache served on full-source failure (fail-open with `error` populated). Disable with `STRIX_ATTACK_SURFACE_NO_CACHE=1`.
+
+Composes with cluster-A safety: rate-limit applies to outbound HTTP requests. `--exclude-path` doesn't apply (URLs are Shodan / Censys, not the customer's domain).</description>
+    <parameters>
+      <parameter name="target" type="string" required="true">
+        <description>Domain (e.g. `example.com`) or IPv4 address (e.g. `8.8.8.8`). URL-shaped input auto-stripped to hostname. Private / loopback / link-local IPs rejected.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-request timeout in seconds. Default 15.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target, target_type, queried_at, from_cache, resolved_ips, per_ip: [{ip, shodan: {present, ports, services, vulns, last_update, ...} | {skipped, reason}, censys: {present, ports, services, last_updated, autonomous_system, ...} | {skipped, reason}, all_ports, high_risk_services: [{port, service}], broad_surface, version_disclosure: [{port, product, version}], shodan_vulns}, ...], source_errors, findings_emitted}.
+
+The agent should:
+1. Feed each `version_disclosure` entry into `cve_lookup` (#61) to find known CVEs for that (product, version).
+2. Treat `high_risk_services` findings as immediate-priority (real-world breach paths).
+3. Run subsequent scans (port scans, service-specific probes) against the IPs that surface in `per_ip`.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<attack_surface_intel>
+<parameter=target>example.com</parameter>
+</attack_surface_intel>
+
+<attack_surface_intel>
+<parameter=target>8.8.8.8</parameter>
+</attack_surface_intel>
+
+<attack_surface_intel>
+<parameter=target>https://app.example.com/</parameter>
+<parameter=timeout>30</parameter>
+</attack_surface_intel>
+]]>
+    </example_usage>
+  </tool>
+</tools>
