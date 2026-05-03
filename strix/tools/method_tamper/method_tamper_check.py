@@ -312,7 +312,10 @@ def _complete_check(check_id: str | None, result: str, evidence: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1190"],  # Exploit Public-Facing Application
+)
 def method_tamper_check(
     target_url: str,
     include_destructive: bool = False,

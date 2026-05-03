@@ -404,7 +404,10 @@ _PAAS_REMEDIATION = (
 _STORAGE_PROVIDERS = {"s3", "gcs", "azure"}
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1593", "T1583.001"],  # Search Open Websites + Domain takeover
+)
 def discover_cloud_assets(
     org_name: str,
     providers: str | None = None,

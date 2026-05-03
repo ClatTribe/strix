@@ -335,7 +335,10 @@ def _complete_check(check_id: str | None, result: str, evidence: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1593"],  # Search Open Websites/Domains
+)
 def well_known_harvest(
     target: str,
     *,

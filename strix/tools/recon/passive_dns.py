@@ -158,7 +158,10 @@ def _virustotal_history(domain: str, api_key: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1596.001"],  # Search Open Technical Databases: DNS/Passive DNS
+)
 def passive_dns_history(domain: str, prefer: str | None = None) -> dict[str, Any]:
     """Mine passive-DNS history (historical resolutions + known subdomains).
 

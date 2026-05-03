@@ -260,7 +260,10 @@ def _extract_from_domain(from_header: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1590", "T1592.002"],  # Network info + Software fingerprint
+)
 def mx_fingerprint(
     domain: str,
     sample_email_path: str | None = None,

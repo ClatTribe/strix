@@ -411,7 +411,10 @@ def _complete_check(check_id: str | None, result: str, evidence: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1592.002", "T1595.002"],  # Software fingerprinting + Vulnerability Scanning
+)
 def tls_audit(
     target: str,
     timeout: float = _DEFAULT_TIMEOUT,

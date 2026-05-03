@@ -721,7 +721,10 @@ def _complete_check(check_id: str | None, result: str, evidence: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1595.002"],  # Active Scanning: Vulnerability Scanning
+)
 def http_security_headers_audit(target_url: str) -> dict[str, Any]:
     """Audit HTTP security headers on a single URL.
 

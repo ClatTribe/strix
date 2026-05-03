@@ -292,7 +292,10 @@ def _complete_check(check_id: str | None, result: str, evidence: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1591.002"],  # Gather Victim Org Info: Business Relationships
+)
 def m365_tenant_recon(domain: str) -> dict[str, Any]:
     """Detect M365 / Azure AD (Entra ID) tenant + federation posture.
 

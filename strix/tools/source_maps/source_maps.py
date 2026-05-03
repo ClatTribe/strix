@@ -380,7 +380,10 @@ def _complete_check(check_id: str | None, result: str, evidence: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1083", "T1592.002"],  # File/Directory Discovery + Software fingerprint
+)
 def source_map_probe(
     target_url: str,
     extra_urls: str | None = None,

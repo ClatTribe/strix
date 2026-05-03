@@ -535,7 +535,10 @@ def _check_one(host: str) -> dict[str, Any]:
     }
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1583.001"],  # Acquire Infrastructure: Domains
+)
 def subdomain_takeover_check(
     domain: str, subdomains: str | None = None
 ) -> dict[str, Any]:

@@ -234,7 +234,10 @@ def _complete_check(check_id: str | None, result: str, evidence: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1190"],  # Exploit Public-Facing Application
+)
 def graphql_specialist_check(  # noqa: PLR0912, PLR0915
     target_url: str,
     timeout: int = _DEFAULT_TIMEOUT,

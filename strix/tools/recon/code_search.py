@@ -261,7 +261,10 @@ def _gitlab_code_search(
 _KNOWN_PROVIDERS = ("github", "gitlab")
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1593.003"],  # Search Open Websites/Domains: Code Repositories
+)
 def code_search_for_domain(
     domain: str,
     providers: str | None = None,

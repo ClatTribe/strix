@@ -549,7 +549,10 @@ def _complete_check(check_id: str | None, result: str, evidence: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1190"],  # Exploit Public-Facing Application
+)
 def request_smuggling_check(
     target: str,
     timeout: float = _DEFAULT_TIMEOUT,

@@ -205,7 +205,10 @@ def _write_surface_map(domain: str, surface_map: dict[str, Any]) -> Path | None:
 # ---------------------------------------------------------------------------
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1590", "T1591", "T1593", "T1595"],  # Multi-source recon orchestrator
+)
 def domain_recon_pipeline(  # noqa: PLR0913
     domain: str,
     enable_typosquats: bool = True,

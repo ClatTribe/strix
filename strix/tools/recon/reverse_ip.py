@@ -227,7 +227,10 @@ def _viewdns_reverse_ip(ip: str, api_key: str) -> dict[str, Any]:
 _KNOWN_PROVIDERS = ("hackertarget", "viewdns")
 
 
-@register_tool(sandbox_execution=True)
+@register_tool(
+    sandbox_execution=True,
+    mitre_techniques=["T1590.005"],  # Gather Victim Network Info: IP Addresses
+)
 def reverse_ip_discovery(
     target: str,
     providers: str | None = None,
