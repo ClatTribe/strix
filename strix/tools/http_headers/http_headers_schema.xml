@@ -1,0 +1,56 @@
+<tools>
+  <tool name="http_security_headers_audit">
+    <description>Audit HTTP security headers on a single URL — emits one finding per missing / weak header.
+
+Per-host check of the standard security-header set: HSTS, CSP, X-Frame-Options
+(or CSP frame-ancestors), X-Content-Type-Options, Referrer-Policy, Permissions-Policy,
+COOP/COEP/CORP, CORS reflection, Set-Cookie security flags, and version disclosure
+(Server / X-Powered-By).
+
+Severity tuned per real-world impact:
+- **High** — CORS reflects attacker Origin + `Access-Control-Allow-Credentials: true`
+  (CWE-942, full cross-origin credentialed access bypass).
+- **Medium** — missing CSP entirely; session-shaped cookies missing HttpOnly / Secure
+  on HTTPS app.
+- **Low** — missing HSTS, missing X-Frame-Options / frame-ancestors, missing
+  X-Content-Type-Options, missing Referrer-Policy, weak HSTS max-age, weak CSP
+  directives (`unsafe-inline` / `unsafe-eval` / wildcards).
+- **Info** — missing Permissions-Policy (defense-in-depth); version disclosure
+  (Server / X-Powered-By with version string).
+
+Sends two requests:
+1. Plain GET → inspects HSTS / CSP / XFO / XCTO / Referrer-Policy / Permissions-Policy
+   / Server / Set-Cookie flags.
+2. GET with `Origin: https://attacker.example.com` → CORS reflection probe.
+
+Each finding includes `description_plain` and `recommended_action` (the §11
+non-tech-output fields) so the wrapper's dashboard renders specific fix instructions
+per header rather than CWE numbers. `fix_time_estimate=5min` on every finding —
+security headers are pure config-flag fixes.
+
+Composes with cluster-A safety (auth / exclude-path / rate-limit) automatically.
+
+Use after the BFS crawler discovers deep targets — call once per deep host.</description>
+    <parameters>
+      <parameter name="target_url" type="string" required="true">
+        <description>Full URL to audit. The path is not used for header inspection (headers are response-wide), but is preserved on the request so server-side header logic that varies by path is honoured. Plain hostnames get `https://` prefixed automatically.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target_url, is_https, status, header_count, results: [{header, present, value, severity, issue, description?, description_plain?, recommended_action?}], findings_emitted}.
+
+Findings are emitted as side effects via the tracer with category=`security_misconfiguration` and CWE-693 (or CWE-942 for CORS issues).</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<http_security_headers_audit>
+<parameter=target_url>https://app.example.com</parameter>
+</http_security_headers_audit>
+
+<http_security_headers_audit>
+<parameter=target_url>https://api.example.com/v1/health</parameter>
+</http_security_headers_audit>
+]]>
+    </example_usage>
+  </tool>
+</tools>
