@@ -1,0 +1,64 @@
+<tools>
+  <tool name="source_map_probe">
+    <description>Probe a target for accessible `*.js.map` (source-map) files.
+
+Production builds frequently ship source maps to clients by accident — `app.js.map`
+reveals the full pre-minified source including baked-in constants, internal API
+shapes, and sometimes secrets. This is one of the highest-leverage info-disclosure
+classes for modern SPA targets.
+
+Strategy:
+1. Fetch the target HTML and harvest `<script src>` URLs (same-origin only).
+2. For each script, attempt `<src>.map`.
+3. Probe ~23 well-known bundle-name candidates at common asset roots
+   (`/app.js.map`, `/main.js.map`, `/static/js/main.js.map`, `/dist/bundle.js.map`,
+   etc.).
+4. For each 200 hit, validate v3 source-map shape (object with `version` + either
+   `sources` OR `sourcesContent`).
+5. Scan `sourcesContent[]` (when present) for secret-indicator tokens (`api_key`,
+   `aws_secret`, `Bearer`, `ghp_*`, `sk_(live|test)_*`, etc.).
+
+Findings:
+- **Medium** (CWE-540, info_disclosure) per accessible source-map. The pre-
+  minified source — file paths, variable names, internal structure — is
+  recovered.
+- **High** (CWE-200, secret_leak, `verification_status=needs_review`) when
+  `sourcesContent[]` contains secret-indicator tokens. Same heuristic as
+  `code_search_for_domain` — false positives acceptable; the agent verifies.
+
+Snippets are bounded at 120 chars and stripped of newlines; **full source bodies
+are NEVER returned** in findings (only file paths + the matched ≤120-char
+window around each indicator). Cookie / auth values never appear.
+
+Composes with cluster-A safety (auth-injection / exclude-path / rate-limit)
+automatically. Each finding carries `description_plain` + `recommended_action`
++ `fix_time_estimate=1hr` (production-build config flag).
+
+Use after the BFS crawler discovers a deep web target; one call per host.</description>
+    <parameters>
+      <parameter name="target_url" type="string" required="true">
+        <description>Target URL. The HTML at this URL is fetched + scanned for `<script src>` attributes; each in-scope script URL is probed at `<src>.map`. The origin root is also probed against a curated bundle-name candidate list. Plain hostnames get `https://` prefixed.</description>
+      </parameter>
+      <parameter name="extra_urls" type="string" required="false">
+        <description>Comma-separated extra map URLs to probe (absolute or origin-relative). Use when the agent already knows a non-standard bundle path discovered through other recon (e.g. fingerprint output). Off-origin entries dropped.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target_url, probed, hits: [{url, source_count, has_sources_content, sample_sources, secret_hits}], errors, stats}.
+
+Findings are emitted as side effects via the tracer. Always returns success=True even when the target is unreachable — read the structured fields rather than branching.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<source_map_probe>
+<parameter=target_url>https://app.example.com</parameter>
+</source_map_probe>
+
+<source_map_probe>
+<parameter=target_url>https://api.example.com</parameter>
+<parameter=extra_urls>/static/chunk-vendor.abc123.js.map,/internal/admin.js.map</parameter>
+</source_map_probe>
+]]>
+    </example_usage>
+  </tool>
+</tools>
