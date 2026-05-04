@@ -1002,6 +1002,17 @@ class Tracer:
         except Exception:  # noqa: BLE001
             logger.warning("canonical-finding validation failed", exc_info=True)
 
+        # Roadmap §9 cross-tool dedup. When a new finding shares the
+        # stable fingerprint of an existing one, MERGE rather than
+        # create a duplicate row. The accumulated `detected_by` list
+        # encodes confidence: `len(detected_by) ≥ 2` means at least
+        # two independent detection paths agree, which is a zero-
+        # false-positive signal the wrapper can render as a "high
+        # confidence" badge on the finding.
+        merged_with_existing = self._maybe_merge_into_existing_finding(report)
+        if merged_with_existing is not None:
+            return merged_with_existing
+
         self.vulnerability_reports.append(report)
         logger.info(f"Added vulnerability report: {report_id} - {title}")
         posthog.finding(severity)
@@ -1035,6 +1046,105 @@ class Tracer:
 
         self.save_run_data()
         return report_id
+
+    def _maybe_merge_into_existing_finding(
+        self, new_report: dict[str, Any],
+    ) -> str | None:
+        """Cross-tool dedup (roadmap §9). When `new_report` shares
+        its `fingerprint` with an existing finding, merge rather
+        than append. Returns the existing report's `id` on merge,
+        or None when no match.
+
+        The accumulated `detected_by` list is the wrapper-facing
+        confidence signal — multiple detectors agreeing is a
+        zero-false-positive indicator.
+
+        Severity ladder on merge: take the MAX of the existing and
+        new severity (a tool that says critical wins over one that
+        says low). Emits `finding.detection_corroborated` event so
+        wrappers can flag the moment the confidence threshold is
+        crossed.
+        """
+        new_fp = new_report.get("fingerprint")
+        if not new_fp:
+            return None
+
+        # Find the existing finding by fingerprint.
+        existing: dict[str, Any] | None = None
+        for r in self.vulnerability_reports:
+            if r.get("fingerprint") == new_fp:
+                existing = r
+                break
+        if existing is None:
+            return None
+
+        # Merge `detected_by`. The new finding's `detected_by` may
+        # be a list, a single string, or absent. Existing entry
+        # may also be either — normalise both.
+        existing_detected = existing.get("detected_by") or []
+        if isinstance(existing_detected, str):
+            existing_detected = [existing_detected]
+        new_detected = new_report.get("detected_by") or []
+        if isinstance(new_detected, str):
+            new_detected = [new_detected]
+
+        # If the new finding doesn't carry an explicit detected_by,
+        # fall back to its `category` as the detector name (the tool
+        # is identified by what it found).
+        if not new_detected:
+            cat = (new_report.get("category") or "").strip().lower()
+            if cat:
+                new_detected = [cat]
+
+        merged_detected = list(existing_detected)
+        for d in new_detected:
+            d_norm = str(d).strip().lower()
+            if d_norm and d_norm not in merged_detected:
+                merged_detected.append(d_norm)
+
+        existing["detected_by"] = merged_detected
+        existing["detection_count"] = len(merged_detected)
+
+        # Severity ladder — take the max.
+        sev_order = ["info", "low", "medium", "high", "critical"]
+        existing_sev = (existing.get("severity") or "info").lower()
+        new_sev = (new_report.get("severity") or "info").lower()
+        try:
+            old_idx = sev_order.index(existing_sev)
+        except ValueError:
+            old_idx = 0
+        try:
+            new_idx = sev_order.index(new_sev)
+        except ValueError:
+            new_idx = 0
+        if new_idx > old_idx:
+            existing["severity"] = new_sev
+            existing["severity_promoted_from"] = existing_sev
+
+        # Track the merge audit trail in the existing finding.
+        merge_log = existing.setdefault("dedup_merges", [])
+        merge_log.append({
+            "merged_at": datetime.now(UTC).isoformat(),
+            "from_title": new_report.get("title"),
+            "from_category": new_report.get("category"),
+            "from_severity": new_sev,
+        })
+
+        self._emit_event(
+            "finding.detection_corroborated",
+            payload={
+                "report_id": existing.get("id"),
+                "fingerprint": new_fp,
+                "detected_by": merged_detected,
+                "detection_count": len(merged_detected),
+                "title": existing.get("title"),
+                "severity": existing.get("severity"),
+            },
+            status="info",
+            source="strix.findings.dedup",
+        )
+
+        return existing.get("id")
 
     def get_existing_vulnerabilities(self) -> list[dict[str, Any]]:
         return list(self.vulnerability_reports)
