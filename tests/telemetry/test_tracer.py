@@ -550,3 +550,100 @@ def test_save_run_data_writes_run_meta_and_vulnerabilities_json(monkeypatch, tmp
     assert data["findings"][0]["verification_status"] == "inconclusive"
     assert data["findings"][0]["endpoint"] == "/fetch"
     assert data["schema_version"] == 1
+
+
+def test_machine_readable_outputs_use_lowercase_severity(monkeypatch, tmp_path) -> None:
+    """Roadmap §4: every machine-readable surface (CSV, JSON, JSONL events)
+    emits severity as the canonical lowercase token. Wrappers `==` compare
+    severities without case-folding; flipping case would silently break
+    every gate that says `if severity == "high"`. Pin the contract.
+
+    Markdown rendering may still uppercase for display — that's an explicit
+    exception covered by a separate assertion below.
+    """
+    import csv
+
+    monkeypatch.chdir(tmp_path)
+    tracer = Tracer("severity-case-contract")
+    set_global_tracer(tracer)
+    tracer.set_scan_config({"targets": ["https://example.com"]})
+
+    # Mix of upper-case and mixed-case inputs to confirm normalization
+    # at the entry point too — the agent should not be able to leak
+    # an upper-case severity into machine-readable outputs by passing
+    # one in, even by accident.
+    tracer.add_vulnerability_report(
+        title="SSRF in /fetch",
+        severity="HIGH",
+        cwe="CWE-918",
+        endpoint="/fetch",
+    )
+    tracer.add_vulnerability_report(
+        title="XSS in /search",
+        severity="Medium",
+        cwe="CWE-79",
+        endpoint="/search",
+    )
+    tracer.add_vulnerability_report(
+        title="Info disclosure in /banner",
+        severity="info",
+        cwe="CWE-200",
+        endpoint="/banner",
+    )
+
+    run_dir = tmp_path / "strix_runs" / "severity-case-contract"
+    csv_path = run_dir / "vulnerabilities.csv"
+    json_path = run_dir / "vulnerabilities.json"
+    md_dir = run_dir / "vulnerabilities"
+
+    # ---- vulnerabilities.csv (machine-readable) ----
+    assert csv_path.exists()
+    rows = list(csv.DictReader(csv_path.open(encoding="utf-8")))
+    assert len(rows) == 3
+    csv_severities = {row["severity"] for row in rows}
+    assert csv_severities == {"high", "medium", "info"}, (
+        f"CSV severities must be lowercase; got {csv_severities}"
+    )
+    for row in rows:
+        assert row["severity"] == row["severity"].lower(), (
+            f"row {row['id']} severity {row['severity']!r} not lowercase"
+        )
+
+    # ---- vulnerabilities.json (machine-readable) ----
+    data = json.loads(json_path.read_text())
+    json_severities = {f["severity"] for f in data["findings"]}
+    assert json_severities == {"high", "medium", "info"}, (
+        f"JSON severities must be lowercase; got {json_severities}"
+    )
+
+    # ---- events.jsonl (machine-readable) ----
+    events_path = run_dir / "events.jsonl"
+    if events_path.exists():
+        for line in events_path.read_text(encoding="utf-8").splitlines():
+            if not line:
+                continue
+            ev = json.loads(line)
+            data_block = ev.get("data") or {}
+            sev = data_block.get("severity")
+            if isinstance(sev, str):
+                assert sev == sev.lower(), (
+                    f"event {ev.get('event_type')} leaked uppercase severity: {sev!r}"
+                )
+
+    # ---- per-finding markdown (display surface — uppercase OK) ----
+    # The roadmap explicitly allows markdown to render the severity in
+    # uppercase for human readability. Pin that exception so a future
+    # cleanup doesn't accidentally lowercase the display surface and
+    # think it's a "consistency" win.
+    md_files = list(md_dir.glob("*.md"))
+    assert md_files, "expected per-finding markdown files"
+    md_text = md_files[0].read_text(encoding="utf-8")
+    # Severity line is rendered uppercase for display.
+    assert "**Severity:** " in md_text
+    sev_line = next(
+        line for line in md_text.splitlines() if line.startswith("**Severity:** ")
+    )
+    sev_token = sev_line.removeprefix("**Severity:** ").strip()
+    assert sev_token == sev_token.upper(), (
+        f"markdown display surface should uppercase severity; got {sev_token!r}"
+    )

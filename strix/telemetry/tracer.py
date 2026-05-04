@@ -2303,7 +2303,13 @@ class Tracer:
                             {
                                 "id": report["id"],
                                 "title": report["title"],
-                                "severity": report["severity"].upper(),
+                                # Roadmap §4: machine-readable outputs use stable
+                                # lowercase severity. CLI / markdown rendering may
+                                # uppercase for display, but every parser-bound
+                                # surface (CSV, JSON, JSONL events, SARIF) emits
+                                # the canonical lowercased token so wrappers can
+                                # `==` compare without case-folding.
+                                "severity": (report.get("severity") or "").lower(),
                                 "category": report.get("category", ""),
                                 "verification_status": report.get("verification_status", ""),
                                 "owasp_top_10": report.get("owasp_top_10", ""),
