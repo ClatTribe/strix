@@ -25,6 +25,7 @@ from .reverse_ip import reverse_ip_discovery
 from .saas_leaks import saas_leak_discovery
 from .subdomain_enum_tool import subdomain_enum
 from .takeover import subdomain_takeover_check
+from .webapp_pipeline import webapp_recon_pipeline
 
 
 __all__ = [
@@ -41,4 +42,5 @@ __all__ = [
     "saas_leak_discovery",
     "subdomain_enum",
     "subdomain_takeover_check",
+    "webapp_recon_pipeline",
 ]

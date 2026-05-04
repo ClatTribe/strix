@@ -30,11 +30,21 @@ from .surface_map import (
     load_surface_map,
     validate_surface_map,
 )
+from .webapp_surface_map import (
+    WebappSurfaceMapViolation,
+    has_canonical_errors as webapp_has_canonical_errors,
+    load_webapp_surface_map,
+    validate_webapp_surface_map,
+)
 
 
 __all__ = [
     "SurfaceMapViolation",
+    "WebappSurfaceMapViolation",
     "has_canonical_errors",
     "load_surface_map",
+    "load_webapp_surface_map",
     "validate_surface_map",
+    "validate_webapp_surface_map",
+    "webapp_has_canonical_errors",
 ]
