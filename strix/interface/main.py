@@ -435,6 +435,26 @@ Examples:
         ),
     )
 
+    # Roadmap §3 PR #123 — `--surface-map-only`: run recon, emit
+    # the surface map, exit. Useful for separating expensive recon
+    # from cheap follow-up scans.
+    parser.add_argument(
+        "--surface-map-only",
+        action="store_true",
+        default=False,
+        help=(
+            "Recon-only mode. Run the recon phase, write the surface map "
+            "(`surface_map.json` for domain/IP targets, "
+            "`webapp_surface_map.json` for web_application), then exit "
+            "without proceeding to the exploit phase. Useful for separating "
+            "expensive recon from cheap follow-up scans, and for wrappers "
+            "that want a 'weekly recon, daily targeted' pattern. Sets "
+            "STRIX_SURFACE_MAP_ONLY=1 in the sandbox so the agent receives "
+            "an explicit recon-only instruction. Composes with --dns-only "
+            "for passive-only surface-mapping."
+        ),
+    )
+
     auth_group = parser.add_argument_group(
         "authentication",
         (
@@ -904,6 +924,31 @@ def main() -> None:  # noqa: PLR0912, PLR0915
         )
         args.instruction = (
             f"{dns_only_block}\n\n{args.instruction}" if args.instruction else dns_only_block
+        )
+
+    # Roadmap §3 PR #123 — `--surface-map-only` recon-only mode.
+    if getattr(args, "surface_map_only", False):
+        os.environ["STRIX_SURFACE_MAP_ONLY"] = "1"
+        recon_only_block = (
+            "## Active scope: recon-only mode (--surface-map-only)\n\n"
+            "Run the recon phase, emit the surface map, then call the "
+            "appropriate finish tool — DO NOT proceed to the exploit phase. "
+            "For domain targets, run `domain_recon_pipeline` and verify "
+            "`surface_map.json` was written. For web_application targets, "
+            "run `webapp_recon_pipeline` and verify `webapp_surface_map.json` "
+            "was written. For ip_address targets, run the recon-trio "
+            "(port-scan + service-detect + CVE-correlation) and verify the "
+            "structured artifact is on disk. Then call `finish_scan` with "
+            "a brief note describing what the surface map covers. Findings "
+            "will be limited to what the recon phase deterministically emits "
+            "(subdomain-takeover candidates, missing security headers, etc.) "
+            "— that is intentional. Save the agent's iteration budget for "
+            "future targeted scans against the discovered surface."
+        )
+        args.instruction = (
+            f"{recon_only_block}\n\n{args.instruction}"
+            if args.instruction
+            else recon_only_block
         )
 
     # Auth + production-safety flags. Values are forwarded to the sandbox
