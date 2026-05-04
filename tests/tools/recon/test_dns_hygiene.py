@@ -346,3 +346,147 @@ def test_dangling_ns_all_resolve_no_finding(monkeypatch) -> None:
     out = dns_hygiene.dns_hygiene_check("example.com", checks="dangling_ns")
     assert out["results"][0]["dangling"] == []
     assert tracer_module.get_global_tracer().get_existing_vulnerabilities() == []
+
+
+
+# ---------------------------------------------------------------------------
+# DNSSEC algorithm strength + signature hygiene (PR #119)
+# ---------------------------------------------------------------------------
+
+
+def test_dnssec_weak_algorithm_rsasha1_emits_medium(monkeypatch) -> None:
+    """Algorithm 5 (RSASHA1) — SHA-1 broken; deprecated → medium."""
+    # DNSKEY rdata: <flags> <protocol> <algorithm> <key>
+    _patch_dig(monkeypatch, {
+        "example.com|DNSKEY": "257 3 5 AwEAAagAIKlVZrpC6Ia7gEzahOR+9W29euxhJhVVLOyQbSEW0O8gcCjFFVQUTf6v58fLjwBd0YI0EzrAcQqBGCzh/RStIoO8g0NfnfL2MTJRkxoXbfDaUeVPQuYEhg37NZWAJQ9VnMVDxP/VHL496M/QZxkjf5/Efucp2gaDX6RS6CXpoY68LsvPVjR0ZSwzz1apAzvN9dlzEheX7ICJBBtuA6G3LQpzW5hOA2hzCTMjJPJ8LbqF6dsV6DoBQzgul0sGIcGOYl7OyQdXfZ57relSQageu+ipAdTTJ25AsRTAoub8ONGcLmqrAmRLKBP1dfwhYB4N7knNnulqQxA+Uk1ihz0=",
+        "example.com|RRSIG": "",
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="dnssec")
+    assert out["results"][0]["signed"] is True
+    assert "RSASHA1" in out["results"][0]["weak_algorithms"]
+    reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
+    weak = [r for r in reports if "Weak DNSSEC algorithm" in r["title"]]
+    assert len(weak) == 1
+    assert weak[0]["severity"] == "medium"
+    assert weak[0]["cwe"] == "CWE-326"
+
+
+def test_dnssec_broken_algorithm_rsamd5_emits_high(monkeypatch) -> None:
+    """Algorithm 1 (RSAMD5) — MUST NOT use → high."""
+    _patch_dig(monkeypatch, {
+        "example.com|DNSKEY": "257 3 1 AwEAAagFAKE",
+        "example.com|RRSIG": "",
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="dnssec")
+    assert "RSAMD5" in out["results"][0]["weak_algorithms"]
+    reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
+    weak = [r for r in reports if "Weak DNSSEC algorithm" in r["title"]]
+    assert len(weak) == 1
+    assert weak[0]["severity"] == "high"
+
+
+def test_dnssec_modern_algorithm_no_finding(monkeypatch) -> None:
+    """Algorithm 13 (ECDSAP256SHA256) — modern → no weak finding."""
+    _patch_dig(monkeypatch, {
+        "example.com|DNSKEY": "257 3 13 AwEAAagFAKE",
+        "example.com|RRSIG": "",
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="dnssec")
+    assert out["results"][0]["weak_algorithms"] == []
+    reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
+    weak = [r for r in reports if "Weak DNSSEC algorithm" in r["title"]]
+    assert len(weak) == 0
+
+
+def test_dnssec_ed25519_no_finding(monkeypatch) -> None:
+    """Algorithm 15 (ED25519) — modern → no finding."""
+    _patch_dig(monkeypatch, {
+        "example.com|DNSKEY": "257 3 15 AwEAAagFAKE",
+        "example.com|RRSIG": "",
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="dnssec")
+    assert out["results"][0]["weak_algorithms"] == []
+
+
+def test_dnssec_unrecognised_algorithm_emits_medium(monkeypatch) -> None:
+    """Algorithm 99 (not in IANA registry) → medium (review needed)."""
+    _patch_dig(monkeypatch, {
+        "example.com|DNSKEY": "257 3 99 AwEAAagFAKE",
+        "example.com|RRSIG": "",
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="dnssec")
+    reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
+    unrec = [r for r in reports if "Unrecognised DNSSEC algorithm" in r["title"]]
+    assert len(unrec) == 1
+    assert unrec[0]["severity"] == "medium"
+
+
+def test_dnssec_rrsig_expiring_soon_emits_medium(monkeypatch) -> None:
+    """RRSIG signature expiring within 7 days → medium."""
+    from datetime import datetime, timedelta, timezone
+    expiring = (datetime.now(timezone.utc) + timedelta(days=2)).strftime("%Y%m%d%H%M%S")
+    inception = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y%m%d%H%M%S")
+    rrsig_line = f"A 13 2 3600 {expiring} {inception} 12345 example.com. AAAA"
+    _patch_dig(monkeypatch, {
+        "example.com|DNSKEY": "257 3 13 AwEAAagFAKE",  # modern algo
+        "example.com|RRSIG": rrsig_line,
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="dnssec")
+    assert out["results"][0]["rrsig_expiring_soon"] is True
+    reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
+    expiring_findings = [r for r in reports if "expiring soon" in r["title"]]
+    assert len(expiring_findings) == 1
+    assert expiring_findings[0]["severity"] == "medium"
+
+
+def test_dnssec_rrsig_already_expired_emits_high(monkeypatch) -> None:
+    """RRSIG signature already past expiration → high (resolvers SERVFAIL)."""
+    from datetime import datetime, timedelta, timezone
+    expired = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y%m%d%H%M%S")
+    inception = (datetime.now(timezone.utc) - timedelta(days=20)).strftime("%Y%m%d%H%M%S")
+    rrsig_line = f"A 13 2 3600 {expired} {inception} 12345 example.com. AAAA"
+    _patch_dig(monkeypatch, {
+        "example.com|DNSKEY": "257 3 13 AwEAAagFAKE",
+        "example.com|RRSIG": rrsig_line,
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="dnssec")
+    reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
+    expiring_findings = [r for r in reports if "expiring soon" in r["title"]]
+    assert len(expiring_findings) == 1
+    assert expiring_findings[0]["severity"] == "high"
+
+
+def test_dnssec_rrsig_far_future_no_finding(monkeypatch) -> None:
+    """RRSIG signature 30+ days out → no finding."""
+    from datetime import datetime, timedelta, timezone
+    far_out = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y%m%d%H%M%S")
+    inception = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y%m%d%H%M%S")
+    rrsig_line = f"A 13 2 3600 {far_out} {inception} 12345 example.com. AAAA"
+    _patch_dig(monkeypatch, {
+        "example.com|DNSKEY": "257 3 13 AwEAAagFAKE",
+        "example.com|RRSIG": rrsig_line,
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="dnssec")
+    assert out["results"][0]["rrsig_expiring_soon"] is False
+
+
+def test_dnssec_no_rrsig_no_expiry_check(monkeypatch) -> None:
+    """No RRSIG records → no expiry analysis (signed_with_no_rrsig is itself a finding,
+    but already pre-existing pre-#119 — we don't add new findings here)."""
+    _patch_dig(monkeypatch, {
+        "example.com|DNSKEY": "257 3 13 AwEAAagFAKE",
+        "example.com|RRSIG": "",
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="dnssec")
+    assert out["results"][0]["rrsig_expiring_soon"] is False
+
+
+def test_dnssec_malformed_dnskey_does_not_crash(monkeypatch) -> None:
+    """Garbage DNSKEY rdata → safe skip; no findings, no crash."""
+    _patch_dig(monkeypatch, {
+        "example.com|DNSKEY": "garbage line\nanother",
+        "example.com|RRSIG": "",
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="dnssec")
+    # No weak_algorithms because the malformed lines were skipped.
+    assert out["results"][0]["weak_algorithms"] == []
