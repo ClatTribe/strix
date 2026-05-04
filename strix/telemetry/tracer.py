@@ -399,6 +399,15 @@ class Tracer:
         self._targets_started: dict[str, dict[str, Any]] = {}
         self._targets_completed_emitted = False
 
+        # Roadmap §16 PR #127 — cryptographically-signed audit trail.
+        # Each event gets stamped with `prev_event_hash` + `event_hash`
+        # forming a hash chain; the terminal hash is signed at run-end
+        # if STRIX_SIGNING_KEY / STRIX_SIGNING_CMD is configured.
+        from strix.telemetry.audit_trail import GENESIS_HASH
+
+        self._last_event_hash: str = GENESIS_HASH
+        self._event_count: int = 0
+
         self.scan_results: dict[str, Any] | None = None
         self.scan_config: dict[str, Any] | None = None
         self.run_metadata: dict[str, Any] = {
@@ -496,6 +505,20 @@ class Tracer:
         return self._sanitizer.sanitize(data, key_hint=key_hint)
 
     def _append_event_record(self, record: dict[str, Any]) -> None:
+        # Roadmap §16 PR #127 — stamp each event with chain hashes
+        # BEFORE write so the on-disk record carries the chain links.
+        # Best-effort — any failure falls back to writing the unchained
+        # record so observability doesn't depend on the audit-trail
+        # subsystem being healthy.
+        try:
+            from strix.telemetry.audit_trail import stamp_event_record
+
+            stamp_event_record(record, prev_event_hash=self._last_event_hash)
+            self._last_event_hash = record.get("event_hash") or self._last_event_hash
+            self._event_count += 1
+        except Exception:  # noqa: BLE001
+            logger.debug("audit-chain stamping failed", exc_info=True)
+
         try:
             append_jsonl_record(self.events_file_path, record)
         except OSError:
@@ -2173,6 +2196,32 @@ class Tracer:
                     )
             except (OSError, TypeError):
                 logger.warning("Failed to write run_meta.json", exc_info=True)
+
+            # Roadmap §16 PR #127 — cryptographically-signed audit trail.
+            # Sign the chain's terminal hash (recorded via per-event
+            # `event_hash` field on every events.jsonl line) at run-end.
+            # No-op when STRIX_SIGNING_KEY / STRIX_SIGNING_CMD aren't set
+            # — chain hash is still recorded so a wrapper that has a key
+            # can verify retroactively. Writes `run.signature.json` only
+            # when run completion is being marked (avoids partial-state
+            # signatures on early exits).
+            if mark_complete:
+                try:
+                    from strix.telemetry.audit_trail import sign_chain_terminal
+
+                    signature_block = sign_chain_terminal(self._last_event_hash)
+                    signature_block["event_count"] = int(self._event_count)
+                    signature_block["run_id"] = self.run_id
+                    signature_block["run_name"] = self.run_name
+                    signature_file = run_dir / "run.signature.json"
+                    with signature_file.open("w", encoding="utf-8") as f:
+                        json.dump(
+                            signature_block, f, indent=2, ensure_ascii=False,
+                        )
+                except (OSError, TypeError):
+                    logger.warning("Failed to write run.signature.json", exc_info=True)
+                except Exception:  # noqa: BLE001
+                    logger.debug("audit-trail signing failed", exc_info=True)
 
             # Persist the check summary so downstream consumers can render
             # negative-coverage assertions ("we tested X for Y, clean") without
