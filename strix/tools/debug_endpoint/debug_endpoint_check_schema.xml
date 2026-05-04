@@ -1,0 +1,57 @@
+<tools>
+  <tool name="debug_endpoint_check">
+    <description>Probe a URL for verbose-error / debug-mode bleed. Three deterministic probe families:
+
+**1. Parametric debug toggles** — replays the baseline URL with `?debug=1`, `?debug=true`, `?DEBUG=true`, `?_debug=1`, `?trace=1`, `?XDEBUG_SESSION_START=phpstorm`, `?wsdl`, `?test=1`. Each response is scanned for stack-trace markers (`Traceback (most recent call last):`, `at Class.method(File.java:42)`, `.php on line N`, `.rb:42:in`, `Whoops\Run`, `Werkzeug Debugger`, `&lt;symfony-profiler`, `DEBUG = True`, `X-Debug-Token`) AND framework debug headers (`X-Debug-Token`, `X-Symfony-Cache`, `X-Runtime`, `X-Powered-By`). New trace markers + debug header = **high** CWE-200 (full debug surface exposed). New marker OR debug header alone = **medium** CWE-200 (toggle respected, less internals leaked yet).
+
+**2. Framework debug pages** — GETs ~40 canonical paths at the host root: `/__debug__/` (Django), `/_profiler/` `/_wdt/` (Symfony), `/actuator/*` (Spring Boot — env, health, heapdump, mappings, configprops, beans, loggers, threaddump, metrics, info), `/server-status` `/server-info` (Apache), `/console` `/h2-console`, `/_ah/instances` (App Engine), `/heapdump` `/dump` `/env` `/configprops` `/trace` `/info` `/health` `/metrics`, `/debug/pprof/` `/debug/vars` (Go), `/_admin/`, `/api-docs` `/swagger-ui` `/v2/api-docs` `/v3/api-docs` `/openapi.json` (Swagger), `/graphql` `/graphiql`, `/grafana/api/health`, `/prometheus/api/v1/status/config`. Body matched against canonical-page markers (Symfony Profiler title, Spring `_links` JSON, Apache mod_status title, H2 Console title, Swagger UI title, GraphiQL title, Prometheus `# HELP` lines, Java HPROF magic, etc.). 2xx/3xx + marker match = **medium** CWE-200 (debug page reachable unauthenticated). Per-label dedup so the 14 actuator paths emit one finding per matched label, not 14.
+
+**3. Error-trigger payloads** — appends `?strix_probe=&lt;payload&gt;` with single-quote (`'`), unmatched paren (`(`), JSON-syntax-bait (`{"a":}`), null-byte (`%00`), oversized (1500 chars). Response scanned for trace markers absent from the baseline. Match = **low** CWE-200 (verbose error within app's error template).
+
+Per-family dedup: parametric and error-trigger families emit at most one finding per host (the first matching probe wins); framework family deduplicates by canonical-label so each framework page is reported at most once.
+
+Skip cases:
+- Baseline GET non-2xx/3xx → parametric + error-trigger families skip (can't measure delta against an error baseline). Framework-page family still runs (those don't depend on the deep target's baseline).
+- `--exclude-path` blocks the probe URL → skipped silently.
+
+**Safety**:
+- Read-only (GET only, no follow-redirects, no body-mutating verbs).
+- Probe artifacts use `strix_probe=` query param so target logs are clearly auditable.
+- Per-probe response capped at 64KiB to bound memory.
+- Composes with cluster-A safety (`--exclude-path` / `--rate-limit` / `--auth-*`).
+- All findings carry `description_plain` + `recommended_action` + `verification_status=needs_review`. Recommendations target each framework's specific debug-disable knob (Django `DEBUG = False`, Symfony `APP_DEBUG=0`, Spring `management.endpoints.web.exposure.include=health`, Rails `config.consider_all_requests_local = false`, Apache `&lt;Location /server-status&gt; Require local`).</description>
+    <parameters>
+      <parameter name="target_url" type="string" required="true">
+        <description>URL to probe. Bare hostnames are auto-prefixed with `https://`. Examples: `https://app.example.com/api/users`, `https://api.example.com/v1/profile`, `https://app.example.com/`. Framework-debug-page family always probes the host root regardless of the URL's path.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-probe timeout in seconds. Default 10.</description>
+      </parameter>
+      <parameter name="skip_framework_pages" type="bool" required="false">
+        <description>When True, only the parametric-toggle and error-trigger families run (no host-root debug-page crawl). Useful when the host root has already been audited and you're sweeping a specific deep URL. Default `False`.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target_url, target_host, baseline: {status, body_length, skipped, error?, trace_markers}, parametric_probes: [{param, url, status, body_length, new_trace_markers, debug_header, skipped}, ...], framework_probes: [{path, label, url, status, body_length, matched_markers, skipped}, ...], error_probes: [{label, url, status, body_length, new_trace_markers, skipped}, ...], findings_emitted}.
+
+The agent should follow up by manually fetching any high-severity finding's URL with verbose curl (`curl -i`) to confirm the framework debug header and the stack-trace content; high findings should be triaged before the run ends because a single full-debug-mode bleed often surfaces credentials or internal hostnames in environment dumps.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<debug_endpoint_check>
+<parameter=target_url>https://app.example.com/api/users</parameter>
+</debug_endpoint_check>
+
+<debug_endpoint_check>
+<parameter=target_url>https://api.example.com/v1/profile</parameter>
+<parameter=skip_framework_pages>true</parameter>
+</debug_endpoint_check>
+
+<debug_endpoint_check>
+<parameter=target_url>https://app.example.com/</parameter>
+<parameter=timeout>20</parameter>
+</debug_endpoint_check>
+]]>
+    </example_usage>
+  </tool>
+</tools>
