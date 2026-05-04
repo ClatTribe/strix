@@ -1,0 +1,102 @@
+<tools>
+  <tool name="csrf_check">
+    <description>Probe a state-changing form for CSRF posture weaknesses. Replays the form with each of the standard CSRF-bypass mutations and flags variants the server accepts.
+
+**Probe matrix** (each compared against a baseline submission with the legitimate token):
+
+**Token-bypass family** (only when token field is detected/supplied):
+- `token_removed` — omit the CSRF field entirely
+- `token_empty` — send empty value
+- `token_mutated` — flip the last character
+- `token_random` — replace with CSPRNG-random of similar length
+
+**Token replay** — same legitimate token submitted twice (one-time-ness check)
+
+**Origin/Referer family**:
+- `origin_attacker` — `Origin: https://strix-&lt;nonce&gt;.evil.example`
+- `origin_removed` — omit `Origin` header (presence-only validators bypassed by no-header)
+- `origin_null` — `Origin: null` (sandboxed iframes / data: URIs)
+- `referer_attacker` — `Referer: https://strix-&lt;nonce&gt;.evil.example/`
+
+**Double-submit cookie family** (only when token cookie name is supplied/detected):
+- `double_submit_mismatch` — token cookie left intact; form-field token mutated. Accepted = the cookie/form comparison is broken.
+
+**Token field auto-detection** lexicon: `csrfmiddlewaretoken` (Django), `authenticity_token` (Rails), `__RequestVerificationToken` (ASP.NET), `_token` (Laravel), `_csrf` (Express csurf / NestJS), `csrf_token`, `csrf`, `anti_csrf_token`, `csrftoken`, `xsrf_token`. Override via `token_field` parameter.
+
+**Token cookie auto-detection** lexicon: `csrftoken`, `csrf-token`, `XSRF-TOKEN`, `_csrf`, `_xsrf`, `csrf`. Override via `token_cookie` parameter.
+
+**Acceptance heuristic**: same status class (2xx/3xx) AND body length within ±25% of baseline AND not a stock 401/403/405/429.
+
+**Per-class dedup** so 4 token-bypass mutations emit at most one "missing token validation" finding, not four.
+
+Severity:
+- **High** CWE-352 — token removed/empty/mutated/random accepted; OR `Origin: attacker` accepted; OR double-submit-cookie mismatch accepted.
+- **Medium** CWE-352 — `Origin` removed accepted; OR `Origin: null` accepted; OR `Referer: attacker` accepted (without other CSRF defense).
+- **Low** CWE-352 — token replay accepted (one-time-ness violation).
+
+Skip cases:
+- Baseline submission with the legitimate token returns non-2xx/3xx → `inconclusive=True` (the form description is wrong; operator needs to fix the field map or the auth).
+- `--exclude-path` blocks the URL → graceful no-op.
+
+**Safety**:
+- All probes are sent with the operator's supplied form fields and cookies; no extra exfiltration vectors.
+- Probe attacker host gets unique random `strix-&lt;nonce&gt;.evil.example` prefix per run for log auditability.
+- 64KiB response body cap.
+- Composes with cluster-A safety (`--exclude-path` / `--rate-limit` / `--auth-*`).
+- All findings carry severity-tailored `description_plain` + `recommended_action` (double-submit cookie + per-form unique CSRF token; reject requests without `Origin` or with `Origin` not in allow-list; reject mismatched / re-used tokens; rotate token on each form render; use `__Host-` cookie prefix for double-submit) and `verification_status=needs_review` since `2xx` doesn't always mean the side-effect happened (framework may return `200` for unhandled requests).
+
+**Caveat for destructive forms**: this tool DOES dispatch the form's state-changing request (multiple times). Don't run against production unless the form is a non-destructive read endpoint — use staging or a dedicated test account.</description>
+    <parameters>
+      <parameter name="target_url" type="string" required="true">
+        <description>URL the form posts to. Bare hostnames are auto-prefixed with `https://`. Examples: `https://app.example.com/profile/update`, `https://api.example.com/v1/transfers`.</description>
+      </parameter>
+      <parameter name="method" type="string" required="false">
+        <description>HTTP method. Default `POST`. Use `PUT`, `PATCH`, `DELETE` for REST APIs, or `GET` for state-changing-via-GET endpoints (rare but real).</description>
+      </parameter>
+      <parameter name="fields" type="object" required="false">
+        <description>Form field name → value map. Should include the CSRF token field with its current legitimate value. The token field is auto-detected via the framework lexicon (override with `token_field`).</description>
+      </parameter>
+      <parameter name="token_field" type="string" required="false">
+        <description>Override for the CSRF token field name (when auto-detection is wrong or the field uses a custom name).</description>
+      </parameter>
+      <parameter name="token_cookie" type="string" required="false">
+        <description>Override for the CSRF token cookie name. When set, the double-submit-cookie mismatch probe is enabled. Auto-detected from the `cookies` map via the framework lexicon if not supplied.</description>
+      </parameter>
+      <parameter name="cookies" type="object" required="false">
+        <description>Cookie name → value map sent with each request. Cluster-A `--auth-cookie` env layers on top. Set the CSRF token cookie here when probing double-submit pattern.</description>
+      </parameter>
+      <parameter name="content_type" type="string" required="false">
+        <description>Override the default `application/x-www-form-urlencoded`. Set to `application/json` for JSON APIs.</description>
+      </parameter>
+      <parameter name="extra_headers" type="object" required="false">
+        <description>Additional headers (e.g. CSRF tokens carried in headers like `X-CSRF-Token`).</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-probe timeout in seconds. Default 10.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target_url, target_host, method, token_field, token_cookie, baseline: {status, status_class, body_length, error?, skipped?}, probes: [{label, class_, status, body_length, accepted, finding_severity}, ...], findings_emitted, inconclusive?, reason?}.
+
+The agent should follow up high-severity findings by manually verifying the side-effect actually happened (was the resource really updated? did the new value persist?) before treating the finding as confirmed exploitable — `2xx` doesn't always mean the server processed the request as intended.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<csrf_check>
+<parameter=target_url>https://app.example.com/profile/update</parameter>
+<parameter=method>POST</parameter>
+<parameter=fields>{"csrfmiddlewaretoken": "abc123XYZ", "email": "user@example.com"}</parameter>
+<parameter=cookies>{"sessionid": "...", "csrftoken": "abc123XYZ"}</parameter>
+</csrf_check>
+
+<csrf_check>
+<parameter=target_url>https://api.example.com/v1/transfers</parameter>
+<parameter=method>POST</parameter>
+<parameter=content_type>application/json</parameter>
+<parameter=fields>{"_csrf": "tokenvalue", "amount": "1", "to": "recipient"}</parameter>
+<parameter=extra_headers>{"X-CSRF-Token": "tokenvalue"}</parameter>
+</csrf_check>
+]]>
+    </example_usage>
+  </tool>
+</tools>
