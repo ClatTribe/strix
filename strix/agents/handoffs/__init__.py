@@ -24,6 +24,12 @@ The validators mirror the `finding_contract` pattern from §8.0:
 errors mean "this artifact is non-canonical", warns mean "advisory".
 """
 
+from .code_map import (
+    CodeMapViolation,
+    has_canonical_errors as code_map_has_canonical_errors,
+    load_code_map,
+    validate_code_map,
+)
 from .surface_map import (
     SurfaceMapViolation,
     has_canonical_errors,
@@ -39,11 +45,15 @@ from .webapp_surface_map import (
 
 
 __all__ = [
+    "CodeMapViolation",
     "SurfaceMapViolation",
     "WebappSurfaceMapViolation",
+    "code_map_has_canonical_errors",
     "has_canonical_errors",
+    "load_code_map",
     "load_surface_map",
     "load_webapp_surface_map",
+    "validate_code_map",
     "validate_surface_map",
     "validate_webapp_surface_map",
     "webapp_has_canonical_errors",
