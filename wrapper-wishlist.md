@@ -554,3 +554,40 @@ side rendering / integration surface for the next batch shipped in PRs
 - Engine PRs informing §9: #41, #42, #44, #46, #47, #48, #49, #52, #53, #55, #56, #57, #58, #59, #60, #61, #62, #63, #64, #65, #66, #67, #68, #69, #71, #72, #73, #74, #75, #76, #77, #78, #79, #80, #81
 - Engine PRs informing §10-§11: #98 (cross-tool dedup + detected_by), #99 (reachability scoring), #100 (SRI audit), #101 (CSV-formula injection), #102 (race-condition prober), #103 (compliance control mapping + data classification + posture), #104 (per-event token usage + run.heartbeat + exit-code contract)
 - Engine PRs informing §12: #106 (stable lowercase severity), #107 (agent + target context on `tool.execution.*`), #108 (DOM-XSS static probe), #109 (cross-subdomain cookie/JWT scoping), #110 (DNS hygiene bundle — DKIM expansion + IDN homographs + HTTP/HTTPS asymmetry + IPv6/AAAA)
+- Engine PRs informing §13: #112 (LLM retry backoff + `llm.retry_attempted`), #113 (`--max-cost` / `--max-input-tokens` self-exit + `run.terminated`), #114 (SIGTERM/SIGINT graceful cancel + `run.cancelled`), #115 (zero-FP `secrets_scan`), #116 (WebSocket handshake audit), #117 (`--branch <ref>`), #118 (`finding.dismissed` event + `dismiss_finding` tool), #119 (DNSSEC algorithm strength + RRSIG hygiene), #120 (SVCB / HTTPS DNS records), #121 (`--quiet` mode), #122 (DNS rebinding feasibility), #123 (`--surface-map-only` recon-only mode), #124 (CIDR / IP-range targets)
+
+---
+
+## 13. Wrapper-side companions to engine PRs #112–#124
+
+This section adds the wrapper-side rendering / integration surface for
+the §4 resilience + §7-§8 zero-FP detector batch shipped in PRs
+#112–#124.
+
+### 13.1 Resilience + cost gating (engine #112, #113, #114)
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **Live "upstream is rate-limited" banner.** When an `llm.retry_attempted` event fires, surface a non-blocking banner showing the upstream status code, retry attempt N/M, and ETA-of-next-retry. Today the wrapper shows nothing while strix is sleeping through a 45s backoff — operators wonder "is it stuck?" | [#112](https://github.com/ClatTribe/strix/pull/112) — `llm.retry_attempted` event with `{attempt, max_retries, wait_seconds, status_code, error_type}`. | Live-pane banner; auto-dismiss on next `llm.request.completed`. |
+| ⬜ | **Cost-cap configurator UI.** Per-target / per-org budget input that propagates to `--max-cost` and `--max-input-tokens` on scan launch. Reads back `run.terminated{reason: "budget_exceeded"}` events to flip the run-status-card to "stopped: budget" with a "raise budget" CTA. | [#113](https://github.com/ClatTribe/strix/pull/113) — `run.terminated` event + `EXIT_BUDGET_EXCEEDED (3)`. | Wrapper config layer + run-status renderer. |
+| ⬜ | **Cancel button → SIGTERM.** Wire the wrapper's "stop scan" button to send SIGTERM (not SIGKILL) and trust the contract: strix flushes events, emits `run.cancelled`, exits 143. Status card flips to "cancelled" with no half-written state. | [#114](https://github.com/ClatTribe/strix/pull/114) — `run.cancelled` event + `EXIT_SIGTERM (143)`. | Wrapper UI + process-control layer. |
+
+### 13.2 Zero-FP detectors (engine #115, #116, #118, #119, #120, #122)
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **Secret-scan rotation playbook card.** Each finding from `secrets_scan` gets a vendor-specific rotation playbook ("Rotate AWS access key: aws iam create-access-key …", "Rotate GitHub PAT: …"). Engine emits the masked snippet so the wrapper renders the playbook without the secret value. | [#115](https://github.com/ClatTribe/strix/pull/115) — `secrets_scan` finding with `code_locations[].snippet` (masked). | Per-finding action panel; vendor-keyed playbook templates. |
+| ⬜ | **WebSocket cohort visualisation.** When a scan probes ≥2 WebSocket endpoints (CDN + main app + admin app), render a matrix: rows = endpoints, columns = (auth-on-upgrade, origin enforcement, subprotocol echo). Cells colour-coded green/yellow/red. Operators see consistency / inconsistency at a glance. | [#116](https://github.com/ClatTribe/strix/pull/116) — `websocket_audit` records per endpoint. | Per-cohort dashboard widget. |
+| ⬜ | **"Investigated and dismissed" panel.** Render `finding.dismissed` events on the per-target dashboard alongside confirmed findings. Group by `dismissal_reason`; let operators filter "show me all `framework_default_blocked` dismissals" to validate that the agent's ruling is consistent with the operator's threat model. | [#118](https://github.com/ClatTribe/strix/pull/118) — `finding.dismissed` event with closed-enum `dismissal_reason`. | Per-target dashboard tab; filterable list. |
+| ⬜ | **DNSSEC posture badge.** Per-domain card: ✅ DNSSEC modern algorithm + signatures fresh; ⚠ deprecated algo OR signature ≤7 days; 🔴 broken algo OR signatures expired. Pulls from `_check_dnssec` result + finding emission. | [#119](https://github.com/ClatTribe/strix/pull/119) — DNSSEC algorithm + RRSIG hygiene findings. | Per-domain dashboard card. |
+| ⬜ | **Service-binding (SVCB/HTTPS) info card.** Render the structured `_check_svcb_https` output: ALPN protocols, ipvN hints, ECH presence, target aliases. Highlight when ipvN hints could leak origin IPs that should stay behind the CDN. | [#120](https://github.com/ClatTribe/strix/pull/120) — `_check_svcb_https` returns structured `{alpn, ech_configured, ipv4hints, ipv6hints, targets}`. | Per-domain dashboard card. |
+| ⬜ | **DNS rebinding × SSRF correlation.** When the engine emits both a "DNS rebinding feasibility" finding (#122) AND any SSRF-shaped finding on the same target, render a correlation badge: "Combined risk: rebinding + SSRF sink → internal-network pivot". Helps operators prioritise the pair. | [#122](https://github.com/ClatTribe/strix/pull/122) + existing SSRF detectors. | Wrapper correlation engine; per-target risk renderer. |
+
+### 13.3 CLI / operator ergonomics (engine #117, #121, #123, #124)
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **Branch picker on repository scan.** UI dropdown listing the repository's branches; selection passes through as `--branch <ref>`. The wrapper records the resolved ref on the scan-history card so operators can compare scans across branches. | [#117](https://github.com/ClatTribe/strix/pull/117) — `--branch` plumbed through to `target_info.details.branch`. | Wrapper scan-launch UI; scan-history renderer. |
+| ⬜ | **CI mode preset.** "Run as CI" toggle that enables `--quiet` + `--non-interactive` + sane defaults. Generates a copy-pasteable CI snippet (GitHub Actions / GitLab CI). | [#121](https://github.com/ClatTribe/strix/pull/121) — `--quiet` flag. | Wrapper preset UI. |
+| ⬜ | **"Recon nightly, scan daily" pattern.** Pre-built workflow template that runs `--surface-map-only` on a nightly cron AND triggers targeted scans against the discovered surface daily. Reads `surface_map.json` to drive the targeted scans' scope. | [#123](https://github.com/ClatTribe/strix/pull/123) — `--surface-map-only` mode. | Wrapper workflow templates. |
+| ⬜ | **CIDR target preview.** When operator types a CIDR target, preview the host count BEFORE submission ("/24 = 256 hosts; /20 = 4096 (cap)"). Reject inline at the safety cap. | [#124](https://github.com/ClatTribe/strix/pull/124) — engine accepts CIDR with `num_hosts` in target details. | Wrapper target-input validation. |
