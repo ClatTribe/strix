@@ -463,7 +463,11 @@ def _run_dir() -> Path | None:
 
 def _autoload_surface_map(surface_map_path: str | None) -> dict[str, Any] | None:
     """Load surface_map.json from caller-supplied path, or from the
-    current run dir."""
+    current run dir.
+
+    Roadmap §8.0: validates against the handoff-schema contract on
+    read. Canonical-contract errors are logged but the data is still
+    returned (data loss is worse than blocking the consumer)."""
     candidate: Path | None = None
     if surface_map_path:
         candidate = Path(surface_map_path)
@@ -474,10 +478,24 @@ def _autoload_surface_map(surface_map_path: str | None) -> dict[str, Any] | None
     if candidate is None or not candidate.exists():
         return None
     try:
-        with candidate.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError, TypeError):
-        return None
+        from strix.agents.handoffs.surface_map import load_surface_map
+
+        data, violations = load_surface_map(candidate)
+        if violations:
+            errors = [v.code for v in violations if v.severity == "error"]
+            if errors:
+                logger.warning(
+                    "surface_map.json has canonical-contract errors on read: %s",
+                    errors,
+                )
+        return data
+    except Exception:  # noqa: BLE001
+        logger.debug("surface_map handoff validation failed; falling back to raw load", exc_info=True)
+        try:
+            with candidate.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError, TypeError):
+            return None
 
 
 # ---------------------------------------------------------------------------

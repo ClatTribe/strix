@@ -181,7 +181,13 @@ def _triage_subdomain(host: str) -> dict[str, Any]:
 
 def _write_surface_map(domain: str, surface_map: dict[str, Any]) -> Path | None:
     """Persist surface_map.json next to vulnerabilities.json. Returns the path
-    or None if no tracer / no run_dir is available."""
+    or None if no tracer / no run_dir is available.
+
+    Roadmap §8.0: validates the surface_map against the documented
+    handoff-schema contract BEFORE write. Violations are logged + emitted
+    as a `handoff.shape_violation` event. Never blocks the write — data
+    loss is worse than ugly data; the contract surfaces drift to the
+    wrapper / GRC consumers."""
     try:
         from strix.telemetry.tracer import get_global_tracer
     except ImportError:
@@ -189,6 +195,41 @@ def _write_surface_map(domain: str, surface_map: dict[str, Any]) -> Path | None:
     tracer = get_global_tracer()
     if tracer is None:
         return None
+
+    # Validate against the handoff-schema contract.
+    try:
+        from strix.agents.handoffs.surface_map import (
+            has_canonical_errors,
+            validate_surface_map,
+            violations_to_dict_list,
+        )
+
+        violations = validate_surface_map(surface_map)
+        if violations:
+            violation_dicts = violations_to_dict_list(violations)
+            is_canonical = not has_canonical_errors(violations)
+            try:
+                tracer._emit_event(
+                    "handoff.shape_violation",
+                    payload={
+                        "artifact": "surface_map.json",
+                        "domain": domain,
+                        "violations": violation_dicts,
+                        "is_canonical": is_canonical,
+                    },
+                    status="warning" if is_canonical else "error",
+                    source="strix.handoffs",
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("handoff event emit failed", exc_info=True)
+            if not is_canonical:
+                logger.warning(
+                    "surface_map.json has canonical-contract errors: %s",
+                    [v["code"] for v in violation_dicts if v["severity"] == "error"],
+                )
+    except Exception:  # noqa: BLE001
+        logger.debug("surface_map validation failed", exc_info=True)
+
     try:
         run_dir = tracer.get_run_dir()
         path = run_dir / "surface_map.json"
