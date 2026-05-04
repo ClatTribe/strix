@@ -871,24 +871,24 @@ The strategic priority list. Picks the top 10 cross-cutting items from §1-§17 
 
 **Read order matters.** Items 1-3 unblock everything else. 4-7 round out the coverage breadth. 8-10 close the OODA-loop tightness.
 
-| Rank | Item | Tracked at | Why this clears the bar |
-|---|---|---|---|
-| **1** | **Validator agent — spin-up-app dynamic exploit (white-box → black-box bridge)** | §7.1 + §17.1 | Single biggest finding-quality lever still on the table. Today ~70% of findings ship as `needs_review`; verified findings are the bug-bounty / pentest deliverable bar. |
-| **2** | **Closed FP feedback loop (Phase 1 of the RLHF pipeline)** | designed in [`docs/rlhf-design.md`](docs/rlhf-design.md), Phase 1 unshipped | Without the loop, every FP costs human triage time forever; with it, today's FPs become tomorrow's auto-dismissals. Compounding effect. |
-| **3** | **HAR / Burp project ingestion** | §7.0 | First move on every real pen-test. Without it, Strix can't service engagements that start with proxy-recorded auth flows. |
-| **4** | **Reasoning-trace + continuous-confidence + counter-proof per finding** | §12 #686 / #687 / #691 | Substrate for FP classification, RL training, and auditor-grade explainability. Three small rows; together they unlock dimension 2. |
-| **5** | **Multi-language taint (JS/TS first, then Go/Java)** | §7.1 / §17.1 | Python AST taint shipped (#96). Modern codebases are polyglot; without JS/TS specifically, web-app SAST coverage stays incomplete. |
-| **6** | **`llm_app` target type — OWASP LLM Top 10 probe** | §17.3 | Fastest-growing security-budget line item in 2025-26. Strix dismissing it is an obvious credibility gap. |
-| **7** | **Public benchmark + regression suite (CI on every PR)** | §17.5 #829 | Without it, "AI security engineer" claims are unfalsifiable. Marketing parity demands measurable evidence. |
-| **8** | **Browser-automation specialist (DOM-XSS verify, CSP, postMessage, OAuth/OIDC, SAML)** | §7.0 | Most `needs_review` web-app findings need a real browser to graduate to `verified`. Without it, verified-rate stays low. |
-| **9** | **Active-hypothesis shared state across sub-agents (§17.6) + per-phase agent-self-audit (§17.6)** | §17.6 | OODA-loop tightness — without these the multi-specialist architecture is N independent generalists, not a coordinated team. |
-| **10** | **Tool-output provenance / trust-taint (§17.6)** | §17.6 | Security of the agent itself. The trust boundary every agentic security tool ignores. Pairs with #84 indirect-prompt-injection sanitisation. |
+| Rank | Item | Tracked at | Status | Why this clears the bar |
+|---|---|---|---|---|
+| **1** | **Validator agent — spin-up-app dynamic exploit (white-box → black-box bridge)** | §7.1 + §17.1 | unshipped | Single biggest finding-quality lever still on the table. Today ~70% of findings ship as `needs_review`; verified findings are the bug-bounty / pentest deliverable bar. |
+| **2** | **Closed FP feedback loop (Phase 1 of the RLHF pipeline)** | designed in [`docs/rlhf-design.md`](docs/rlhf-design.md) | ✅ shipped (#142) | Without the loop, every FP costs human triage time forever; with it, today's FPs become tomorrow's auto-dismissals. Compounding effect. |
+| **3** | **HAR / Burp project ingestion** | §7.0 | ✅ shipped (#141) | First move on every real pen-test. Without it, Strix can't service engagements that start with proxy-recorded auth flows. |
+| **4** | **Reasoning-trace + continuous-confidence + counter-proof per finding** | §12 #686 / #687 / #691 | ✅ shipped (#137) | Substrate for FP classification, RL training, and auditor-grade explainability. Three small rows; together they unlock dimension 2. |
+| **5** | **Multi-language taint (JS/TS first, then Go/Java)** | §7.1 / §17.1 | unshipped | Python AST taint shipped (#96). Modern codebases are polyglot; without JS/TS specifically, web-app SAST coverage stays incomplete. |
+| **6** | **`llm_app` target type — OWASP LLM Top 10 probe** | §17.3 | unshipped | Fastest-growing security-budget line item in 2025-26. Strix dismissing it is an obvious credibility gap. |
+| **7** | **Public benchmark + regression suite (CI on every PR)** | §17.5 #829 | unshipped | Without it, "AI security engineer" claims are unfalsifiable. Marketing parity demands measurable evidence. |
+| **8** | **Browser-automation specialist (DOM-XSS verify, CSP, postMessage, OAuth/OIDC, SAML)** | §7.0 | unshipped | Most `needs_review` web-app findings need a real browser to graduate to `verified`. Without it, verified-rate stays low. |
+| **9** | **Active-hypothesis shared state across sub-agents (§17.6) + per-phase agent-self-audit (§17.6)** | §17.6 | ✅ shipped (#138 + #140) | OODA-loop tightness — without these the multi-specialist architecture is N independent generalists, not a coordinated team. |
+| **10** | **Tool-output provenance / trust-taint (§17.6)** | §17.6 | ✅ shipped (#139) | Security of the agent itself. The trust boundary every agentic security tool ignores. Pairs with #84 indirect-prompt-injection sanitisation. |
 
 **Priority interpretation:**
 
-- **5 of 10 are in §17.1 / §12 / §17.3 / §17.5** — already tracked, just unshipped. Shipping them is execution work.
-- **5 of 10 are previously-untracked** — added to roadmap as part of this gap audit (HAR ingestion, browser-automation specialist, three §17.6 architectural items).
-- **The blind-spot pattern** is concentrated on (a) inputs the agent should accept (HAR, threat model), (b) browser-shaped probes that need a real Chromium, (c) architectural OODA glue that makes specialists compose.
+- **5 of 10 shipped** (rows 2, 3, 4, 9, 10) — RLHF Phase 1, HAR/Burp ingest, finding-quality signals, active-hypotheses + self-audit, tool-output provenance. The architectural OODA glue + the credibility-substrate are now in place.
+- **5 of 10 still unshipped** (rows 1, 5, 6, 7, 8) — coverage breadth (JS/TS taint, llm_app, browser-automation specialist) + the validator agent + the public regression suite. These remain the bar to clear.
+- **The blind-spot pattern** in what's still unshipped is concentrated on (a) coverage breadth (more languages, more target types, real Chromium for DOM probes), (b) the verified-rate lever (validator agent), and (c) the falsifiability/measurement story (public benchmark).
 
 **Wrapper-side dependencies:** items 2, 4, and 7 have direct wrapper counterparts ([`wrapper-wishlist.md`](wrapper-wishlist.md) §12-§14). The full picture only lands when both sides ship.
 
