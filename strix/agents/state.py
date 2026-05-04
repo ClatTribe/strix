@@ -33,6 +33,22 @@ class AgentState(BaseModel):
     final_result: dict[str, Any] | None = None
     max_iterations_warning_sent: bool = False
 
+    # Roadmap §8.0: per-sub-agent budget enforcement.
+    # Each budget is an upper bound; 0 / None means "no limit". When
+    # any limit is exceeded, `should_stop()` returns True and the
+    # outer loop emits an `agent.budget_exceeded` event with the
+    # specific reason. This prevents one runaway specialist from
+    # starving the rest of the team.
+    max_input_tokens: int = 0           # 0 = unlimited
+    max_output_tokens: int = 0          # 0 = unlimited
+    max_cost_usd: float = 0.0           # 0.0 = unlimited
+    time_budget_seconds: int = 0        # 0 = unlimited
+    input_tokens_consumed: int = 0
+    output_tokens_consumed: int = 0
+    cost_consumed_usd: float = 0.0
+    budget_exceeded_reason: str | None = None
+    budget_exceeded_event_emitted: bool = False
+
     messages: list[dict[str, Any]] = Field(default_factory=list)
     context: dict[str, Any] = Field(default_factory=dict)
 
@@ -93,7 +109,73 @@ class AgentState(BaseModel):
         self.last_updated = datetime.now(UTC).isoformat()
 
     def should_stop(self) -> bool:
-        return self.stop_requested or self.completed or self.has_reached_max_iterations()
+        return (
+            self.stop_requested
+            or self.completed
+            or self.has_reached_max_iterations()
+            or self.has_exceeded_budget()[0]
+        )
+
+    # ------------------------------------------------------------------
+    # Per-sub-agent budget enforcement (roadmap §8.0)
+    # ------------------------------------------------------------------
+
+    def record_token_usage(
+        self,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cost_usd: float = 0.0,
+    ) -> None:
+        """Add to the running budget consumption counters. Idempotent
+        in the sense that multiple calls accumulate; the budget check
+        compares the cumulative total to the limits."""
+        if input_tokens > 0:
+            self.input_tokens_consumed += int(input_tokens)
+        if output_tokens > 0:
+            self.output_tokens_consumed += int(output_tokens)
+        if cost_usd > 0:
+            self.cost_consumed_usd += float(cost_usd)
+        self.last_updated = datetime.now(UTC).isoformat()
+
+    def has_exceeded_budget(self) -> tuple[bool, str | None]:
+        """Return (exceeded, reason). When `exceeded`, `reason` is one
+        of: `max_input_tokens`, `max_output_tokens`, `max_cost_usd`,
+        `time_budget_seconds`. None when no budget is exceeded."""
+        if self.max_input_tokens > 0 and self.input_tokens_consumed >= self.max_input_tokens:
+            return (True, "max_input_tokens")
+        if self.max_output_tokens > 0 and self.output_tokens_consumed >= self.max_output_tokens:
+            return (True, "max_output_tokens")
+        if self.max_cost_usd > 0 and self.cost_consumed_usd >= self.max_cost_usd:
+            return (True, "max_cost_usd")
+        if self.time_budget_seconds > 0 and self.start_time:
+            try:
+                started = datetime.fromisoformat(self.start_time)
+                elapsed = (datetime.now(UTC) - started).total_seconds()
+                if elapsed >= self.time_budget_seconds:
+                    return (True, "time_budget_seconds")
+            except (ValueError, TypeError):
+                pass
+        return (False, None)
+
+    def set_budget(
+        self,
+        *,
+        max_input_tokens: int | None = None,
+        max_output_tokens: int | None = None,
+        max_cost_usd: float | None = None,
+        time_budget_seconds: int | None = None,
+    ) -> None:
+        """Update budget limits. None means "leave unchanged"; 0 means
+        "explicit no-limit". Lead agents call this when spawning a
+        sub-agent."""
+        if max_input_tokens is not None:
+            self.max_input_tokens = max(0, int(max_input_tokens))
+        if max_output_tokens is not None:
+            self.max_output_tokens = max(0, int(max_output_tokens))
+        if max_cost_usd is not None:
+            self.max_cost_usd = max(0.0, float(max_cost_usd))
+        if time_budget_seconds is not None:
+            self.time_budget_seconds = max(0, int(time_budget_seconds))
 
     def is_waiting_for_input(self) -> bool:
         return self.waiting_for_input
@@ -155,6 +237,7 @@ class AgentState(BaseModel):
         return self.messages
 
     def get_execution_summary(self) -> dict[str, Any]:
+        exceeded, reason = self.has_exceeded_budget()
         return {
             "agent_id": self.agent_id,
             "agent_name": self.agent_name,
@@ -173,4 +256,16 @@ class AgentState(BaseModel):
             "total_errors": len(self.errors),
             "has_errors": len(self.errors) > 0,
             "max_iterations_reached": self.has_reached_max_iterations() and not self.completed,
+            # Roadmap §8.0 budget surfacing.
+            "budget": {
+                "max_input_tokens": self.max_input_tokens,
+                "max_output_tokens": self.max_output_tokens,
+                "max_cost_usd": self.max_cost_usd,
+                "time_budget_seconds": self.time_budget_seconds,
+                "input_tokens_consumed": self.input_tokens_consumed,
+                "output_tokens_consumed": self.output_tokens_consumed,
+                "cost_consumed_usd": round(self.cost_consumed_usd, 4),
+                "exceeded": exceeded,
+                "exceeded_reason": reason,
+            },
         }
