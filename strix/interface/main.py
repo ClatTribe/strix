@@ -386,6 +386,21 @@ Examples:
         ),
     )
 
+    # Roadmap §3 PR #117 — `--branch <ref>` for repository targets.
+    parser.add_argument(
+        "--branch",
+        type=str,
+        default=None,
+        help=(
+            "Branch / tag / commit to clone (e.g. `develop`, `staging`, "
+            "`v1.2.3`). Default: repository's default branch. "
+            "Adds `--branch <ref> --single-branch` to the underlying git "
+            "clone — keeps the working tree small and ensures the scan "
+            "doesn't pick up content from unrelated branches. Only "
+            "applies to `repository` targets."
+        ),
+    )
+
     parser.add_argument(
         "--config",
         type=str,
@@ -797,8 +812,19 @@ def main() -> None:  # noqa: PLR0912, PLR0915
         if target_info["type"] == "repository":
             repo_url = target_info["details"]["target_repo"]
             dest_name = target_info["details"].get("workspace_subdir")
-            cloned_path = clone_repository(repo_url, args.run_name, dest_name)
+            cloned_path = clone_repository(
+                repo_url,
+                args.run_name,
+                dest_name,
+                branch=getattr(args, "branch", None),
+            )
             target_info["details"]["cloned_repo_path"] = cloned_path
+            # Roadmap §3 PR #117: surface the resolved ref so consumers
+            # can confirm what was scanned. The actual ref is discoverable
+            # via `git -C <cloned_path> rev-parse HEAD`; we record the
+            # caller's intent here.
+            if getattr(args, "branch", None):
+                target_info["details"]["branch"] = args.branch
 
     args.local_sources = collect_local_sources(args.targets_info)
     try:

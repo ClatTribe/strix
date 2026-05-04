@@ -1271,7 +1271,20 @@ def rewrite_localhost_targets(targets_info: list[dict[str, Any]], host_gateway: 
 
 
 # Repository utilities
-def clone_repository(repo_url: str, run_name: str, dest_name: str | None = None) -> str:
+def clone_repository(
+    repo_url: str,
+    run_name: str,
+    dest_name: str | None = None,
+    *,
+    branch: str | None = None,
+) -> str:
+    """Clone `repo_url` into a temp dir tagged with `run_name`.
+
+    Roadmap §3 PR #117: when `branch` is supplied (CLI `--branch`),
+    pass `--branch <ref>` + `--single-branch` to git so we clone
+    that ref directly. Single-branch keeps the working tree small
+    and avoids accidentally scanning unrelated branches' content.
+    """
     console = Console()
 
     git_executable = shutil.which("git")
@@ -1291,15 +1304,21 @@ def clone_repository(repo_url: str, run_name: str, dest_name: str | None = None)
     if clone_path.exists():
         shutil.rmtree(clone_path)
 
+    clone_args = [git_executable, "clone"]
+    if branch:
+        # `--single-branch` reduces transfer size + ensures we
+        # don't scan branches the user didn't ask for.
+        clone_args.extend(["--branch", branch, "--single-branch"])
+    clone_args.extend([repo_url, str(clone_path)])
+
     try:
-        with console.status(f"[bold cyan]Cloning repository {repo_url}...", spinner="dots"):
+        status_label = f"[bold cyan]Cloning repository {repo_url}"
+        if branch:
+            status_label += f" (branch {branch})"
+        status_label += "..."
+        with console.status(status_label, spinner="dots"):
             subprocess.run(  # noqa: S603
-                [
-                    git_executable,
-                    "clone",
-                    repo_url,
-                    str(clone_path),
-                ],
+                clone_args,
                 capture_output=True,
                 text=True,
                 check=True,
