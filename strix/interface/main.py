@@ -569,7 +569,26 @@ Examples:
         ),
     )
 
+    # Roadmap §4 PR #121 — --quiet for server-side / non-TTY usage.
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        default=False,
+        help=(
+            "Suppress Rich panels and ANSI escapes from console output. "
+            "events.jsonl, vulnerabilities.json, and run_meta.json are written "
+            "exactly as before — only the human-facing TTY output is silenced. "
+            "Forces --non-interactive (the TUI is incompatible with quiet mode). "
+            "Use for server-side / CI runs where the terminal is non-TTY and "
+            "Rich panels become escape-code pollution in logs."
+        ),
+    )
+
     args = parser.parse_args()
+
+    # --quiet forces --non-interactive (the TUI requires a tty).
+    if args.quiet:
+        args.non_interactive = True
 
     if args.instruction and args.instruction_file:
         parser.error(
@@ -609,6 +628,12 @@ Examples:
 
 
 def display_completion_message(args: argparse.Namespace, results_path: Path) -> None:
+    # Roadmap §4 PR #121 — --quiet skips the Rich panel entirely.
+    # events.jsonl / vulnerabilities.json / run_meta.json are
+    # untouched (they're tracer-driven file writes, not console).
+    if getattr(args, "quiet", False):
+        return
+
     console = Console()
     tracer = get_global_tracer()
 
@@ -940,6 +965,11 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             console.print("[red]--max-input-tokens must be a positive integer.[/red]")
             sys.exit(2)
         os.environ["STRIX_MAX_INPUT_TOKENS_RUN"] = str(args.max_input_tokens)
+
+    # Roadmap §4 PR #121 — propagate --quiet via env so any sub-
+    # process / sandbox inherits it and suppresses Rich panels.
+    if getattr(args, "quiet", False):
+        os.environ["STRIX_QUIET"] = "1"
 
     crawl_steering: list[str] = []
     if args.seed_url:
