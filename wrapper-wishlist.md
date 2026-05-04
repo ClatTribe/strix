@@ -452,6 +452,49 @@ Items are grouped to match `overall.md` §4 (configuration → live-scan → rep
 
 ---
 
+## 10. Zero-FP rendering — surface the engine's deterministic signals
+
+After PR #98-#104, the engine emits new structured signals the wrapper should
+render to give developers / non-tech operators an at-a-glance view of finding
+quality. The data is already in `vulnerabilities.json` + `events.jsonl`; this
+section is purely about wrapper-side rendering.
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **`detected_by` confidence pip on each finding card.** When a finding has `detection_count ≥ 2`, render a green "high confidence" pip with a tooltip listing the detectors (`semgrep + sql_injection`). | [#98](https://github.com/ClatTribe/strix/pull/98) — `detected_by[]`, `detection_count`, `finding.detection_corroborated` event | Per-finding card; live update on `finding.detection_corroborated` event arrival. |
+| ⬜ | **Reachability badge.** "Found in dead code" / "On auth path" / "Route reachable (1-hop)". Pull from `reachability_score` + `reachability_evidence`. Findings demoted to `info` from a higher severity should show the original severity crossed-out alongside the demotion reason. | [#99](https://github.com/ClatTribe/strix/pull/99) — `reachability_score`, `reachability_evidence`, `severity_demoted_from`, `severity_promoted_from_reachability`, `finding.reachability_scored` event | Per-finding card; sortable / filterable column in the findings table. |
+| ⬜ | **Supply-chain dependency panel.** Render `external_scripts[]` and `external_links[]` from `sri_audit` runs — third-party CDN list with red/green per-asset SRI status. The polyfill.io supply-chain context belongs in a tooltip ("if this CDN is compromised…"). | [#100](https://github.com/ClatTribe/strix/pull/100) — `sri_audit` returns the structured asset arrays. | Per-target dashboard card; "Supply chain" tab. |
+| ⬜ | **CSV-injection probe-matrix table.** Show the 5 payload classes × `payload_in_export` boolean grid. Helps operators see at a glance which payload classes the export endpoint sanitises and which it doesn't. | [#101](https://github.com/ClatTribe/strix/pull/101) — `csv_injection_check.probes[]`. | Per-finding evidence panel. |
+| ⬜ | **Race-condition concurrency visualisation.** "Round 1: 7/30 succeeded; Round 2: 8/30 succeeded" rendered as paired histograms. Makes the N+1-verification story legible to non-technical users. | [#102](https://github.com/ClatTribe/strix/pull/102) — `race_condition_check.rounds[]` with per-request status histogram. | Per-finding evidence panel. |
+| ⬜ | **Compliance overlay panel.** Toggle (PCI / SOC2 / HIPAA / ISO 27001 / NIST 800-53) renders findings grouped by the controls they implicate. Pulls from `compliance_controls` (engine #103). Pair with a "compliance gap" view: which controls have ZERO findings (i.e. unverified). | [#103](https://github.com/ClatTribe/strix/pull/103) — `compliance_controls`, `data_classification`, `compliance_posture`. | Top-level dashboard tab; per-finding section. |
+| ⬜ | **Data-class breach-reporting flag.** When `data_classification ∈ {pii, phi, pci, credentials}` AND severity ≥ medium, render a "BREACH NOTIFICATION REQUIRED?" prompt linking to the customer's IR runbook. GDPR Art. 33 / HIPAA require notification within 72 hours. | [#103](https://github.com/ClatTribe/strix/pull/103) — `data_classification`. | Per-finding card; daily-summary email. |
+| ⬜ | **Live cost meter.** Stream `llm.request.completed` events; render a live $-spent counter + per-agent breakdown. Budget alert when `cumulative.cost` crosses configurable threshold (e.g. 80% of `--max-cost`). | [#104](https://github.com/ClatTribe/strix/pull/104) — `llm.request.completed` event with cumulative cost. | Top-bar widget during scan; alert banner at threshold. |
+| ⬜ | **Stuck-scan banner.** When `run.heartbeat` events stop arriving for >120 seconds, render a "scan idle" banner with a "cancel" button. The Strix engine's heartbeat throttle is 60s, so 120s = two missed beats. | [#104](https://github.com/ClatTribe/strix/pull/104) — `run.heartbeat` event. | Top-bar widget during scan. |
+| ⬜ | **Exit-code-aware completion screen.** Read the documented exit codes for the post-scan summary: 0 = ✅ clean, 1 = ❌ scan failed, 2 = ⚠ findings, 3 = 💸 budget exceeded, 130/143 = 🛑 cancelled. Each maps to a distinct UI state with an action prompt ("Review findings" / "Investigate failure" / "Top up budget" / "Resume"). | [#104](https://github.com/ClatTribe/strix/pull/104) — `strix.interface.exit_codes`. | Post-scan summary screen. |
+| ⬜ | **Compliance posture dashboard widget.** Render `compliance_posture.cadence_status` ("In compliance" / "Overdue") + `audit_log_retention_days` + `days_since_last_scan`. Auditor-friendly at-a-glance view. | [#103](https://github.com/ClatTribe/strix/pull/103) — `run_meta.json.compliance_posture`. Wrapper computes `days_since_last_scan` by reading prior runs. | Compliance dashboard tab. |
+
+## 11. Wrapper-side complements to engine zero-FP detectors
+
+These items are the wrapper-side companions to the engine's zero-FP work. Some
+extend findings with customer-context the engine deliberately doesn't carry
+(threat-model adjustments, data-class overrides). Others provide the operator
+flow needed to act on findings (auto-PR a fix, file a Jira ticket, route to
+the right team).
+
+| | Item | Notes |
+|---|---|---|
+| ⬜ | **Auto-PR the SRI fix from a missing-integrity finding.** GitHub PR that adds the `integrity=` + `crossorigin=` attributes to the offending tag with a generated `sha384-...` hash. The engine emits `external_scripts[]` with full asset URLs; the wrapper computes the hash and writes the PR. | Engine has the data; wrapper has the GitHub-app integration. |
+| ⬜ | **Auto-PR the CSV-injection fix.** Wrap each round-tripped field write site with the `'`-prefix sanitiser. Detect language from the codebase (Python / Java / Node) and propose the matching idiomatic fix. | Higher complexity than SRI; needs code-mod tooling. |
+| ⬜ | **Race-condition fix-pattern selector.** Per-language guidance: "for PostgreSQL use `SELECT ... FOR UPDATE`; for MongoDB use `findAndModify` with `upsert: false`; for Redis use SETNX." Render after every race finding. | Static guidance; the engine's `recommended_action` covers it but the wrapper can structure it as an interactive picker. |
+| ⬜ | **Customer threat-model context overlay.** Let users tag specific endpoints / files as "auth path" / "billing path" / "admin path"; the wrapper boosts the engine's reachability score with this user-supplied weight. The engine #99 reachability score is generic; the wrapper adds customer-specific. | Wrapper-side: engine doesn't know what's "billing-critical" without operator input. |
+| ⬜ | **Data-class override.** Some endpoints handle PII even when the engine's classifier doesn't catch it. Let users pin `data_classification` per endpoint; the wrapper applies the override on render. | Operator-only knowledge. |
+| ⬜ | **Compliance-control evidence pack.** The §10 "Compliance overlay panel" lets operators select controls and emits a PDF / DOCX evidence pack mapping each finding to the framework's control row. Suitable to hand to an auditor without further work. | Renders the engine's `compliance_controls` field as the per-finding evidence trail. |
+| ⬜ | **Exit-code-driven CI gate config.** Templates for GitHub Actions / GitLab CI / CircleCI that read Strix's exit codes and gate on configurable thresholds. Default: block on `1` / `3`; warn on `2` (findings); succeed on `0`. | Engine ships the contract; wrapper ships the CI templates. |
+| ⬜ | **Heartbeat-driven slack-pipeline notification.** When `run.heartbeat` shows `seconds_idle > N`, post an alert to a configured Slack/Teams webhook. | Wrapper-only — no engine work. |
+| ⬜ | **Cost-anomaly detector.** Cross-scan: track `cumulative.cost` per scan. When a scan exceeds 2× the rolling-30-day average, emit a wrapper-side anomaly notification. | Wrapper-only: requires history, which is a wrapper concern. |
+
+---
+
 ## Reference
 
 - Engine roadmap (source of truth): [`roadmap.md`](roadmap.md)
@@ -459,3 +502,4 @@ Items are grouped to match `overall.md` §4 (configuration → live-scan → rep
 - Fork-build guide: [`deploy.md`](deploy.md)
 - Engine PRs covered by §1-§8: #19, #20, #21, #22, #23, #24, #25, #26, #27, #28, #29, #30, #31, #32, #33, #34, #35, #36
 - Engine PRs informing §9: #41, #42, #44, #46, #47, #48, #49, #52, #53, #55, #56, #57, #58, #59, #60, #61, #62, #63, #64, #65, #66, #67, #68, #69, #71, #72, #73, #74, #75, #76, #77, #78, #79, #80, #81
+- Engine PRs informing §10-§11: #98 (cross-tool dedup + detected_by), #99 (reachability scoring), #100 (SRI audit), #101 (CSV-formula injection), #102 (race-condition prober), #103 (compliance control mapping + data classification + posture), #104 (per-event token usage + run.heartbeat + exit-code contract)
