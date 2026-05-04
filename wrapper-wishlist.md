@@ -495,6 +495,56 @@ the right team).
 
 ---
 
+## 12. Wrapper-side companions to engine PRs #106–#110
+
+The §10/§11 sections covered PRs #98–#104. This section adds the wrapper-
+side rendering / integration surface for the next batch shipped in PRs
+#106–#110.
+
+### 12.1 Stable lowercase severity (engine #106)
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **Drop the wrapper's defensive `severity.toLowerCase()` calls.** The engine's machine-readable surfaces (CSV / JSON / events.jsonl) now emit lowercase severity by contract. The wrapper has been defensively `.toLowerCase()`-ing on read; that's now a no-op cost it can drop. | [#106](https://github.com/ClatTribe/strix/pull/106) — every machine-readable surface emits canonical lowercase severity. Markdown still uppercases for display. | Wrapper renderer simplification + a unit test that pins the contract on the wrapper side too (so an upstream regression surfaces fast). |
+| ⬜ | **CI severity-gate config templates.** Now that `severity == "high"` is a stable string match, ship GitHub Actions / GitLab CI / CircleCI templates that gate on configurable severity thresholds via a one-liner `jq` filter on `vulnerabilities.json`. | Same. | Wrapper-side CI templates. |
+
+### 12.2 Agent / target context on tool.execution.* (engine #107)
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **Live-activity pane: "Agent X (auth-attacker) on api.example.com running send_request"** rendered from the new `actor.{agent_name, agent_category, target}` keys on every `tool.execution.*` event. Today the wrapper's live pane shows `agent-1234` + tool name; the new context lets it render a human-readable phrase. | [#107](https://github.com/ClatTribe/strix/pull/107) — `agent_name`, `agent_category`, `target` on every `tool.execution.started` / `tool.execution.updated`. | Live-activity pane redesign — three-column layout (agent role, target, tool). |
+| ⬜ | **Per-target tool-call timeline.** Group `tool.execution.*` events by `actor.target` to render a per-target timeline — wrapper user can filter "show only what ran against admin.example.com". | Same — `target` is now a queryable field on every event. | Wrapper analytics + filter UI. |
+| ⬜ | **Per-specialist activity dashboard.** Group by `actor.agent_category` (the §1 sub-agent role tag — `auth-attacker` / `ssrf-scanner` / etc.) to render "what each specialist did" per scan. Pairs with engine #89 specialist registry. | Same — `agent_category` is now a queryable field on every event. | Wrapper analytics. |
+
+### 12.3 DOM-XSS static probe (engine #108)
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **Code-snippet preview on DOM-XSS findings.** Render `code_locations[].snippet` (±1 line context, 320-char-clipped per line) inline on the finding card. Highlight the source token (`location.hash`) and the sink token (`innerHTML`) with distinct colors. | [#108](https://github.com/ClatTribe/strix/pull/108) — `code_locations: [{file, line, snippet}]` with annotated source/sink. | Per-finding evidence panel; syntax-highlighter widget. |
+| ⬜ | **"Verify in browser" button.** When a `dom_xss_static_probe` finding has `verification_status=pattern_match`, surface a "Validate via headless browser" action that re-runs the engine's §8.2 Validator on just that finding. | The Validator (§8.2 / §17.1) graduates pattern_match → verified. | Wrapper triage button + engine call. |
+| ⬜ | **Per-source / per-sink coverage map.** From the bundle of DOM-XSS findings across a scan, render a 13×10 source×sink matrix showing which combinations the scan exercised. Helps auditors see what was checked. | The engine's `matches[]` carries `source` + `sink_class`. | Wrapper coverage viz. |
+
+### 12.4 Cross-subdomain cookie / JWT scoping (engine #109)
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **Cohort-scope diagram.** Per scan with ≥2 in-scope subdomains, render a cohort diagram: nodes = subdomains, edges = "shared session cookie" / "JWT accepted". Findings from `cookie_jwt_scoping_check` paint the edges — red for high (cross-acceptance), orange for medium, gray for info. | [#109](https://github.com/ClatTribe/strix/pull/109) — `records[]` with `kind`, `host`, `accepted_by`, etc. | Cohort visualization on the per-target dashboard. |
+| ⬜ | **Cookie-attribute matrix.** For every cookie name shared across the cohort, render a Domain × SameSite × Secure × HttpOnly × scope grid per host. Inconsistencies (the §109 medium finding) jump out visually. | Same — `records[]`. | Cohort dashboard matrix. |
+| ⬜ | **JWT cross-acceptance N+1 verification rendering.** Render the baseline-401 + authed-200 + body-shape-diff evidence trail per cross-acceptance finding. Makes the "this is a real finding, not a guess" story legible. | Engine emits all four data points (`baseline_status`, `authed_status`, body comparison) on the record. | Per-finding evidence panel. |
+| ⬜ | **"Drop Domain= attribute" auto-PR.** When a session cookie has parent-domain scoping, generate a PR that removes the `Domain=` attribute (so the cookie defaults to host-only). Detect framework (Express / Django / Flask / Rails) and propose the framework-idiomatic edit. | Engine record has `host` + `cookie_name` + `domain_attr`. | Wrapper auto-fix integration. |
+
+### 12.5 DNS hygiene bundle (engine #110)
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **Subdomain scheme badge.** Per subdomain row in the surface map, render a colored badge: 🟢 `https_only` / 🟢 `both` / 🔴 `http_only` / 🟡 `ipv6_only` / ⚪ `neither`. Pulls from `scheme_asymmetry` on every triage result. | [#110](https://github.com/ClatTribe/strix/pull/110) — `scheme_asymmetry` field on triage results. | Surface-map dashboard column. |
+| ⬜ | **IPv6 column on the subdomain table.** Show the `ipv6` field next to `ip`. v6-only subdomains (rare today, growing) get visual highlight. | [#110](https://github.com/ClatTribe/strix/pull/110) — `ipv6` field on every triage result. | Surface-map table column. |
+| ⬜ | **DKIM selector-coverage chart.** Per email domain, render which of the ~45 selectors were probed and which (if any) returned a key. Highlights gaps in the customer's DKIM coverage. | [#110](https://github.com/ClatTribe/strix/pull/110) — expanded `_DKIM_SELECTORS`; `dkim` check returns `selectors_found`. | Email-security dashboard widget. |
+| ⬜ | **IDN-homograph warning banner.** When `org_fingerprint` resolves a punycode candidate (`xn--…`), render a top-banner warning: "An IDN homograph of your domain is registered. Consider defensive registration / SRP." | [#110](https://github.com/ClatTribe/strix/pull/110) — punycode candidates flow through the existing typosquat-resolved finding pipeline. | Wrapper banner + per-finding decoration. |
+| ⬜ | **HSTS preload nudge from HTTP-only findings.** When the engine emits a CWE-319 finding for a subdomain serving plaintext HTTP, surface a "Submit `<apex>` to the Chrome HSTS preload list" CTA — that's the long-term cohort-wide fix. | [#110](https://github.com/ClatTribe/strix/pull/110) — `cleartext_transmission` category finding. | Per-finding action button + link to https://hstspreload.org/. |
+
+---
+
 ## Reference
 
 - Engine roadmap (source of truth): [`roadmap.md`](roadmap.md)
@@ -503,3 +553,4 @@ the right team).
 - Engine PRs covered by §1-§8: #19, #20, #21, #22, #23, #24, #25, #26, #27, #28, #29, #30, #31, #32, #33, #34, #35, #36
 - Engine PRs informing §9: #41, #42, #44, #46, #47, #48, #49, #52, #53, #55, #56, #57, #58, #59, #60, #61, #62, #63, #64, #65, #66, #67, #68, #69, #71, #72, #73, #74, #75, #76, #77, #78, #79, #80, #81
 - Engine PRs informing §10-§11: #98 (cross-tool dedup + detected_by), #99 (reachability scoring), #100 (SRI audit), #101 (CSV-formula injection), #102 (race-condition prober), #103 (compliance control mapping + data classification + posture), #104 (per-event token usage + run.heartbeat + exit-code contract)
+- Engine PRs informing §12: #106 (stable lowercase severity), #107 (agent + target context on `tool.execution.*`), #108 (DOM-XSS static probe), #109 (cross-subdomain cookie/JWT scoping), #110 (DNS hygiene bundle — DKIM expansion + IDN homographs + HTTP/HTTPS asymmetry + IPv6/AAAA)
