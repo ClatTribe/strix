@@ -1,8 +1,12 @@
 import inspect
+import logging
 import os
 from typing import Any
 
 import httpx
+
+
+logger = logging.getLogger(__name__)
 
 from strix.config import Config
 from strix.telemetry import posthog
@@ -247,6 +251,21 @@ def _format_tool_result(tool_name: str, result: Any) -> tuple[str, list[dict[str
             start_part = final_result_str[:4000]
             end_part = final_result_str[-4000:]
             final_result_str = start_part + "\n\n... [middle content truncated] ...\n\n" + end_part
+
+    # Trust-boundary: scan for prompt-injection markers in the tool
+    # output before the LLM sees it. Emits a tool.output.injected
+    # event when patterns are found; redacts inline so the agent
+    # sees the redaction marker rather than the attacker payload.
+    # See strix/agents/safety/output_sanitizer.py.
+    try:
+        from strix.agents.safety.output_sanitizer import sanitize_tool_output
+
+        final_result_str, _detections = sanitize_tool_output(
+            final_result_str, tool_name=tool_name,
+        )
+    except Exception:  # noqa: BLE001
+        # Sanitiser must NEVER fail the tool call. Log + continue.
+        logger.debug("sanitize_tool_output failed", exc_info=True)
 
     observation_xml = (
         f"<tool_result>\n<tool_name>{tool_name}</tool_name>\n"
