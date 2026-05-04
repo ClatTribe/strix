@@ -307,6 +307,41 @@ class LLM:
             self._total_stats.output_tokens += output_tokens
             self._total_stats.cached_tokens += cached_tokens
             self._total_stats.cost += cost
+            self._total_stats.requests += 1
+
+            # Roadmap §5 — emit per-event token usage so wrappers can
+            # render live cost meters + enforce mid-flight cost caps.
+            # Fail-open if the tracer isn't available.
+            try:
+                from strix.telemetry.tracer import get_global_tracer
+
+                tracer = get_global_tracer()
+                if tracer is not None:
+                    tracer._emit_event(
+                        "llm.request.completed",
+                        payload={
+                            "model": getattr(self.config, "canonical_model", None)
+                                or getattr(self.config, "model", None),
+                            "agent_id": self.agent_id,
+                            "agent_name": self.agent_name,
+                            "input_tokens": int(input_tokens),
+                            "output_tokens": int(output_tokens),
+                            "cached_tokens": int(cached_tokens),
+                            "cost": round(float(cost), 6),
+                            "cumulative": {
+                                "input_tokens": int(self._total_stats.input_tokens),
+                                "output_tokens": int(self._total_stats.output_tokens),
+                                "cached_tokens": int(self._total_stats.cached_tokens),
+                                "cost": round(float(self._total_stats.cost), 6),
+                                "requests": int(self._total_stats.requests),
+                            },
+                        },
+                        actor={"id": self.agent_id} if self.agent_id else None,
+                        status="ok",
+                        source="strix.llm",
+                    )
+            except Exception:  # noqa: BLE001, S110
+                pass  # noqa: PIE790
 
         except Exception:  # noqa: BLE001, S110  # nosec B110
             pass

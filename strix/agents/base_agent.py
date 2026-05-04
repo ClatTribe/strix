@@ -206,6 +206,72 @@ class BaseAgent(metaclass=AgentMeta):
             # Budget tracking must NEVER break the agent loop.
             pass
 
+    def _maybe_emit_heartbeat(self, tracer: Any | None) -> None:
+        """Emit `run.heartbeat` at most once every 60 seconds with
+        last-activity timestamps. Roadmap §4. Wrappers tail this
+        event to detect stuck scans without polling.
+        """
+        if tracer is None:
+            return
+        try:
+            from datetime import UTC, datetime
+
+            now = datetime.now(UTC)
+            last_hb_str = self.state.last_heartbeat_emitted_at
+            if last_hb_str:
+                try:
+                    last_hb = datetime.fromisoformat(last_hb_str)
+                    elapsed = (now - last_hb).total_seconds()
+                    if elapsed < 60.0:
+                        return
+                except (ValueError, TypeError):
+                    pass
+
+            # Compute seconds_idle = since the most recent meaningful
+            # activity. Only tool calls + LLM requests count;
+            # last_updated covers bookkeeping (state mutations /
+            # message-add) and would mask genuine idleness.
+            most_recent: datetime | None = None
+            for ts in (
+                self.state.last_tool_call_at,
+                self.state.last_llm_request_at,
+            ):
+                if not ts:
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(ts)
+                    if most_recent is None or parsed > most_recent:
+                        most_recent = parsed
+                except (ValueError, TypeError):
+                    pass
+            seconds_idle = (
+                int((now - most_recent).total_seconds())
+                if most_recent else 0
+            )
+
+            tracer._emit_event(
+                "run.heartbeat",
+                payload={
+                    "agent_id": self.state.agent_id,
+                    "agent_name": self.state.agent_name,
+                    "iteration": self.state.iteration,
+                    "last_activity_at": (
+                        most_recent.isoformat() if most_recent else None
+                    ),
+                    "seconds_idle": seconds_idle,
+                    "last_tool_call_at": self.state.last_tool_call_at,
+                    "last_tool_call_name": self.state.last_tool_call_name,
+                    "last_llm_request_at": self.state.last_llm_request_at,
+                },
+                actor={"id": self.state.agent_id},
+                status="info",
+                source="strix.run",
+            )
+            self.state.last_heartbeat_emitted_at = now.isoformat()
+        except Exception:  # noqa: BLE001
+            # Heartbeat must NEVER break the agent loop.
+            pass
+
     def _add_to_agents_graph(self) -> None:
         from strix.tools.agents_graph import agents_graph_actions
 
@@ -312,6 +378,11 @@ class BaseAgent(metaclass=AgentMeta):
                 # has up-to-date counters. Emit `agent.budget_exceeded`
                 # event the first time a budget is exceeded.
                 self._sync_budget_from_llm(tracer)
+
+                # Roadmap §4: emit `run.heartbeat` at most once every
+                # 60 seconds so wrappers can detect stuck scans
+                # without polling.
+                self._maybe_emit_heartbeat(tracer)
 
                 if should_finish is None and self.interactive:
                     await self._enter_waiting_state(tracer, text_response=True)

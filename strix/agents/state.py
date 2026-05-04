@@ -49,6 +49,14 @@ class AgentState(BaseModel):
     budget_exceeded_reason: str | None = None
     budget_exceeded_event_emitted: bool = False
 
+    # Roadmap §4: run.heartbeat tracking. The agent loop checks
+    # whether enough time has elapsed since the last heartbeat
+    # emission and fires `run.heartbeat` with these timestamps.
+    last_tool_call_at: str | None = None
+    last_llm_request_at: str | None = None
+    last_heartbeat_emitted_at: str | None = None
+    last_tool_call_name: str | None = None
+
     messages: list[dict[str, Any]] = Field(default_factory=list)
     context: dict[str, Any] = Field(default_factory=dict)
 
