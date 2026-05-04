@@ -1,0 +1,61 @@
+<tools>
+  <tool name="nvd_lookup">
+    <description>Look up a CVE in NIST NVD for authoritative CVSS / CWE / CPE data. Third 🔴 critical item from the §10 expert-pentester gap audit. Augments `cve_lookup` (#61, OSV-backed) — NVD often has cleaner, CNA-assigned canonical CVSS scores than OSV's GHSA-derived heuristic scores.
+
+API: `GET https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=<CVE>`. Free, no key required (anonymous tier rate-limited to 5 requests/30s); `STRIX_NVD_KEY` (free at nvd.nist.gov/developers) raises the limit to 50 requests/30s.
+
+Extracts:
+- **CVSS**: walks `cvssMetricV31` → `cvssMetricV30` → `cvssMetricV2` in preference order; prefers Type=Primary entries. Returns version, base_score, base_severity, vector_string, source, exploitability_score, impact_score.
+- **CWEs**: from `weaknesses[].description[]` filtered to canonical `CWE-<n>` ids (preserves NVD-CWE-OTHER / NVD-CWE-NOINFO sentinels).
+- **CPE matches**: from `configurations[].nodes[].cpeMatch[]` — vendor:product:version ranges with versionStart/End-Including/Excluding. Capped at 30 entries.
+- **References**: capped at 10, with source + tags.
+- **Description**: prefers English; capped at 1000 chars.
+
+Severity tuning (from CVSS baseScore + baseSeverity):
+- **Critical** — baseScore ≥ 9.0 OR baseSeverity = CRITICAL
+- **High** — baseScore 7.0-8.9
+- **Medium** — baseScore 4.0-6.9
+- **Low** — baseScore 0.1-3.9
+- *(no finding)* — score == 0 OR no CVSS data
+
+Findings tagged `category=vulnerable_dependency`, `cwe=<NVD CWE>` (defaults to CWE-1104 when NVD has no CWE), with the CVE attached so the tracer's KEV enrichment auto-decorates the finding. `verification_status=verified` since NVD is the authoritative source.
+
+NVD 404 / empty `vulnerabilities` array → success with `no_data=True`, NOT failure. The CVE simply isn't in NVD's index yet.
+
+Cache: per-CVE JSON cache under `~/.strix/nvd_cache/`, 24-hour TTL. Stale-cache served on network failure (fail-open with `error` populated). Cache hit re-emits findings from cached data. Disable with `STRIX_NVD_NO_CACHE=1`.
+
+MITRE techniques: T1592.002 (Software fingerprint) + T1588.006 (Obtain Vulnerabilities) — surfaced via #66 ATT&CK tagging.
+
+Composes with cluster-A safety: rate-limit applies; `--exclude-path` doesn't apply (URL is services.nvd.nist.gov, not the customer's domain).
+
+Pairs naturally with `cve_lookup` (#61): when OSV-derived severity disagrees with NVD-NVD, NVD wins for prioritisation.</description>
+    <parameters>
+      <parameter name="cve" type="string" required="true">
+        <description>CVE ID (e.g. `CVE-2021-44228`). Case-insensitive; normalised to upper-case. Returns `success=False` for malformed input.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-request timeout in seconds. Default 15.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, cve, queried_at, from_cache, published, last_modified, status, source_identifier, description, cvss: {version, base_score, base_severity, vector_string, source, type, exploitability_score, impact_score}, cwes: [CWE-XXX, ...], cpe_matches: [{criteria, vulnerable, versionStart/End-Including/Excluding}, ...], references: [{url, source, tags}, ...], severity, findings_emitted, error?, no_data?}.
+
+The agent should:
+1. Use NVD's CVSS score as the canonical severity for the finding when both `cve_lookup` (#61) and `nvd_lookup` return data — NVD's CNA-assigned scores supersede OSV's heuristic ones.
+2. Cross-reference `cpe_matches` against detected tech stacks to confirm exposure (e.g. when `fingerprint_tech_stack` reports `nginx 1.18.0`, check whether the NVD CPE range matches).
+3. Note that `no_data=True` means "this CVE isn't in NVD yet" (often fresh CVEs lag NVD by hours-to-days), NOT "this CVE is invalid" — fall back to `cve_lookup` (#61) or `cve_intel_search` (#67) for fresh intel.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<nvd_lookup>
+<parameter=cve>CVE-2021-44228</parameter>
+</nvd_lookup>
+
+<nvd_lookup>
+<parameter=cve>cve-2024-12345</parameter>
+<parameter=timeout>30</parameter>
+</nvd_lookup>
+]]>
+    </example_usage>
+  </tool>
+</tools>
