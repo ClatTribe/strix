@@ -1,0 +1,64 @@
+<tools>
+  <tool name="greynoise_classify">
+    <description>Classify an IPv4 address as targeted-attacker / opportunistic-noise / benign-known via GreyNoise. Second 🔴 critical item from the §10 expert-pentester gap audit. Highest-leverage IR-triage signal: distinguishes opportunistic-internet-noise IPs (mass scanners like Shodan/Censys) from targeted attackers.
+
+GreyNoise's core insight is the `noise` flag:
+
+| Signal | Meaning |
+|---|---|
+| `noise: true, classification: benign` | Known-benign mass scanner (Shodan, Censys, search-engine bots) |
+| `noise: true, classification: malicious` | Mass scanner that's also been observed performing malicious activity |
+| `noise: true, classification: unknown` | Mass scanner — not yet classified |
+| `noise: false, classification: malicious` | **Targeted attacker** (this IP isn't mass-scanning everyone, it's specifically interacting with you) |
+| `noise: false, classification: benign` | Targeted-but-benign (legitimate enterprise scanner) |
+| no record | GreyNoise has no observation of this IP |
+
+Plus the **RIOT** ("Rule It Out") signal: when an IP is on a known-benign list (Apple iCloud relay, Cloudflare, Akamai edge, Microsoft 365), the response carries `riot: true` with `name`/`category` describing what the IP belongs to. RIOT lets the agent suppress alerts for demonstrably benign infrastructure.
+
+Severity tuning:
+- **High** (CWE-453, malicious_target) — `noise: false, classification: malicious` (**targeted attacker**).
+- **Medium** (CWE-453) — `noise: true, classification: malicious` (opportunistic but flagged-malicious mass scanner).
+- *(no finding)* — `noise: true, classification: benign` (Shodan etc.), RIOT-listed benign IPs, or no observation. Treated as background internet noise that shouldn't generate triage work.
+
+Auth:
+- Community v3 API works **without a key** (anonymous tier).
+- `STRIX_GREYNOISE_KEY` (paid tier) raises rate limit + adds richer per-IP context.
+- RIOT v2 API **requires the paid key** — silently skipped without it (recorded as `riot.skipped=True`).
+
+Cache: per-IP JSON cache under `~/.strix/greynoise_cache/`, 6-hour TTL. Stale-cache served when both Community + RIOT fail (fail-open with `error` populated). Cache hit re-emits findings from cached data. Disable with `STRIX_GREYNOISE_NO_CACHE=1`.
+
+Each finding carries severity-tailored `description_plain` + `recommended_action` (high → investigate as targeted attack, correlate with logs, block at perimeter, cross-reference VT; medium → lower-priority block at WAF/firewall, add to denylist). `verification_status=needs_review` since classifications shift as GreyNoise observes more activity.
+
+MITRE technique: T1596 (Search Open Technical Databases).
+
+Composes with cluster-A safety: rate-limit applies; `--exclude-path` doesn't apply (URLs are api.greynoise.io, not the customer's domain).</description>
+    <parameters>
+      <parameter name="ip" type="string" required="true">
+        <description>IPv4 address (private/loopback/link-local rejected; IPv6 not supported by the GreyNoise free tier). Examples: `1.1.1.1`, `8.8.8.8`, `203.0.113.5` (would be rejected as it's a documentation range — Python's ipaddress flags it as private).</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-request timeout in seconds. Default 12.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, ip, queried_at, from_cache, community: {present, noise, classification, name, link, last_seen, riot, code, message, error?}, riot: {present, name, category, trust_level, description, last_updated, error?, skipped?, reason?}, severity, findings_emitted, error?}.
+
+The agent should:
+1. **Suppress findings** for IPs flagged as `community.noise=True, classification=benign` or `riot.present=True` — those are confirmed benign infrastructure.
+2. **Escalate** on `severity=high` (targeted-malicious) — these represent real-time attack surface.
+3. Cross-reference high-severity GreyNoise verdicts with `vt_reputation` (#71) for additional vendor consensus.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<greynoise_classify>
+<parameter=ip>1.1.1.1</parameter>
+</greynoise_classify>
+
+<greynoise_classify>
+<parameter=ip>8.8.8.8</parameter>
+<parameter=timeout>20</parameter>
+</greynoise_classify>
+]]>
+    </example_usage>
+  </tool>
+</tools>
