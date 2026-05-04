@@ -121,11 +121,12 @@ def test_all_checks_run_when_default(monkeypatch) -> None:
     _patch_dig(monkeypatch, {})  # everything missing → many findings
     out = dns_hygiene.dns_hygiene_check("example.com")
     assert out["success"] is True
-    # 15 checks total. The deeper checks (dane / bimi / dmarc_rua / spf_lookups /
-    # dkim_keys / open_resolver / dangling_ns) all early-out as inconclusive
-    # when the underlying records or NS list aren't present, so they don't add
-    # findings on a blank target.
-    assert len(out["checks_run"]) == 15
+    # 16 checks total (after PR #120 added svcb_https). The deeper
+    # checks (dane / bimi / dmarc_rua / spf_lookups / dkim_keys /
+    # open_resolver / dangling_ns / svcb_https) all early-out
+    # as inconclusive when the underlying records or NS list aren't
+    # present, so they don't add findings on a blank target.
+    assert len(out["checks_run"]) == 16
     reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
     # spf, dmarc, mta_sts, caa, dnssec all missing → 5 findings.
     assert len(reports) == 5
@@ -490,3 +491,81 @@ def test_dnssec_malformed_dnskey_does_not_crash(monkeypatch) -> None:
     out = dns_hygiene.dns_hygiene_check("example.com", checks="dnssec")
     # No weak_algorithms because the malformed lines were skipped.
     assert out["results"][0]["weak_algorithms"] == []
+
+
+# ---------------------------------------------------------------------------
+# SVCB / HTTPS DNS records (RFC 9460) — PR #120
+# ---------------------------------------------------------------------------
+
+
+def test_svcb_https_no_records_no_finding(monkeypatch) -> None:
+    _patch_dig(monkeypatch, {})
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="svcb_https")
+    assert out["results"][0]["present"] is False
+    reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
+    assert len(reports) == 0
+
+
+def test_svcb_https_record_emits_info(monkeypatch) -> None:
+    """Cloudflare-style HTTPS record with ALPN h2 + h3."""
+    _patch_dig(monkeypatch, {
+        "example.com|HTTPS": '1 . alpn="h3,h2" ipv4hint=104.16.1.1',
+        "example.com|SVCB": "",
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="svcb_https")
+    result = out["results"][0]
+    assert result["present"] is True
+    assert "h3" in result["alpn"]
+    assert "h2" in result["alpn"]
+    assert "104.16.1.1" in result["ipv4hints"]
+
+    reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
+    info = [r for r in reports if r["severity"] == "info"]
+    assert len(info) == 1
+    assert "SVCB/HTTPS" in info[0]["title"]
+
+
+def test_svcb_https_ech_configured(monkeypatch) -> None:
+    """ECH (Encrypted ClientHello) is a modern privacy feature."""
+    _patch_dig(monkeypatch, {
+        "example.com|HTTPS": '1 . alpn="h3" ech="AEf+DQBDAAAAAAAA"',
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="svcb_https")
+    assert out["results"][0]["ech_configured"] is True
+
+
+def test_svcb_https_aliasform_record(monkeypatch) -> None:
+    """AliasForm (priority 0) HTTPS record points at a target."""
+    _patch_dig(monkeypatch, {
+        "example.com|HTTPS": "0 svc.cdn.example.net.",
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="svcb_https")
+    result = out["results"][0]
+    assert result["present"] is True
+    assert "svc.cdn.example.net." in result["targets"]
+
+
+def test_svcb_https_malformed_lines_skipped(monkeypatch) -> None:
+    """Garbage lines mixed with valid records → only valid parsed."""
+    _patch_dig(monkeypatch, {
+        "example.com|HTTPS": (
+            "garbage line not a record\n"
+            "; comment line\n"
+            '1 . alpn="h2"\n'
+        ),
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="svcb_https")
+    assert out["results"][0]["present"] is True
+    assert out["results"][0]["alpn"] == ["h2"]
+
+
+def test_svcb_https_both_record_types(monkeypatch) -> None:
+    """Domain may have both SVCB and HTTPS records — count separately."""
+    _patch_dig(monkeypatch, {
+        "example.com|HTTPS": '1 . alpn="h3"',
+        "example.com|SVCB": "1 svc.example.net. port=8443",
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="svcb_https")
+    result = out["results"][0]
+    assert len(result["https_records"]) == 1
+    assert len(result["svcb_records"]) == 1

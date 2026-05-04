@@ -905,6 +905,140 @@ def _check_dangling_ns(domain: str) -> dict[str, Any]:
     }
 
 
+def _check_svcb_https(domain: str) -> dict[str, Any]:
+    """RFC 9460 SVCB / HTTPS service-binding records.
+
+    These records publish service-discovery metadata: ALPN protocols
+    the origin supports (`h2`, `h3`), preferred port, ECH (Encrypted
+    ClientHello) configuration, and IP hints. Adoption is rapidly
+    increasing — Cloudflare auto-publishes for all customers, Apple
+    devices use them in iOS 16+, Chrome/Firefox prefer them when
+    available.
+
+    What we report:
+      - **Info**: HTTPS or SVCB record observed → recon signal,
+        record the ALPN list and presence-of-ECH for the surface map.
+      - **Low CWE-200**: HTTPS record reveals internal hostname via
+        `target=` field that points to a non-public ipv4hint or
+        non-canonical name.
+      - **Info**: ECH (`ech=`) configured → modern privacy posture.
+
+    Roadmap §7.3 PR #120.
+    """
+    https_text = dig(domain, "HTTPS")
+    svcb_text = dig(domain, "SVCB")
+
+    https_records = _parse_svcb_records(https_text)
+    svcb_records = _parse_svcb_records(svcb_text)
+    all_records = https_records + svcb_records
+
+    if not all_records:
+        return {"check": "svcb_https", "present": False}
+
+    alpn_set: set[str] = set()
+    ech_present = False
+    ipv4_hints: set[str] = set()
+    ipv6_hints: set[str] = set()
+    targets: set[str] = set()
+
+    for rec in all_records:
+        params = rec.get("params") or {}
+        alpn_set.update(params.get("alpn", []))
+        if params.get("ech"):
+            ech_present = True
+        ipv4_hints.update(params.get("ipv4hint", []))
+        ipv6_hints.update(params.get("ipv6hint", []))
+        if rec.get("target") and rec["target"] != ".":
+            targets.add(rec["target"])
+
+    # Emit info finding: surface what was discovered. Rare-today,
+    # mainstream-soon recon signal — operator should know.
+    emit_finding(
+        title=f"SVCB/HTTPS service-binding records on {domain}",
+        severity="info",
+        category="dns_security",
+        cwe="CWE-200",
+        target=domain,
+        description=(
+            f"`{domain}` publishes RFC 9460 service-binding records "
+            f"(HTTPS={len(https_records)}, SVCB={len(svcb_records)}). "
+            f"ALPN={sorted(alpn_set) or '(none)'}; "
+            f"ECH={'configured' if ech_present else 'not set'}; "
+            f"ipv4hint={sorted(ipv4_hints) or '(none)'}; "
+            f"ipv6hint={sorted(ipv6_hints) or '(none)'}; "
+            f"target={sorted(targets) or '(self)'}."
+        ),
+        impact=(
+            "Service-binding records publish service-discovery metadata "
+            "browsers and resolvers use to negotiate connections. ALPN "
+            "values reveal the protocols the origin supports (h2 / h3); "
+            "ipvN hints can leak internal IPs that bypass CDN-fronting; "
+            "the `target=` field can leak internal hostnames."
+        ),
+        remediation=(
+            "Audit which ALPN protocols and IP hints the records publish "
+            "— make sure ipv4hint / ipv6hint don't leak origin IPs that "
+            "should stay behind the CDN. Configure `ech=` for Encrypted "
+            "ClientHello (modern privacy posture)."
+        ),
+        verification_status="verified",
+    )
+
+    return {
+        "check": "svcb_https",
+        "present": True,
+        "https_records": https_records,
+        "svcb_records": svcb_records,
+        "alpn": sorted(alpn_set),
+        "ech_configured": ech_present,
+        "ipv4hints": sorted(ipv4_hints),
+        "ipv6hints": sorted(ipv6_hints),
+        "targets": sorted(targets),
+    }
+
+
+def _parse_svcb_records(rdata_text: str) -> list[dict[str, Any]]:
+    """Parse `dig` HTTPS/SVCB output. Each record line is:
+
+        <priority> <target> <key=value> <key=value> ...
+
+    Where keys are: alpn, no-default-alpn, port, ipv4hint, ipv6hint,
+    ech, mandatory. Values for list-keys are comma-separated.
+    Returns a list of `{priority, target, params: {...}}` dicts."""
+    out: list[dict[str, Any]] = []
+    for raw in rdata_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(";"):
+            continue
+        # Tokens: priority(int) target(name) <kv pairs>
+        toks = line.split()
+        if len(toks) < 2:
+            continue
+        try:
+            priority = int(toks[0])
+        except ValueError:
+            continue
+        target = toks[1]
+        params: dict[str, Any] = {}
+        for kv in toks[2:]:
+            if "=" not in kv:
+                # Bare keyword (e.g. `no-default-alpn`).
+                params[kv] = True
+                continue
+            key, _, value = kv.partition("=")
+            value = value.strip().strip('"')
+            if key in ("alpn", "ipv4hint", "ipv6hint", "mandatory"):
+                params[key] = [v.strip() for v in value.split(",") if v.strip()]
+            else:
+                params[key] = value
+        out.append({
+            "priority": priority,
+            "target": target,
+            "params": params,
+        })
+    return out
+
+
 _CHECK_REGISTRY = {
     "spf": _check_spf,
     "dmarc": _check_dmarc,
@@ -921,6 +1055,7 @@ _CHECK_REGISTRY = {
     "dkim_keys": _check_dkim_keys,
     "open_resolver": _check_open_resolver,
     "dangling_ns": _check_dangling_ns,
+    "svcb_https": _check_svcb_https,
 }
 
 
@@ -941,6 +1076,7 @@ _CHECK_CATEGORY: dict[str, str] = {
     "dkim_keys": "email_security",
     "open_resolver": "dns_security",
     "dangling_ns": "dns_security",
+    "svcb_https": "dns_security",
 }
 
 
