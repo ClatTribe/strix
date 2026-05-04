@@ -374,8 +374,88 @@ After the wrapper changes land:
 
 ---
 
+## 9. Forward-looking — wrapper UX gaps surfaced by [`overall.md`](overall.md)
+
+Sections §1-§8 above are the integration delta for engine PRs #19-#36. After the §10 expert-pentester audit cycle landed (#71-#76) and the §7.2 web-app expert audit closed (#77-#81), [`overall.md`](overall.md) categorised the architecture through four lenses and surfaced wrapper-UX gaps that aren't covered above. They're collected here so each one has a tracking row; engine-side counterparts live in [`roadmap.md` §17](roadmap.md).
+
+Items are grouped to match `overall.md` §4 (configuration → live-scan → report → wrapper-AI → operational), with **§9.6** capturing gaps `overall.md` *didn't* surface but real customers ask for.
+
+### 9.1 Configuration UX
+
+| | Item | Why | Where | Effort |
+|---|---|---|---|---|
+| ⬜ | **Pre-scan profile selector.** "External recon" / "Web pentest" / "API audit" / "Domain audit" / "Compliance scan" / "Deep scan". Each maps to a `scan_mode` + tool-enable subset. Today the wrapper exposes a flat target field; should expose intent. | Today's flat `target` UI hides the configuration richness Strix supports. Profiles let non-tech users say "I want a SOC2 evidence pack" rather than tweak flags. | Wrapper config layer; sends mapped flags to Strix. | M |
+| ⬜ | **Threat-intel API-key onboarding wizard.** Walks the user through getting free keys for VT, OTX, GreyNoise, Shodan, Censys, GSB, AbuseIPDB, NVD, Perplexity, HIBP. Detects which keys are present; shows coverage tier explicitly: "you have 5/10 sources configured. Missing: GreyNoise + VT (lower IR-triage signal); Shodan + Censys (no attacker-eye-view of exposed services)." | The §10 threat-intel stack is invisible until the user knows what to configure. The wizard turns "what keys?" into "click here to register". | Wrapper UI; reads configured keys from environment / org settings. | M |
+| ⬜ | **Compliance preset toggle.** "PCI-DSS", "SOC 2 readiness", "HIPAA", "ISO 27001", "NIST 800-53". Emphasises specific finding categories in the report and adds compliance-control mappings (when the engine's §16 control-mapping rows ship). | B2B customers buy security tools to check audit boxes. The toggle makes that explicit. | Wrapper renderer + filter layer over engine's `compliance_controls` field (engine §16). | S |
+| ⬜ | **Daily-scan workflow.** Schedule recurring scans against the same target. Surface engine's `kev_diff_check` (#75) findings prominently as the daily highlight; pull `cross_target.correlation` (engine §17.1) into a dashboard widget. | Daily scans + KEV-diff + threat-feed-ingest is the single most valuable operational pattern Strix unlocks; today the wrapper doesn't expose it. | Wrapper scheduler + dashboard. | M |
+| ⬜ | **Target wizard with `--preflight` integration.** Validates URL/domain/IP/repo, runs preflight before queuing. Avoids the "scan ran 10 min and found nothing because target was down" failure. | `--preflight` (#29) ships engine-side; the wrapper should expose it before queue. | Wrapper pre-scan validator. | S |
+
+### 9.2 Live scan UX (during the run)
+
+| | Item | Why | Where | Effort |
+|---|---|---|---|---|
+| ⬜ | **OODA loop visualisation.** Render the 4-stage loop with the agent's current phase highlighted. Translates `phase.entered` events (engine §11) into a live state machine. | Operators watching a 30-min scan need a live signal. Today the wrapper's scan view is opaque until findings emit. | Wrapper UI consuming `phase.entered` / `phase.completed` events. | M |
+| ⬜ | **Tool-call ATT&CK chain visualisation.** Render each `tool.execution.started` event (with `actor.mitre_techniques` from engine #66) as an ATT&CK kill-chain visualisation. Defenders see the simulated attack path live. | The MITRE ATT&CK tagging shipped in #66 is wasted unless visualised. Defenders' SOC teams react to ATT&CK chain views, not flat tool-call logs. | Wrapper UI consuming `tool.execution.started.actor.mitre_techniques`. | M |
+| ⬜ | **Per-finding live cards.** As findings emit, render in `priority_label` order with `description_plain` + `recommended_action` prominent. Hide CWE/CVE behind a "show technical details" toggle. Today the wrapper renders findings as a flat list. | Non-tech users (the wrapper's primary persona) need plain-English first; technical details on demand. | Wrapper UI. | S |
+| ⬜ | **Coverage progress bar.** From engine's `run.test_plan` (#35) + `check.completed` (#11) events, show "12/14 planned check categories complete." When categories slip to `inconclusive`, surface them prominently. | Today users can't tell whether a clean scan is "we tested everything and it's clean" or "we couldn't test half of it." | Wrapper UI consuming `run.test_plan` + `check.completed`. | S |
+| ⬜ | **Live cost meter.** When engine's per-event token usage ships (engine §5 / §17.2), show running $-cost with budget alerts. | Today users have no live cost signal. Wrapper-side budget caps (against engine `--max-cost`) need this widget. | Wrapper UI consuming per-event cost stream. | S |
+| ⬜ | **Agent-uncertain inbox.** When engine emits `agent.uncertain` (engine §17.4), wrapper surfaces an in-app prompt asking the operator to confirm/deny a high-stakes branch. If unanswered within timeout, agent proceeds with `confidence=low`. | Closes the human-in-the-loop gap for high-stakes branches without forcing every scan to be supervised. | Wrapper inbox + WebSocket / SSE channel back to engine. | M |
+
+### 9.3 Report UX (post-scan)
+
+| | Item | Why | Where | Effort |
+|---|---|---|---|---|
+| ⬜ | **Non-tech report as the default landing page.** Plain-English summary of "what was found" / "what to fix first" / "why it matters". Renders from `description_plain` + `recommended_action` + `priority_label` + `exploitation_in_wild_plain`. Today the default is a CWE/CVE-heavy markdown report. | Wrapper's primary persona is the developer / non-tech user. The default rendering should match. | Wrapper renderer. | S |
+| ⬜ | **Tech report behind a toggle.** Full CWE/CVE/CVSS/CPE/ATT&CK technique IDs for security-engineer consumers. | Two-personas-one-report. | Same renderer, alternate template. | S |
+| ⬜ | **Compliance overlay.** Cross-reference findings to PCI-DSS / SOC 2 / HIPAA / etc. controls. Pulls from engine's `compliance_controls` field (engine §16). | Auditors review findings *by control*. The wrapper's compliance overlay is the auditor-friendly view. | Wrapper renderer + filter. | M |
+| ⬜ | **SIEM-rule export with format converter.** From engine's `sigma_rules_for_technique` (#74), render Sigma rules per finding so the customer's blue team can deploy detection. Add a "copy as SPL / KQL / Lucene / EQL / SumoLogic" widget per rule (sigma-cli converters wrapped in the UI). | Sigma rules are universal; the customer's SIEM speaks one specific dialect. The converter is the last-mile productivity win. | Wrapper UI + sigma-cli subprocess. | M |
+| ⬜ | **Triage workflow.** Per-finding "fix" / "won't fix" / "false positive" buttons. Persists `verification_status` updates back to the engine via a triage-feedback file (engine §12 continuous-learning hooks). | Closes the loop on triage. Pairs with engine's continuous-learning hooks. | Wrapper UI + write-back path. | M |
+| ⬜ | **Exploit verifier widget.** From engine's `exploit_refs` (#62), per CVE finding show "12 PoCs available across ExploitDB / Metasploit / GitHub." Click → expanded list with stars-as-credibility-signal. | The engine collects this; the wrapper should surface it. Critical for "is this exploitable today?" triage. | Wrapper UI consuming `exploit_refs` finding-decoration. | S |
+| ⬜ | **Daily-summary email / Slack / Teams notification.** Subscribers per target receive: KEV-diff findings, new high-severity discoveries, completed-scan list. | Async signal for the daily-scan workflow. | Wrapper notification layer + per-user subscription model. | M |
+| ⬜ | **Cross-scan diff.** Between scan N and N+1: new findings, fixed findings, regressions. Today users compare reports manually. | Lets the wrapper become a vuln-tracking system, not just a scan runner. | Wrapper diff renderer; needs a per-finding stable `fingerprint` (engine #14 ships this). | M |
+| ⬜ | **Finding-fix verification rescan.** "I fixed CVE-X; rescan only that endpoint to confirm." Targeted rescan without a full re-scope. | Closes the fix-verify loop without paying for a full scan. | Wrapper-side scan-narrowing layer; uses engine's `--seed-url` / `--scope-mode diff` flags. | S |
+| ⬜ | **Evidence / screenshot capture per finding.** Auto-capture rendered HTTP request/response for each finding; for browser-driven probes, attach screenshot. Bug-bounty / audit deliverables expect this. | Today findings have URLs and JSON; no rendered evidence. Bug-bounty triage rejects unverified findings. | Wrapper post-scan enrichment layer; runs a headless browser against each finding URL. | M |
+
+### 9.4 Wrapper-side AI features (built ON TOP of engine output)
+
+| | Item | Why | Where | Effort |
+|---|---|---|---|---|
+| ⬜ | **Plain-language Q&A on the scan.** "Why is this finding high?" / "How do I fix CVE-X?" / "Which findings are credential-stuffing risks?" RAG over the scan's `events.jsonl` + `vulnerabilities.json`. | Non-tech users don't read JSON. Q&A is the natural interaction. | Wrapper RAG layer; the engine's structured outputs are a clean retrieval corpus. | L |
+| ⬜ | **AI-generated executive summary.** 1-paragraph C-suite-friendly summary. Inputs: `run.summary` event + top 5 findings. | C-suite buyers read 1 paragraph; the report is for security teams. | Wrapper LLM call at scan-end. | S |
+| ⬜ | **Auto-prioritisation against threat-intel context.** Cross-reference findings against KEV / HIBP / `threat_feed_ingest` data to surface "fix this first because the customer's industry is being actively targeted by APT-X using this CVE." | Severity is rule-based; prioritisation is contextual. The wrapper's AI layer is the right place to do contextual prioritisation. | Wrapper LLM call against engine's threat-intel cache. | M |
+| ⬜ | **AI-driven finding-cluster narrative.** Group related findings into a single story (e.g., "Your auth surface has 6 findings: 1 CSRF + 2 weak cookies + 1 HIBP + 2 password-policy → credential-stuffing risk; fix order X, Y, Z"). When engine emits `finding.cluster` events (engine §17.5) the wrapper renders the engine's cluster; otherwise wrapper computes its own. | A wall of 47 findings is unreadable; 5 narratives is. | Wrapper LLM call OR engine `finding.cluster` consumption. | M |
+| ⬜ | **Customer-context override.** Let the user paste a "we run on AWS / our threat model says this matters more / our biggest customer is in finance" paragraph; AI re-prioritises findings against that context. | Same finding has different severity at different orgs. The customer-context paragraph is the input to that adjustment. | Wrapper LLM call; passes context as system-prompt to the prioritisation pass. | M |
+
+### 9.5 Operational ergonomics
+
+| | Item | Why | Where | Effort |
+|---|---|---|---|---|
+| ⬜ | **Cost dashboard.** From engine's per-event token usage (engine §5), show $X spent per scan, per target. Budget alerts. | Cost transparency is an enterprise sale-blocker. | Wrapper analytics layer. | M |
+| ⬜ | **Cache hit-rate monitor.** Across the threat-intel tool caches (`vt_cache`, `otx_cache`, etc.). Helps users understand why repeat scans are fast. | Operational transparency; explains why daily-scan workflow is cheap. | Wrapper reads `~/.strix/<tool>_cache/` stats. | S |
+| ⬜ | **Free-tier vs paid-tier coverage.** Explicitly call out which intel sources are free vs paid; recommend upgrades when the user hits free-tier rate limits. Today this is invisible. | Customers don't realise they're hitting limits until findings disappear. | Wrapper rate-limit instrumentation. | S |
+| ⬜ | **Run history archive.** Searchable by target, date, finding, CWE, CVE, ATT&CK technique. Engine's `run_meta.json` + `events.jsonl` are sufficient inputs. | Vuln-tracking-system requirement. | Wrapper search index over historical runs. | M |
+| ⬜ | **Skill / tool inventory page.** Show what Strix can do, with which keys configured, which version of nuclei templates is in use (from `nuclei_template_update` #68), which threat-intel sources are operational. | This is the wrapper's "demo to a CISO" page. | Wrapper inventory page; reads engine tool registry. | S |
+
+### 9.6 Gaps `overall.md` did NOT surface (real customer asks)
+
+| | Item | Why | Where | Effort |
+|---|---|---|---|---|
+| ⬜ | **Multi-user collaboration.** Comment on findings, assign to engineer, mark "in review", @-mention. | Real customers have security teams, not solo operators. Solo-mode UX is an enterprise blocker. | Wrapper collaboration layer (comments / assignments / activity feed). | L |
+| ⬜ | **RBAC / SSO / audit logging.** Who can run scans? Who can see results? Who can change org settings? SSO via SAML / OIDC. Audit log for sensitive actions. | Enterprise procurement gate. | Wrapper auth layer + audit-log table. | L |
+| ⬜ | **Multi-tenant data-isolation contract.** Documented + tested isolation between customer scans (storage, network, secret material). | Required for SOC 2 readiness on the wrapper itself. | Wrapper architecture review + isolation tests. | M |
+| ⬜ | **Auto-PR / auto-ticket integrations.** GitHub PR from a finding (where the engine has a suggested patch — engine §15 "auto-remediation"). Linear / Jira / GitHub Issues ticket creation per finding with severity / priority / fix-time-estimate fields mapped. | Closes the loop from finding to engineering work. | Wrapper integration adapters per platform. | M |
+| ⬜ | **SIEM push integration.** Beyond the Sigma-rule export (§9.3), push the findings themselves to Splunk HEC / Elastic / Sentinel webhook in their native shape. | Customer's SOC team consumes findings as events, not as reports. | Wrapper integration adapters. | M |
+| ⬜ | **Bug-bounty submission template export.** Per finding, generate a HackerOne / Bugcrowd / Intigriti / YesWeHack-shape submission package: CVSS vector, repro steps, evidence URL, recommended-CWE, suggested-bounty-tier. | Closes the loop from finding to bounty payout. Bug-bounty triage rejects 60%+ of poorly-formatted submissions. | Wrapper renderer + per-platform schema. | M |
+| ⬜ | **Per-finding playback / re-execute.** "Re-run this exact probe" button on each finding card. Useful for verifying a fix landed without a full rescan. | Targeted reproducibility. Pairs with `--checkpoint` / `--resume` (engine §17.4). | Wrapper-driven engine call. | S |
+| ⬜ | **Customer-data redaction in shared reports.** Before sharing a report externally (with auditor / pentest customer / management), redact PII / hostname / token-shaped strings from the findings. Toggleable per-share. | GDPR / customer-data-protection workflow. Today share-the-report is share-everything. | Wrapper renderer with PII-redaction pass (regex + LLM-judged). | M |
+| ⬜ | **Status-page-style public attestation page.** Per customer: a public-facing page that shows "last full scan: 2026-04-15; 0 critical findings open; SBOM available" — without leaking the findings themselves. Used by the customer to signal hygiene to *their* customers. | Vendor-trust signal in B2B sales. The wrapper's customer can point their procurement-process to the page. | Wrapper public renderer + per-customer privacy controls. | M |
+
+---
+
 ## Reference
 
 - Engine roadmap (source of truth): [`roadmap.md`](roadmap.md)
+- Strategic overview (the source for §9): [`overall.md`](overall.md)
 - Fork-build guide: [`deploy.md`](deploy.md)
-- Engine PRs covered: #19, #20, #21, #22, #23, #24, #25, #26, #27, #28, #29, #30, #31, #32, #33, #34, #35, #36
+- Engine PRs covered by §1-§8: #19, #20, #21, #22, #23, #24, #25, #26, #27, #28, #29, #30, #31, #32, #33, #34, #35, #36
+- Engine PRs informing §9: #41, #42, #44, #46, #47, #48, #49, #52, #53, #55, #56, #57, #58, #59, #60, #61, #62, #63, #64, #65, #66, #67, #68, #69, #71, #72, #73, #74, #75, #76, #77, #78, #79, #80, #81
