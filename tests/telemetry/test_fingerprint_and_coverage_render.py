@@ -129,6 +129,12 @@ def test_finding_carries_fingerprint_and_version(tmp_path) -> None:
 
 
 def test_two_findings_with_same_inputs_share_fingerprint(tmp_path) -> None:
+    """After PR #98 cross-tool dedup, two emissions sharing the
+    same fingerprint MERGE into a single record rather than
+    appear twice. The fingerprint contract still holds — the
+    fingerprint of the kept record matches what would have been
+    computed for the second emission. Reproduces the §9
+    cross-tool dedup behaviour."""
     tracer = Tracer("fp-dup")
     set_global_tracer(tracer)
     tracer.add_vulnerability_report(
@@ -138,7 +144,10 @@ def test_two_findings_with_same_inputs_share_fingerprint(tmp_path) -> None:
         title="sqli   ", severity="high", cwe="cwe-89", endpoint="/x"
     )
     reports = tracer.get_existing_vulnerabilities()
-    assert reports[0]["fingerprint"] == reports[1]["fingerprint"]
+    assert len(reports) == 1
+    # The merged record carries detection_count=1 (one extra
+    # detection corroborating the original).
+    assert reports[0].get("detection_count") == 1
 
 
 def test_fingerprint_uses_first_code_location_for_code_targets(tmp_path) -> None:

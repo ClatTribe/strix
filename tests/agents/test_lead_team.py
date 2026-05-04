@@ -204,12 +204,19 @@ def test_collect_findings_dedup_by_fingerprint() -> None:
 
 
 def test_collect_findings_dedup_disabled() -> None:
+    """After PR #98, cross-tool dedup happens at write time so the
+    tracer never holds two records with the same fingerprint.
+    `collect_findings(dedup_by_fingerprint=False)` returns whatever
+    is in the tracer — which is one record per fingerprint by
+    construction. To exercise the consumer-side dedup-disable
+    branch we now need to inject two distinct findings (different
+    endpoints → different fingerprints)."""
     tracer = Tracer("collect-no-dedup")
     set_global_tracer(tracer)
     tracer.set_scan_config({"targets": [{"type": "web_application", "value": "https://x"}]})
 
     _emit_finding(tracer, title="Same", endpoint="https://x/y")
-    _emit_finding(tracer, title="Same", endpoint="https://x/y")
+    _emit_finding(tracer, title="Same", endpoint="https://x/z")
 
     team = LeadTeam(_make_lead_state())
     findings = team.collect_findings(dedup_by_fingerprint=False)
