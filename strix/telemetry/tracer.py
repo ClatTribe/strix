@@ -867,6 +867,11 @@ class Tracer:
         business_impact_plain: str | None = None,
         recommended_action: str | None = None,
         fix_time_estimate: str | None = None,
+        # Roadmap §12 / §18-row-4 — finding-quality signals for the
+        # RLHF FP feedback loop and auditor-grade explainability.
+        confidence: float | None = None,
+        reasoning_trace: list[str] | str | None = None,
+        counter_proof: dict[str, Any] | None = None,
     ) -> str:
         report_id = f"vuln-{len(self.vulnerability_reports) + 1:04d}"
 
@@ -986,6 +991,70 @@ class Tracer:
         except Exception:  # noqa: BLE001
             logger.warning("non-tech-output derivation failed", exc_info=True)
 
+        # Roadmap §12 / §18-row-4 — finding-quality signals.
+        # Defaults are deliberately conservative so a missing field
+        # never reads as "high confidence" by accident.
+        # ----------------------------------------------------------
+        # confidence: 0.0-1.0 continuous score. Defaults derived
+        # from verification_status when not supplied:
+        #   verified           → 1.0  (PoC ran)
+        #   pattern_match      → 0.7  (signature matched, not exec'd)
+        #   inconclusive       → 0.4  (some evidence, not confirmed)
+        #   needs_review       → 0.4  (same posture as inconclusive)
+        #   could_not_verify   → 0.2  (verifier ran and failed)
+        # Agent overrides via the explicit parameter. Clamped [0, 1].
+        try:
+            if confidence is not None:
+                report["confidence"] = max(0.0, min(1.0, float(confidence)))
+            else:
+                _CONF_DEFAULTS = {
+                    "verified": 1.0,
+                    "pattern_match": 0.7,
+                    "inconclusive": 0.4,
+                    "needs_review": 0.4,
+                    "could_not_verify": 0.2,
+                }
+                report["confidence"] = _CONF_DEFAULTS.get(
+                    report["verification_status"], 0.4
+                )
+        except (TypeError, ValueError):
+            report["confidence"] = 0.4
+
+        # reasoning_trace: structured "why I believe this is exploitable"
+        # bullets. Distinct from kill_chain (which is "what was done").
+        # Accepts list[str] or string with newlines (split + strip).
+        # Capped at 20 bullets × 320 chars each so payloads stay bounded.
+        try:
+            trace_lines: list[str] = []
+            if isinstance(reasoning_trace, list):
+                trace_lines = [str(x).strip() for x in reasoning_trace if str(x).strip()]
+            elif isinstance(reasoning_trace, str) and reasoning_trace.strip():
+                trace_lines = [
+                    line.strip()
+                    for line in reasoning_trace.splitlines()
+                    if line.strip()
+                ]
+            if trace_lines:
+                report["reasoning_trace"] = [line[:320] for line in trace_lines[:20]]
+        except Exception:  # noqa: BLE001
+            logger.debug("reasoning_trace normalization failed", exc_info=True)
+
+        # counter_proof: documents the input/condition the system
+        # CORRECTLY rejects — establishes the boundary the vuln crosses.
+        # Shape: {description: str, evidence: str}. Negative-example
+        # signal for RL grading.
+        try:
+            if isinstance(counter_proof, dict):
+                cp_desc = (counter_proof.get("description") or "").strip()
+                cp_evidence = (counter_proof.get("evidence") or "").strip()
+                if cp_desc or cp_evidence:
+                    report["counter_proof"] = {
+                        "description": cp_desc[:1024],
+                        "evidence": cp_evidence[:2048],
+                    }
+        except Exception:  # noqa: BLE001
+            logger.debug("counter_proof normalization failed", exc_info=True)
+
         # Stable finding fingerprint (roadmap §11). Computed once at write time
         # over normalized (cwe, endpoint|file, first-80-chars-of-title). The
         # algorithm is documented in this module; bump _FINGERPRINT_VERSION
@@ -1005,6 +1074,38 @@ class Tracer:
             report["fingerprint_version"] = _FINGERPRINT_VERSION
         except Exception:  # noqa: BLE001
             logger.warning("fingerprint computation failed", exc_info=True)
+
+        # Roadmap §12 #692 — reproducibility token. Distinct from the
+        # finding fingerprint (which dedupes the *vuln*); this dedupes
+        # the *reasoning attempt*. Two findings can have the same
+        # fingerprint but different reproducibility-tokens — same vuln
+        # found via different reasoning chains (RL pipeline grades them
+        # separately).
+        # Inputs hashed: reasoning_trace + kill_chain + target_state
+        # (target + endpoint + method). Fingerprint excluded so changes
+        # to the reasoning don't propagate into the dedup key.
+        try:
+            import hashlib as _hashlib
+            import json as _json
+
+            repro_inputs = {
+                "reasoning_trace": report.get("reasoning_trace") or [],
+                "kill_chain": report.get("kill_chain") or [],
+                "target_state": {
+                    "target": report.get("target") or "",
+                    "endpoint": report.get("endpoint") or "",
+                    "method": report.get("method") or "",
+                },
+            }
+            canonical = _json.dumps(
+                repro_inputs, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, default=str,
+            )
+            report["reproducibility_token"] = _hashlib.sha256(
+                canonical.encode("utf-8")
+            ).hexdigest()[:16]
+        except Exception:  # noqa: BLE001
+            logger.debug("reproducibility_token computation failed", exc_info=True)
 
         # Canonical-finding contract validation (roadmap §8.0). Runs AFTER
         # all coercions so it sees the final shape. Never drops a finding
