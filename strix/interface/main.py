@@ -589,6 +589,27 @@ Examples:
         ),
     )
 
+    # Roadmap §16 PR #130 — `--export-format <platform>` writes
+    # GRC-platform-specific JSON (Vanta / Drata / Hyperproof /
+    # Secureframe / ServiceNow / generic). Repeatable.
+    parser.add_argument(
+        "--export-format",
+        action="append",
+        default=[],
+        choices=("vanta", "drata", "hyperproof", "secureframe", "servicenow", "generic"),
+        metavar="PLATFORM",
+        help=(
+            "Render findings into a GRC platform's import shape and write "
+            "to `<run_dir>/grc_export_<platform>.json` at scan-end. "
+            "Repeatable: pass multiple times for multiple platforms. "
+            "Valid: vanta, drata, hyperproof, secureframe, servicenow, "
+            "generic. Static-format only (no API calls); the wrapper / "
+            "operator uploads. Each file is the platform's documented "
+            "import schema — paste into a 'Manual Evidence Upload' UI "
+            "or POST to the platform's import endpoint."
+        ),
+    )
+
     # Roadmap §16 PR #129 — `--compliance-pack <dir>` writes a full
     # auditor-ready evidence bundle.
     parser.add_argument(
@@ -1138,6 +1159,39 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             posthog.end(tracer, exit_reason=exit_reason)
 
     results_path = Path("strix_runs") / args.run_name
+
+    # Roadmap §16 PR #130 — GRC-platform export shapes. Writes
+    # `grc_export_<platform>.json` per requested platform inside
+    # the run dir. Best-effort.
+    export_formats = list(getattr(args, "export_format", None) or [])
+    if export_formats:
+        try:
+            from strix.telemetry.grc_export import write_export
+
+            tracer = get_global_tracer()
+            if tracer is not None:
+                results_path.mkdir(parents=True, exist_ok=True)
+                console = None if getattr(args, "quiet", False) else Console()
+                for platform in export_formats:
+                    try:
+                        out = write_export(
+                            platform,
+                            findings=list(tracer.vulnerability_reports),
+                            run_metadata=tracer.run_metadata,
+                            output_path=results_path / f"grc_export_{platform}.json",
+                        )
+                        if console is not None:
+                            console.print(
+                                f"[bold #22c55e]GRC export ({platform}):[/] "
+                                f"[#60a5fa]{out['output_path']}[/] "
+                                f"({out['record_count']} record(s))"
+                            )
+                    except Exception:  # noqa: BLE001
+                        import traceback as _tb
+
+                        _tb.print_exc()
+        except Exception:  # noqa: BLE001
+            pass
 
     # Roadmap §16 PR #129 — write the compliance evidence pack
     # before the completion message so the message can reference
