@@ -1,0 +1,71 @@
+<tools>
+  <tool name="cross_target_correlate">
+    <description>Compute cross-target correlation findings from existing scan artifacts. Reads the current run's findings + `surface_map.json` + customer's threat-feed IoCs + threat-intel caches and emits `cross_target.correlation` findings for the standard multi-target join patterns. **No new HTTP traffic** — joins are computed entirely from data already produced by other tools.
+
+**Correlation classes:**
+
+1. **`domain_ip_reputation`** — for each (subdomain → resolved IP) pair in `surface_map.json` (extracted from `subdomain_triage` + `passive_dns`), looks up the IP across `vt_cache` / `otx_cache` / `greynoise_cache` / `domain_rep_cache`. Emits a finding when ≥1 source flags the IP. Severity: high if ≥3 sources flag, medium if 1-2.
+
+2. **`kev_in_customer_stack`** — for each existing finding with `cve` + `is_kev=True` (the tracer auto-decorates this via `kev_diff_check` / `cve_lookup` integration), emits a bumped-severity correlation: low→medium, medium→high, high→critical. KEV ransomware-flag promotes to critical regardless. The correlation finding's `linked_finding_fingerprints` references the original.
+
+3. **`cve_in_threat_feed`** — for each finding with `cve`, checks whether the CVE-ID appears in the customer's `threat_feed_iocs.cve` list (output from `threat_feed_ingest`). Match = high CWE-693 (customer's intel team is actively tracking this CVE; Strix found it on their stack).
+
+4. **`threat_feed_ioc_match`** — for each IP / domain / hash discovered during the scan (from findings' `target` / `endpoint` fields + `surface_map` subdomains/IPs), checks whether it's in the customer's threat-feed IoC list. Match = high CWE-693.
+
+**Per-(class, target_a, target_b) dedup** so a re-run doesn't emit duplicate correlations.
+
+**Inputs (all optional — auto-loaded from disk when absent):**
+- `findings`: current run's findings (auto-loaded from `tracer.get_existing_vulnerabilities()`).
+- `surface_map`: `surface_map.json` contents (auto-loaded from `surface_map_path` or current run dir).
+- `threat_feed_iocs`: dict shape `{cve: [...], ipv4: [...], domain: [...], sha256: [...], ...}` from `threat_feed_ingest`.
+- `enable_correlations`: subset of class names to run. Default = all 4.
+- `ip_reputation_lookup`: callable for testing; defaults to reading the four threat-intel caches.
+
+**Skip cases:**
+- Empty findings AND empty surface_map → no-op.
+- Class lacking required input → silently skipped (e.g., `cve_in_threat_feed` skips when `threat_feed_iocs` is None or empty).
+
+**Safety:**
+- No HTTP traffic; pure-python over existing artifacts.
+- Each finding carries `description_plain` + `recommended_action` + `verification_status=needs_review` and embeds correlation metadata (`correlation_class`, `target_a`, `target_b`, `evidence_a`, `evidence_b`, `linked_finding_fingerprints`) in the description so downstream consumers (wrapper render, SBOM emit, etc.) can parse the join.
+- Composes with cluster-A safety (no network calls, but the upstream tools that produced the cache data already did).
+
+MITRE T1592 (Gather Victim Host Info) + T1589 (Gather Victim Identity).</description>
+    <parameters>
+      <parameter name="findings" type="array" required="false">
+        <description>Current run's findings list. When None, auto-loads from `tracer.get_existing_vulnerabilities()`. Each finding should be the dict shape produced by `add_vulnerability_report` (with `cve`, `is_kev`, `target`, `severity`, `fingerprint`, etc. fields).</description>
+      </parameter>
+      <parameter name="surface_map" type="object" required="false">
+        <description>Contents of `surface_map.json` (output of `domain_recon_pipeline`). When None, auto-loads from `surface_map_path` or from the current run dir.</description>
+      </parameter>
+      <parameter name="surface_map_path" type="string" required="false">
+        <description>Path to a `surface_map.json` file. Used when `surface_map` is None.</description>
+      </parameter>
+      <parameter name="threat_feed_iocs" type="object" required="false">
+        <description>Dict shape `{cve: ["CVE-..."], ipv4: ["1.2.3.4"], domain: ["evil.example"], sha256: ["..."], ...}` from the `threat_feed_ingest` tool's output. When None, the `cve_in_threat_feed` and `threat_feed_ioc_match` classes silently skip.</description>
+      </parameter>
+      <parameter name="enable_correlations" type="array" required="false">
+        <description>Subset of correlation class names to run. Valid: `domain_ip_reputation`, `kev_in_customer_stack`, `cve_in_threat_feed`, `threat_feed_ioc_match`. Default = all four.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, enabled_classes, correlations_evaluated: [{class, target_a, target_b, ...}, ...], findings_emitted}.
+
+The agent should follow up correlation findings by checking the linked underlying findings — correlations are signal-amplifiers, not new vulnerability classes. A `kev_in_customer_stack` correlation says "this finding you already have is even more urgent than its base severity suggests."</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<cross_target_correlate>
+</cross_target_correlate>
+
+<cross_target_correlate>
+<parameter=enable_correlations>["kev_in_customer_stack", "cve_in_threat_feed"]</parameter>
+</cross_target_correlate>
+
+<cross_target_correlate>
+<parameter=threat_feed_iocs>{"cve": ["CVE-2024-12345"], "ipv4": ["198.51.100.99"]}</parameter>
+</cross_target_correlate>
+]]>
+    </example_usage>
+  </tool>
+</tools>
