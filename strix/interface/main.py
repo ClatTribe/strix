@@ -976,6 +976,19 @@ def main() -> None:  # noqa: PLR0912, PLR0915
 
     is_whitebox = bool(args.local_sources)
 
+    # Roadmap §4 PR #114 — install SIGTERM / SIGINT handlers BEFORE
+    # the agent loop starts so a cancel from a wrapper's "cancel
+    # scan" button is caught even if the user clicks during the
+    # very-early Docker-image-pull phase.
+    try:
+        from strix.interface.cancel_handler import install_handlers
+
+        install_handlers()
+    except Exception:  # noqa: BLE001
+        # Best-effort. The fallback is the default Python signal
+        # handlers (sys.exit on SIGTERM with no event emission).
+        pass
+
     posthog.start(
         model=Config.get("strix_llm"),
         scan_mode=args.scan_mode,
@@ -1005,6 +1018,27 @@ def main() -> None:  # noqa: PLR0912, PLR0915
     display_completion_message(args, results_path)
 
     if args.non_interactive:
+        # Roadmap §4 PR #114 — clean SIGTERM / SIGINT cancel exit.
+        # If the user/wrapper cancelled the scan, exit with the
+        # documented signal-derived code (130 for SIGINT, 143 for
+        # SIGTERM) instead of 0/2/3. Wrappers' "cancel scan" buttons
+        # rely on this contract to distinguish "user cancelled" from
+        # "real failure".
+        try:
+            from strix.interface.cancel_handler import (
+                emit_run_cancelled_event_once,
+                get_exit_code_for_cancel,
+            )
+
+            cancel_exit = get_exit_code_for_cancel()
+            if cancel_exit is not None:
+                # Defensive emit in case the agent loop never ran
+                # long enough to fire the event itself.
+                emit_run_cancelled_event_once()
+                sys.exit(cancel_exit)
+        except Exception:  # noqa: BLE001
+            pass
+
         # Roadmap §4 PR #113 — `--max-cost` / `--max-input-tokens`
         # self-exit. When the run-level budget tripped during the
         # scan, exit with the documented EXIT_BUDGET_EXCEEDED (3)

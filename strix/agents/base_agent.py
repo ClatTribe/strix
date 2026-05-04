@@ -343,6 +343,25 @@ class BaseAgent(metaclass=AgentMeta):
                 # Bookkeeping failure should never break the loop.
                 pass
 
+            # Roadmap §4 PR #114 — clean SIGTERM/SIGINT handling.
+            # When a wrapper hits its "cancel scan" button, the
+            # signal handler latches the request; the agent loop
+            # picks it up here and winds down gracefully so the
+            # runner can flush events.jsonl, teardown the sandbox,
+            # and exit with EXIT_SIGTERM (143) / EXIT_SIGINT (130).
+            try:
+                from strix.interface.cancel_handler import (
+                    emit_run_cancelled_event_once,
+                    is_cancellation_requested,
+                )
+
+                cancel_requested, _signum = is_cancellation_requested()
+                if cancel_requested:
+                    emit_run_cancelled_event_once()
+                    self.state.request_stop()
+            except Exception:  # noqa: BLE001
+                pass
+
             if self.state.is_waiting_for_input():
                 await self._wait_for_input()
                 continue
