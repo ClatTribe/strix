@@ -121,12 +121,13 @@ def test_all_checks_run_when_default(monkeypatch) -> None:
     _patch_dig(monkeypatch, {})  # everything missing → many findings
     out = dns_hygiene.dns_hygiene_check("example.com")
     assert out["success"] is True
-    # 16 checks total (after PR #120 added svcb_https). The deeper
-    # checks (dane / bimi / dmarc_rua / spf_lookups / dkim_keys /
-    # open_resolver / dangling_ns / svcb_https) all early-out
+    # 17 checks total (after PR #120 added svcb_https + PR #122
+    # added dns_rebinding). The deeper checks (dane / bimi /
+    # dmarc_rua / spf_lookups / dkim_keys / open_resolver /
+    # dangling_ns / svcb_https / dns_rebinding) all early-out
     # as inconclusive when the underlying records or NS list aren't
     # present, so they don't add findings on a blank target.
-    assert len(out["checks_run"]) == 16
+    assert len(out["checks_run"]) == 17
     reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
     # spf, dmarc, mta_sts, caa, dnssec all missing → 5 findings.
     assert len(reports) == 5
@@ -569,3 +570,80 @@ def test_svcb_https_both_record_types(monkeypatch) -> None:
     result = out["results"][0]
     assert len(result["https_records"]) == 1
     assert len(result["svcb_records"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# DNS rebinding feasibility (PR #122)
+# ---------------------------------------------------------------------------
+
+
+def test_dns_rebinding_short_ttl_emits_low(monkeypatch) -> None:
+    """TTL < 60s → low CWE-345."""
+    _patch_dig(monkeypatch, {
+        "example.com|A": "example.com.\t30\tIN\tA\t1.2.3.4",
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="dns_rebinding")
+    assert out["results"][0]["min_ttl"] == 30
+    assert out["results"][0]["feasibility"] == "high"
+    reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
+    rebind = [r for r in reports if "rebinding" in r["title"].lower()]
+    assert len(rebind) == 1
+    assert rebind[0]["severity"] == "low"
+
+
+def test_dns_rebinding_medium_ttl_emits_info(monkeypatch) -> None:
+    """60 ≤ TTL < 300s → info."""
+    _patch_dig(monkeypatch, {
+        "example.com|A": "example.com.\t180\tIN\tA\t1.2.3.4",
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="dns_rebinding")
+    assert out["results"][0]["min_ttl"] == 180
+    assert out["results"][0]["feasibility"] == "medium"
+    reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
+    info = [r for r in reports if "rebinding" in r["title"].lower()]
+    assert len(info) == 1
+    assert info[0]["severity"] == "info"
+
+
+def test_dns_rebinding_long_ttl_no_finding(monkeypatch) -> None:
+    """TTL ≥ 300s → no finding (standard config)."""
+    _patch_dig(monkeypatch, {
+        "example.com|A": "example.com.\t3600\tIN\tA\t1.2.3.4",
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="dns_rebinding")
+    assert out["results"][0]["feasibility"] == "low"
+    reports = tracer_module.get_global_tracer().get_existing_vulnerabilities()
+    assert len([r for r in reports if "rebinding" in r["title"].lower()]) == 0
+
+
+def test_dns_rebinding_no_records(monkeypatch) -> None:
+    """No A records → safe early-out, no finding."""
+    _patch_dig(monkeypatch, {})
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="dns_rebinding")
+    assert out["results"][0]["ttls"] == []
+    assert out["results"][0]["feasibility"] is None
+
+
+def test_dns_rebinding_min_of_multiple_ttls(monkeypatch) -> None:
+    """When multiple A records have different TTLs, the MIN is used."""
+    _patch_dig(monkeypatch, {
+        "example.com|A": (
+            "example.com.\t3600\tIN\tA\t1.2.3.4\n"
+            "example.com.\t30\tIN\tA\t5.6.7.8"
+        ),
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="dns_rebinding")
+    assert out["results"][0]["min_ttl"] == 30
+
+
+def test_dns_rebinding_malformed_lines_skipped(monkeypatch) -> None:
+    """Garbage lines are skipped silently."""
+    _patch_dig(monkeypatch, {
+        "example.com|A": (
+            "; comment line\n"
+            "garbage\n"
+            "example.com.\t60\tIN\tA\t1.2.3.4"
+        ),
+    })
+    out = dns_hygiene.dns_hygiene_check("example.com", checks="dns_rebinding")
+    assert out["results"][0]["min_ttl"] == 60

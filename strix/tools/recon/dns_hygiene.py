@@ -905,6 +905,134 @@ def _check_dangling_ns(domain: str) -> dict[str, Any]:
     }
 
 
+def _check_dns_rebinding(domain: str) -> dict[str, Any]:
+    """DNS rebinding feasibility (roadmap §7.3 PR #122).
+
+    DNS rebinding attacks require attacker-controlled DNS records
+    that change between two responses to the same hostname:
+    response 1 points the browser to the attacker's server (so a
+    SOP-bypass page loads), response 2 points to a target IP
+    (often `127.0.0.1` or an internal RFC 1918 range), and the
+    browser executes the attacker's JS against the target IP
+    under the same Origin — bypassing CORS / SOP.
+
+    Short TTLs on the target's own records make rebinding
+    feasibility worse only as a defensive signal: short TTLs
+    enable rapid record-changing, which is the attacker's
+    primitive. We don't claim short-TTL = vulnerable. We surface
+    it as an info-tier diagnostic so the agent can correlate
+    with the actual attack flow (the target running an
+    SSRF-shaped sink that follows DNS lookups).
+
+    Severity ladder:
+        * **Low CWE-345** — TTL < 60 seconds: rebinding-feasibility
+          window is tight enough that an attacker-controlled DNS
+          can flip records mid-page-load.
+        * **Info** — TTL 60-300 seconds: short but not unusual;
+          surface as a diagnostic so the operator + agent know.
+        * (no finding) — TTL ≥ 300 seconds: standard.
+    """
+    # Non-short query to get the TTL field. The +noall +answer
+    # mode prints just the answer section (one record per line).
+    out = dig(domain, "A", short=False, extra=["+noall", "+answer"])
+    if not out.strip():
+        return {"check": "dns_rebinding", "ttls": [], "feasibility": None}
+
+    ttls: list[int] = []
+    for raw in out.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(";"):
+            continue
+        # `dig +noall +answer` line: <name> <ttl> <class> <type> <rdata>
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        try:
+            ttl = int(parts[1])
+        except ValueError:
+            continue
+        ttls.append(ttl)
+
+    if not ttls:
+        return {"check": "dns_rebinding", "ttls": [], "feasibility": None}
+
+    min_ttl = min(ttls)
+
+    if min_ttl < 60:
+        emit_finding(
+            title=f"DNS rebinding feasibility: short TTL on {domain}",
+            severity="low",
+            category="dns_security",
+            cwe="CWE-345",
+            target=domain,
+            description=(
+                f"`{domain}` publishes A records with TTL={min_ttl}s "
+                f"(< 60). Short TTLs make DNS rebinding attacks "
+                f"easier — an attacker-controlled DNS server can "
+                f"flip the record mid-page-load to point browsers "
+                f"at internal IPs (RFC 1918) under the same Origin, "
+                f"bypassing SOP / CORS. This is a *feasibility "
+                f"signal*, not a confirmed vulnerability — the actual "
+                f"impact requires the target to also run an SSRF-shaped "
+                f"sink that resolves DNS for each request."
+            ),
+            impact=(
+                "Combined with an SSRF-style data-fetch endpoint, "
+                "DNS rebinding lets an attacker exfiltrate / "
+                "manipulate internal-network resources (admin APIs, "
+                "metadata endpoints, internal services) through the "
+                "victim's browser, bypassing the normal Same-Origin "
+                "Policy."
+            ),
+            remediation=(
+                "Set TTL to at least 60 seconds on customer-facing "
+                "records. For services that must roll over IPs "
+                "quickly (CDN edge, anycast), pair short TTLs with "
+                "DNS-rebinding-aware front-ends: validate `Host` "
+                "header server-side, reject internal IPs in any "
+                "URL fetched by the application, and use "
+                "`network.dns.allowed_ips` allow-lists where the "
+                "framework supports it."
+            ),
+            verification_status="verified",
+        )
+        feasibility = "high"
+    elif min_ttl < 300:
+        emit_finding(
+            title=f"DNS rebinding feasibility (info): short TTL on {domain}",
+            severity="info",
+            category="dns_security",
+            cwe="CWE-345",
+            target=domain,
+            description=(
+                f"`{domain}` publishes A records with TTL={min_ttl}s "
+                f"(< 300, ≥ 60). Diagnostic signal — the rebinding "
+                f"window is tighter than typical (3600+) but not as "
+                f"actionable as < 60s. Pair with active SSRF probing "
+                f"to confirm any practical impact."
+            ),
+            impact=(
+                "Same rebinding feasibility class as the < 60s case "
+                "but with a wider attacker window."
+            ),
+            remediation=(
+                "Generally fine for fast-roll services. Make sure "
+                "any URL-fetch endpoints reject internal IPs."
+            ),
+            verification_status="verified",
+        )
+        feasibility = "medium"
+    else:
+        feasibility = "low"
+
+    return {
+        "check": "dns_rebinding",
+        "ttls": ttls,
+        "min_ttl": min_ttl,
+        "feasibility": feasibility,
+    }
+
+
 def _check_svcb_https(domain: str) -> dict[str, Any]:
     """RFC 9460 SVCB / HTTPS service-binding records.
 
@@ -1056,6 +1184,7 @@ _CHECK_REGISTRY = {
     "open_resolver": _check_open_resolver,
     "dangling_ns": _check_dangling_ns,
     "svcb_https": _check_svcb_https,
+    "dns_rebinding": _check_dns_rebinding,
 }
 
 
@@ -1077,6 +1206,7 @@ _CHECK_CATEGORY: dict[str, str] = {
     "open_resolver": "dns_security",
     "dangling_ns": "dns_security",
     "svcb_https": "dns_security",
+    "dns_rebinding": "dns_security",
 }
 
 
