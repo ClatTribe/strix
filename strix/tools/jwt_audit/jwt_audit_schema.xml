@@ -1,0 +1,93 @@
+<tools>
+  <tool name="jwt_audit">
+    <description>Audit a JWT for the standard exploit classes. Two phases:
+
+**Static analyses** (always run, no HTTP):
+- Header inspection — flags `alg=none` / empty (high CWE-347), `kid` containing path-traversal (`..`, leading `/`, `%2e%2e`) → medium CWE-22, `kid` containing SQL meta-chars (`'`, `"`, `--`, `#`, `;`) → medium CWE-89, `jku` / `x5u` pointing off-site → high CWE-918.
+- Claims inspection — flags missing `exp` (low CWE-613), missing both `iss` AND `aud` (low CWE-345).
+- HMAC dictionary attack — brute-forces HS256 against the ~120-entry top-secrets dictionary (`secret`, `password`, `your-256-bit-secret`, `default`, framework-leaked secrets, etc.). 5-second wall-clock cap. Match → critical CWE-326.
+
+**Active probes** (only when `test_endpoint_url` is supplied):
+- `alg_none` / `alg_NoNe` / `alg_NONE` — forge token with `alg=none`, no signature; if accepted → critical CWE-347. Per-class dedup so the 3 case variants emit ONE finding.
+- `claim_aud` — mutate `aud` to attacker-controlled value; if accepted → medium CWE-345.
+- `claim_iss` — mutate `iss`; if accepted → medium CWE-345.
+- `claim_sub` — mutate `sub` (user-id swap); if accepted → high CWE-285 (improper authorization — server takes claim at face value with no signature recheck).
+- `expired` — mutate `exp` to 1 hour ago; if accepted → high CWE-613.
+- `kid_traversal` — `kid: ../../../../../../etc/passwd`; shape-change response (5xx, 200-when-baseline-was-2xx) → medium CWE-22.
+- `kid_sqli` — `kid: x' OR 1=1--`; shape-change → medium CWE-89.
+
+When a HMAC secret is cracked from the dictionary, mutated tokens are RESIGNED with that secret (so the active probes test claim-validation logic, not signature-validation).
+
+**Token placement** for active probes:
+- `auth_bearer` (default) — `Authorization: Bearer ...`
+- `cookie:NAME` — set as cookie value
+- `header:NAME` — set as custom header value
+- `query:NAME` — append as query-string parameter
+
+**Acceptance heuristic** for active probes: same status class (2xx/3xx) as baseline AND body length within ±25%. `kid_*` probes use shape-change instead (5xx or unexpected 2xx).
+
+**Skip cases**:
+- Token isn't a valid JWT (3 base64-URL-encoded parts) → returns `success=False`.
+- `test_endpoint_url` returns non-2xx/3xx with the supplied token → `inconclusive=True` (token isn't valid against the endpoint; supply a working one).
+- `--exclude-path` blocks the URL → active probes skip; static analyses still run.
+
+**Safety**:
+- Static analyses are pure-python (no HTTP). Active probes DISPATCH requests with mutated tokens; the underlying endpoint must tolerate read-only requests with arbitrary tokens.
+- HMAC dictionary attack is offline (no HTTP); time-bounded.
+- Composes with cluster-A safety (`--exclude-path` / `--rate-limit` / `--auth-*`).
+- All findings carry severity-tailored `description_plain` + `recommended_action` (use a JWT library with explicit algorithm allow-list `algorithms=['HS256']`; HMAC secrets must be ≥ 32 random bytes via `secrets.token_bytes(32)`; validate `exp` / `nbf` / `aud` / `iss` server-side; never use `kid` directly in file paths or SQL — allow-list it; if rotating a leaked HMAC secret, force all users to re-login) and `verification_status=needs_review`.</description>
+    <parameters>
+      <parameter name="token" type="string" required="true">
+        <description>The JWT (`eyJ...` shape — three base64-URL-encoded parts joined by dots) to analyze. Example: `eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature`.</description>
+      </parameter>
+      <parameter name="test_endpoint_url" type="string" required="false">
+        <description>URL whose validation policy reflects the token (e.g. `https://api.example.com/v1/profile` that returns 200 with the token, 401 without). When omitted, only static analyses run.</description>
+      </parameter>
+      <parameter name="placement" type="string" required="false">
+        <description>Where to put the token in the request. `auth_bearer` (default), `cookie:NAME`, `header:NAME`, `query:NAME`.</description>
+      </parameter>
+      <parameter name="method" type="string" required="false">
+        <description>HTTP method for active probes. Default `GET`. Use `POST` / `PUT` etc. when the endpoint validates JWTs only on those methods.</description>
+      </parameter>
+      <parameter name="body" type="string" required="false">
+        <description>Optional request body. Mostly empty for GET; populated for POST/PUT JWT-protected endpoints.</description>
+      </parameter>
+      <parameter name="extra_headers" type="object" required="false">
+        <description>Additional headers (e.g. CSRF tokens carried in `X-CSRF-Token`).</description>
+      </parameter>
+      <parameter name="cookies" type="object" required="false">
+        <description>Cookie name → value map. Cluster-A `--auth-cookie` env layers on top.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-probe timeout in seconds. Default 10.</description>
+      </parameter>
+      <parameter name="enable_dictionary_attack" type="bool" required="false">
+        <description>When True (default), brute-forces HS256 against the ~120-entry top-secrets dictionary (capped at 5s). Set False to skip (e.g. when the agent already has the public key for an RS256 token).</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, token, header, payload, target_host, static_findings: [{label, severity, evidence}, ...], active_probes: [{label, class_, status, body_length, accepted, finding_severity}, ...], cracked_secret?, findings_emitted, inconclusive?, reason?}.
+
+The agent should follow up critical / high findings by manually crafting the forged token (e.g. `jwt.encode({"sub": "admin"}, "secret", algorithm="HS256")`) and verifying the side-effect actually happened (e.g. accessed the admin's resources). The dictionary attack is by design only top-N secrets — if it doesn't crack the secret, that's a "no result" not "secret is strong"; agent should still recommend rotating.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<jwt_audit>
+<parameter=token>eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyMSIsImlhdCI6MTUxNjIzOTAyMn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c</parameter>
+<parameter=test_endpoint_url>https://api.example.com/v1/profile</parameter>
+</jwt_audit>
+
+<jwt_audit>
+<parameter=token>eyJ...</parameter>
+<parameter=test_endpoint_url>https://api.example.com/v1/profile</parameter>
+<parameter=placement>cookie:auth_token</parameter>
+</jwt_audit>
+
+<jwt_audit>
+<parameter=token>eyJ...</parameter>
+<parameter=enable_dictionary_attack>false</parameter>
+</jwt_audit>
+]]>
+    </example_usage>
+  </tool>
+</tools>
