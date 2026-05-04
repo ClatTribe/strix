@@ -2083,6 +2083,20 @@ class Tracer:
         except Exception:  # noqa: BLE001
             logger.debug("MITRE technique lookup failed", exc_info=True)
 
+        # Roadmap §17.6 / §18 row 10 — tool-output provenance / trust-taint.
+        # Always present on the event so the agent's reasoning loop has
+        # a structural signal about whether to weight this tool's output
+        # as trusted (KEV / OSV) or adversarial (HTTP body from target).
+        # Default policy from `get_tool_provenance` falls back to "target"
+        # for sandbox_execution=True, "framework" for in-process tools.
+        provenance: str = "target"
+        try:
+            from strix.tools.registry import get_tool_provenance
+
+            provenance = get_tool_provenance(tool_name)
+        except Exception:  # noqa: BLE001
+            logger.debug("provenance lookup failed", exc_info=True)
+
         # Roadmap §4: agent + target context inlined onto the actor block
         # so `tool.execution.*` events are self-contained.
         ctx = self._resolve_tool_event_context(agent_id, args)
@@ -2093,6 +2107,7 @@ class Tracer:
         execution_data["agent_name"] = ctx.get("agent_name")
         execution_data["agent_category"] = ctx.get("agent_category")
         execution_data["target"] = ctx.get("target")
+        execution_data["provenance"] = provenance
 
         actor: dict[str, Any] = {
             "agent_id": agent_id,
@@ -2102,6 +2117,7 @@ class Tracer:
             "execution_id": execution_id,
             "target": ctx.get("target"),
             "mitre_techniques": mitre_techniques,
+            "provenance": provenance,
         }
 
         self._emit_event(
@@ -2147,6 +2163,18 @@ class Tracer:
                 "target": tool_data.get("target"),
             }
 
+        # Re-attach provenance from the started-event so the updated
+        # event is self-contained too. Falls back to a fresh lookup
+        # when missing from the stash.
+        provenance = tool_data.get("provenance")
+        if not isinstance(provenance, str) or not provenance:
+            try:
+                from strix.tools.registry import get_tool_provenance
+
+                provenance = get_tool_provenance(tool_name)
+            except Exception:  # noqa: BLE001
+                provenance = "target"
+
         self._emit_event(
             "tool.execution.updated",
             actor={
@@ -2156,6 +2184,7 @@ class Tracer:
                 "tool_name": tool_name,
                 "execution_id": execution_id,
                 "target": ctx.get("target"),
+                "provenance": provenance,
             },
             payload={"result": result},
             status=status,
