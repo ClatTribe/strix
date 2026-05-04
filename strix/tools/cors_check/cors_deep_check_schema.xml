@@ -1,0 +1,60 @@
+<tools>
+  <tool name="cors_deep_check">
+    <description>Probe a URL for CORS misconfiguration laxity. Goes beyond the static `Origin: &lt;attacker&gt;` reflection check in `http_security_headers_audit` (#47) by probing 10 origin-bypass classes plus pre-flight method/header laxity:
+
+**Origin probes (GET with attacker-controlled `Origin: ...` request header)**:
+- `null_origin` — `Origin: null` (sandboxed iframes / `data:` URIs).
+- `baseline_evil` — direct attacker host `https://strix-&lt;nonce&gt;.evil.example`.
+- `subdomain_suffix` — `https://strix.evil.&lt;target&gt;` (catches `endswith` validators).
+- `subdomain_prefix` — `https://&lt;target&gt;.evil.example` (catches `startswith` / unanchored regex).
+- `subdomain_substring` — `https://&lt;target&gt;-evil.example` (catches substring).
+- `trailing_slash` — `https://&lt;target&gt;/` (catches bare-host allow-list mismatch).
+- `scheme_swap` — `http://&lt;target&gt;` (catches https-only allow-list bypassed via http).
+- `userinfo_confusion` — `https://&lt;target&gt;@evil.example` (catches misparsed netloc).
+- `backslash_bypass` — `https://&lt;target&gt;\.evil.example`.
+- `backtick_bypass` — `https://&lt;target&gt;` + backtick + `.evil.example`.
+
+For each probe, server reflects `Origin` into `Access-Control-Allow-Origin` → finding. With `Allow-Credentials: true` → **critical** CWE-942 (full credentialed bypass). Without credentials → **high**. `null` reflection with credentials → **high**. Wildcard + credentials → **high** (browsers reject this combo, but it documents intent).
+
+**Pre-flight method laxity** (OPTIONS with `Access-Control-Request-Method: TRACE / DELETE / CONNECT`): server echoes the method into `Access-Control-Allow-Methods` → **medium** CWE-942 (no method validation).
+
+**Pre-flight header laxity** (OPTIONS with `Access-Control-Request-Headers: X-Bogus-... / X-Internal-User-Id`): server echoes the header name into `Access-Control-Allow-Headers` → **medium** CWE-942 (no header validation; attacker can send framework-internal headers cross-origin).
+
+Per-(severity, issue) dedup so a single broken validator doesn't cascade into 5 near-identical findings.
+
+Skip cases:
+- Baseline GET non-2xx/3xx → origin probes skip; pre-flight probes still run (they don't depend on a 2xx baseline).
+- `--exclude-path` blocks the URL → graceful no-op.
+
+**Safety**:
+- Read-only (GET + OPTIONS only, no follow-redirects, no body).
+- Attacker host gets a unique random `strix-&lt;nonce&gt;.evil.example` prefix per run for log auditability.
+- Composes with cluster-A safety (`--exclude-path` / `--rate-limit` / `--auth-*`).
+- Severity-tailored `description_plain` + `recommended_action` (replace dynamic Origin reflection with explicit allow-list of trusted origins; reject `null` Origins; never set Allow-Credentials alongside reflected/wildcard origins; explicitly list intended methods/headers in pre-flight responses) and `verification_status=needs_review` since reflection alone doesn't always equal exploitable in the customer's threat model.</description>
+    <parameters>
+      <parameter name="target_url" type="string" required="true">
+        <description>URL to probe. Bare hostnames are auto-prefixed with `https://`. Examples: `https://api.example.com/v1/profile`, `https://app.example.com/api/users`. The probe sends GETs with attacker-controlled `Origin` headers and OPTIONS pre-flight requests.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-probe timeout in seconds. Default 10.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target_url, target_host, baseline: {status, body_length, error?, skipped?}, origin_probes: [{label, probe_origin, reflected, credentialed, wildcard, severity, issue, evidence, aco_header, acc_header}, ...], preflight_probes: [{label, request_method, request_header, response_methods, response_headers, echoed, severity, evidence}, ...], findings_emitted}.
+
+The agent should follow up critical-severity findings by manually constructing a victim-side proof-of-concept fetch from the bypassing origin to confirm the cookies / Authorization header are actually attached.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<cors_deep_check>
+<parameter=target_url>https://api.example.com/v1/profile</parameter>
+</cors_deep_check>
+
+<cors_deep_check>
+<parameter=target_url>https://app.example.com/api/users</parameter>
+<parameter=timeout>20</parameter>
+</cors_deep_check>
+]]>
+    </example_usage>
+  </tool>
+</tools>
