@@ -256,5 +256,10 @@ def test_coverage_section_flags_inconclusive_checks(tmp_path) -> None:
     tracer.save_run_data(mark_complete=True)
 
     report = (tmp_path / "strix_runs" / "cov-inconclusive" / "penetration_test_report.md").read_text()
-    assert "1 check(s) were inconclusive" in report
+    # §17.1 promoted format: a structured "Tested but inconclusive" subsection
+    # replaces the old single-line summary. The semantic (1 inconclusive
+    # check, surface listed, "needs review" framing) is still asserted.
+    assert "## Tested but inconclusive" in report
+    assert "1 inconclusive" in report  # from the summary header
+    assert "email_security" in report
     assert "needs review" in report

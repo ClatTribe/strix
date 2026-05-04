@@ -1231,18 +1231,107 @@ class Tracer:
             "not_vulnerable": not_vulnerable,
         }
 
+    def build_coverage_attestation(self) -> dict[str, Any]:
+        """Build the structured coverage-attestation artifact.
+
+        Promotes the §11 check-events stack into a per-(category × surface)
+        attestation table that auditors / bug-bounty triagers / GRC platforms
+        can consume programmatically. Roadmap §17.1.
+
+        Returns a dict with:
+            - schema_version, run_id, run_name, generated_at, targets
+            - summary: total, by_result, by_category counts
+            - attestations: list of per-check atomic records (category,
+              surface, tool, result, confidence, evidence, finding_id,
+              duration_seconds, check_id, started_at)
+            - negative_coverage: list of {category, surfaces[]} —
+              "tested AND clean"
+            - inconclusive_coverage: list of {category, surfaces[]} —
+              "tested but evidence was observed without confirmation"
+            - vulnerable_coverage: list of {category, surfaces[],
+              finding_ids[]} — "tested AND a finding was emitted"
+
+        The artifact is structured so cryptographic signing (§16) can be
+        added later as a single signing pass without re-renaming any
+        existing fields.
+        """
+        summary = self.get_check_summary()
+        attestations: list[dict[str, Any]] = []
+        for c in self._completed_checks:
+            entry: dict[str, Any] = {
+                "check_id": c.get("check_id"),
+                "category": c.get("category") or "uncategorised",
+                "surface": c.get("surface") or None,
+                "tool": c.get("tool") or None,
+                "result": c.get("result") or "inconclusive",
+                "confidence": c.get("confidence"),
+                "duration_seconds": c.get("duration_seconds"),
+            }
+            if c.get("evidence"):
+                entry["evidence"] = c["evidence"]
+            if c.get("finding_id"):
+                entry["finding_id"] = c["finding_id"]
+            if c.get("started_at"):
+                entry["started_at"] = c["started_at"]
+            attestations.append(entry)
+
+        # Group per-(category, result).
+        groups: dict[tuple[str, str], dict[str, Any]] = {}
+        for a in attestations:
+            key = (a["category"], a["result"])
+            entry = groups.setdefault(
+                key,
+                {"category": a["category"], "surfaces": [], "finding_ids": []},
+            )
+            if a.get("surface"):
+                entry["surfaces"].append(a["surface"])
+            if a.get("finding_id"):
+                entry["finding_ids"].append(a["finding_id"])
+
+        def _bucket(result: str) -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for (cat, res), entry in sorted(groups.items()):
+                if res != result:
+                    continue
+                surfaces = sorted(set(entry["surfaces"]))
+                bucket_entry: dict[str, Any] = {
+                    "category": cat,
+                    "surfaces": surfaces,
+                    "surface_count": len(surfaces),
+                }
+                if entry["finding_ids"]:
+                    bucket_entry["finding_ids"] = sorted(set(entry["finding_ids"]))
+                out.append(bucket_entry)
+            return out
+
+        return {
+            "schema_version": 1,
+            "run_id": self.run_id,
+            "run_name": self.run_name,
+            "generated_at": datetime.now(UTC).isoformat(),
+            "targets": list(self.run_metadata.get("targets") or []),
+            "summary": summary,
+            "attestations": attestations,
+            "negative_coverage": _bucket("not_vulnerable"),
+            "inconclusive_coverage": _bucket("inconclusive"),
+            "vulnerable_coverage": _bucket("vulnerable"),
+        }
+
     def _format_coverage_assertions(self) -> str | None:
-        """Render the negative-coverage section for penetration_test_report.md.
+        """Render the coverage section for penetration_test_report.md.
 
         Returns markdown text, or None when no check events were recorded
         (in which case we don't claim positive evidence we don't have).
-        Roadmap §11.
+
+        Roadmap §11 (initial) + §17.1 (promotion: structured attestation
+        with explicit negative / inconclusive / vulnerable subsections,
+        backed by `coverage_attestation.json`).
         """
-        summary = self.get_check_summary()
+        attestation = self.build_coverage_attestation()
+        summary = attestation["summary"]
         if summary["total"] == 0:
             return None
 
-        not_vuln = summary.get("not_vulnerable") or []
         by_result = summary.get("by_result") or {}
         by_category = summary.get("by_category") or {}
 
@@ -1256,20 +1345,24 @@ class Tracer:
             f"{by_result.get('inconclusive', 0)} inconclusive."
         )
         lines.append("")
+        lines.append(
+            "Structured attestation: see [`coverage_attestation.json`]"
+            "(./coverage_attestation.json) for the full per-check record "
+            "including confidence, evidence, and tool provenance."
+        )
+        lines.append("")
 
-        if not_vuln:
-            # Group not_vulnerable checks by category, list distinct surfaces.
-            by_cat: dict[str, list[str]] = {}
-            for entry in not_vuln:
-                cat = entry.get("category") or "uncategorised"
-                surface = entry.get("surface") or "(no surface recorded)"
-                by_cat.setdefault(cat, []).append(surface)
-
+        # ---- Tested AND clean ----
+        neg = attestation.get("negative_coverage") or []
+        if neg:
             lines.append("## Tested and not vulnerable")
             lines.append("")
-            for cat in sorted(by_cat):
-                surfaces = sorted(set(by_cat[cat]))
-                if len(surfaces) == 1:
+            for entry in neg:
+                cat = entry["category"]
+                surfaces = entry["surfaces"]
+                if not surfaces:
+                    lines.append(f"- **{cat}** — (no surface recorded)")
+                elif len(surfaces) == 1:
                     lines.append(f"- **{cat}** — `{surfaces[0]}`")
                 else:
                     surface_list = ", ".join(f"`{s}`" for s in surfaces[:8])
@@ -1278,11 +1371,47 @@ class Tracer:
                     lines.append(f"- **{cat}** — {surface_list}")
             lines.append("")
 
-        if by_result.get("inconclusive", 0) > 0:
+        # ---- Tested AND a finding fired ----
+        vuln = attestation.get("vulnerable_coverage") or []
+        if vuln:
+            lines.append("## Tested and vulnerable")
+            lines.append("")
+            for entry in vuln:
+                cat = entry["category"]
+                surfaces = entry["surfaces"]
+                finding_ids = entry.get("finding_ids") or []
+                surface_part = (
+                    f"`{surfaces[0]}`" if len(surfaces) == 1
+                    else f"{len(surfaces)} surface(s)"
+                ) if surfaces else "(no surface recorded)"
+                ids_part = (
+                    f" — finding(s): {', '.join(f'`{f}`' for f in finding_ids)}"
+                    if finding_ids else ""
+                )
+                lines.append(f"- **{cat}** — {surface_part}{ids_part}")
+            lines.append("")
+
+        # ---- Tested but inconclusive ----
+        incon = attestation.get("inconclusive_coverage") or []
+        if incon:
+            lines.append("## Tested but inconclusive (needs review)")
+            lines.append("")
+            for entry in incon:
+                cat = entry["category"]
+                surfaces = entry["surfaces"]
+                if not surfaces:
+                    lines.append(f"- **{cat}** — (no surface recorded)")
+                elif len(surfaces) == 1:
+                    lines.append(f"- **{cat}** — `{surfaces[0]}`")
+                else:
+                    surface_list = ", ".join(f"`{s}`" for s in surfaces[:8])
+                    if len(surfaces) > 8:
+                        surface_list += f" (and {len(surfaces) - 8} more)"
+                    lines.append(f"- **{cat}** — {surface_list}")
+            lines.append("")
             lines.append(
-                f"_{by_result['inconclusive']} check(s) were inconclusive — "
-                "evidence was observed but couldn't be confirmed via execution. "
-                "Treat these as 'needs review', not 'safe'._"
+                "_Inconclusive checks observed evidence but couldn't confirm "
+                "via execution. Treat as 'needs review', not 'safe'._"
             )
             lines.append("")
 
@@ -1684,6 +1813,28 @@ class Tracer:
                         )
             except (OSError, TypeError):
                 logger.warning("Failed to write checks_summary.json", exc_info=True)
+
+            # Promoted coverage attestation (roadmap §17.1). Per-check atomic
+            # records grouped into negative / inconclusive / vulnerable
+            # buckets — designed for auditor / GRC / bug-bounty consumption.
+            # Only emitted when checks were run; structured for future
+            # cryptographic signing under §16.
+            try:
+                attestation = self.build_coverage_attestation()
+                if attestation["summary"]["total"] > 0:
+                    attestation_file = run_dir / "coverage_attestation.json"
+                    with attestation_file.open("w", encoding="utf-8") as f:
+                        json.dump(
+                            self._sanitize_data(attestation),
+                            f,
+                            indent=2,
+                            ensure_ascii=False,
+                            default=str,
+                        )
+            except (OSError, TypeError):
+                logger.warning(
+                    "Failed to write coverage_attestation.json", exc_info=True
+                )
 
             # Coverage matrix evaluation (roadmap §7.0). Compares the required
             # category set per (target_type, scan_mode) against the categories
