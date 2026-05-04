@@ -2182,6 +2182,20 @@ class Tracer:
             except Exception:  # noqa: BLE001
                 logger.debug("compliance_posture build failed", exc_info=True)
 
+            # Vendor-risk score (roadmap §16 PR #133). Always derived,
+            # always lands in run_meta.json — wrappers can show or hide
+            # based on whether `--vendor-mode` was set, but the score
+            # itself is informational regardless.
+            try:
+                from strix.telemetry.vendor_risk import compute_vendor_risk_score
+
+                self.run_metadata["vendor_risk"] = compute_vendor_risk_score(
+                    list(self.vulnerability_reports),
+                    self.run_metadata,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("vendor_risk score derivation failed", exc_info=True)
+
             # Always write run_meta.json — small, idempotent, lets any consumer
             # reconstruct the scan config from a structured artifact instead of
             # parsing CLI args or env vars at runtime. Roadmap §5.

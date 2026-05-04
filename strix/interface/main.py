@@ -589,6 +589,24 @@ Examples:
         ),
     )
 
+    # Roadmap §16 PR #133 — `--vendor-mode` emphasises vendor-
+    # hygiene categories + emits a 0-100 vendor-risk score on
+    # the run artifact.
+    parser.add_argument(
+        "--vendor-mode",
+        action="store_true",
+        default=False,
+        help=(
+            "Vendor / supply-chain assessment mode. Emphasises findings "
+            "about the vendor's security hygiene (TLS / security headers "
+            "/ MFA / secrets / breach indicators) over generic vulns. "
+            "Emits a 0-100 vendor-risk score in run_meta.json under "
+            "`vendor_risk` with band classification (low_risk ≥80 / "
+            "medium_risk 60-79 / high_risk <60). Suitable for the "
+            "customer's vendor-management process."
+        ),
+    )
+
     # Roadmap §16 PR #130 — `--export-format <platform>` writes
     # GRC-platform-specific JSON (Vanta / Drata / Hyperproof /
     # Secureframe / ServiceNow / generic). Repeatable.
@@ -967,6 +985,31 @@ def main() -> None:  # noqa: PLR0912, PLR0915
         )
         args.instruction = (
             f"{dns_only_block}\n\n{args.instruction}" if args.instruction else dns_only_block
+        )
+
+    # Roadmap §16 PR #133 — `--vendor-mode` posture reshape.
+    if getattr(args, "vendor_mode", False):
+        os.environ["STRIX_VENDOR_MODE"] = "1"
+        vendor_block = (
+            "## Active scope: vendor / supply-chain assessment (--vendor-mode)\n\n"
+            "The customer is evaluating this target as a SUPPLIER (vendor "
+            "they're considering onboarding). Emphasise findings that "
+            "answer 'is this vendor's security hygiene good enough to "
+            "onboard?' over generic vulnerability hunting. Specifically:\n\n"
+            "- Run TLS audit, security-headers audit, hardcoded-secret scan, "
+            "  HIBP / breach-indicator checks, MFA-attestation, SBOM "
+            "  extraction, DNS hygiene, legal-document presence, monitoring "
+            "  posture.\n"
+            "- Spend less time on edge-case authn-bypass / business-logic "
+            "  exploitation; the customer wants the score, not a 30-page "
+            "  pentest.\n"
+            "- A 0-100 vendor-risk score will be auto-derived from the "
+            "  findings at run-end. Aim for breadth over depth.\n"
+        )
+        args.instruction = (
+            f"{vendor_block}\n\n{args.instruction}"
+            if args.instruction
+            else vendor_block
         )
 
     # Roadmap §3 PR #123 — `--surface-map-only` recon-only mode.
