@@ -1107,6 +1107,28 @@ class Tracer:
         except Exception:  # noqa: BLE001
             logger.debug("reproducibility_token computation failed", exc_info=True)
 
+        # RLHF Phase 1 / A2 — finding-features extraction. The FP
+        # classifier (#A5, future PR) consumes this block. Stable
+        # schema; always present so the classifier never has to
+        # handle absence.
+        try:
+            from strix.telemetry.finding_features import extract_features
+
+            report["features"] = extract_features(report)
+        except Exception:  # noqa: BLE001
+            logger.debug("finding_features extraction failed", exc_info=True)
+
+        # RLHF Phase 1 / A4 — auto-dismiss on prior-FP fingerprint.
+        # When a finding emits with a fingerprint that matches a
+        # prior verdict=fp label and zero TP labels, auto-dismiss
+        # (severity demoted to info, verification_status set to
+        # could_not_verify, and a `finding.auto_dismissed` event
+        # fired with attribution to the prior label).
+        try:
+            self._maybe_auto_dismiss_on_prior_fp(report)
+        except Exception:  # noqa: BLE001
+            logger.debug("auto_dismiss check failed", exc_info=True)
+
         # Canonical-finding contract validation (roadmap §8.0). Runs AFTER
         # all coercions so it sees the final shape. Never drops a finding
         # — violations are attached to the report and emitted as a
@@ -1185,6 +1207,102 @@ class Tracer:
 
         self.save_run_data()
         return report_id
+
+    def _maybe_auto_dismiss_on_prior_fp(self, report: dict[str, Any]) -> None:
+        """RLHF Phase 1 / A4 — auto-dismiss on prior-FP fingerprint.
+
+        When the wrapper has labeled a finding with the same
+        fingerprint as `verdict=fp` (and zero TP labels under the
+        conservative policy), the engine auto-dismisses on the
+        next scan rather than presenting the same FP for re-triage.
+
+        Mutations applied (when triggered):
+          - `auto_dismissed = True` (boolean flag)
+          - `auto_dismissal_reason` = "prior_human_fp"
+          - `prior_label_attribution` = the FP label record (for
+            audit-trail traceability per docs/rlhf-design.md §9)
+          - `verification_status` → `could_not_verify` (the wrapper's
+            triage UI demotes this to a low-confidence card; per
+            design choice §3 "demote, don't suppress", the finding
+            stays visible).
+          - `severity` recorded under `severity_pre_auto_dismissal`
+            (for re-promotion if the labeler reverses the FP verdict).
+            Severity itself is NOT downgraded to info — the wrapper
+            renders the dismissal banner; a future PR may add an
+            opt-in severity-demotion mode.
+
+        Best-effort throughout — failures swallowed.
+        """
+        fingerprint = report.get("fingerprint")
+        if not isinstance(fingerprint, str) or not fingerprint:
+            return
+
+        # Lazy-load the feedback only once per tracer instance — the
+        # wrapper-feedback file rarely changes mid-run.
+        if not hasattr(self, "_feedback_cache_loaded") or not self._feedback_cache_loaded:
+            try:
+                from strix.telemetry.feedback_loader import load_feedback
+
+                run_dir = self.get_run_dir() if self._run_dir is None else self._run_dir
+                self._feedback_cache = load_feedback(
+                    explicit_path=None, run_dir=run_dir,
+                )
+                self._feedback_cache_loaded = True
+            except Exception:  # noqa: BLE001
+                self._feedback_cache = {}
+                self._feedback_cache_loaded = True
+
+        history = self._feedback_cache.get(fingerprint) or []
+        if not history:
+            return
+
+        try:
+            from strix.telemetry.feedback_loader import (
+                env_policy,
+                is_auto_dismissable,
+            )
+
+            should_dismiss, attribution = is_auto_dismissable(
+                history, policy=env_policy()
+            )
+        except Exception:  # noqa: BLE001
+            return
+
+        if not should_dismiss:
+            return
+
+        # Apply auto-dismissal mutations.
+        report["auto_dismissed"] = True
+        report["auto_dismissal_reason"] = "prior_human_fp"
+        report["severity_pre_auto_dismissal"] = report.get("severity")
+        report["verification_status"] = "could_not_verify"
+        if attribution is not None:
+            # Strip free-text `notes` before attaching attribution
+            # — it may carry sensitive operator commentary that
+            # shouldn't enter the finding artifact.
+            sanitised = {
+                k: v for k, v in attribution.items()
+                if k in ("verdict", "fp_reason", "labeler",
+                         "labeled_at", "label_id", "scan_run_id")
+            }
+            report["prior_label_attribution"] = sanitised
+
+        # Emit a structured event so the wrapper can flag the
+        # auto-dismissal in its UI.
+        try:
+            self._emit_event(
+                "finding.auto_dismissed",
+                payload={
+                    "fingerprint": fingerprint,
+                    "auto_dismissal_reason": "prior_human_fp",
+                    "prior_label_attribution": report.get("prior_label_attribution"),
+                    "severity_pre_auto_dismissal": report.get("severity_pre_auto_dismissal"),
+                },
+                status="auto_dismissed",
+                source="strix.telemetry.feedback_loader",
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("finding.auto_dismissed emit failed", exc_info=True)
 
     def _maybe_merge_into_existing_finding(
         self, new_report: dict[str, Any],
@@ -2366,6 +2484,27 @@ class Tracer:
                     logger.warning("Failed to write run.signature.json", exc_info=True)
                 except Exception:  # noqa: BLE001
                     logger.debug("audit-trail signing failed", exc_info=True)
+
+            # RLHF Phase 1 / A1 — per-finding trajectory.jsonl.
+            # Built post-hoc by walking events.jsonl. The labeler in
+            # the wrapper grades the agent's reasoning trail; the FP
+            # classifier consumes trajectory features (iterations_to_
+            # emit, time_to_emit_seconds, exploration_breadth) for
+            # training. Best-effort — failures don't change exit code.
+            if mark_complete and self.vulnerability_reports:
+                try:
+                    from strix.telemetry.trajectory_capture import (
+                        write_trajectory_jsonl,
+                    )
+
+                    write_trajectory_jsonl(
+                        run_dir=run_dir,
+                        findings=list(self.vulnerability_reports),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "trajectory.jsonl write failed", exc_info=True,
+                    )
 
             # Persist the check summary so downstream consumers can render
             # negative-coverage assertions ("we tested X for Y, clean") without

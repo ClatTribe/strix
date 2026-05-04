@@ -650,6 +650,31 @@ Examples:
         ),
     )
 
+    # Roadmap §12 / §18-row-2 (RLHF Phase 1 / A3) — wrapper-feedback
+    # ingestion. Reads a JSONL of prior labels keyed on finding
+    # fingerprint; auto-dismisses findings the wrapper previously
+    # marked as FP. Schema documented in docs/rlhf-design.md.
+    parser.add_argument(
+        "--feedback-from",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a feedback.jsonl produced by the wrapper. Each "
+            "line is `{finding_fingerprint, verdict, fp_reason?, ...}` "
+            "where verdict ∈ {tp, fp, partial_tp, needs_review, "
+            "out_of_scope}. Findings whose fingerprint matches a prior "
+            "verdict=fp label (and zero TPs under the conservative "
+            "policy) are auto-dismissed on the next scan — the engine "
+            "stops re-presenting the same FP for re-triage. Discovery "
+            "fallback: <run_dir>/feedback.jsonl, ~/.strix/feedback.jsonl. "
+            "Auto-dismiss policy via STRIX_FP_AUTO_DISMISS env "
+            "(conservative / aggressive / off; default conservative). "
+            "Pairs with the closed FP-loop architecture in "
+            "docs/rlhf-design.md."
+        ),
+    )
+
     # Roadmap §4 PR #121 — --quiet for server-side / non-TTY usage.
     parser.add_argument(
         "--quiet",
@@ -1079,6 +1104,10 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             console.print("[red]--rate-limit must be a positive number (qps).[/red]")
             sys.exit(2)
         os.environ["STRIX_RATE_LIMIT"] = str(args.rate_limit)
+
+    # Roadmap §12 / RLHF Phase 1 — feedback ingestion path.
+    if getattr(args, "feedback_from", None):
+        os.environ["STRIX_FEEDBACK_FROM"] = str(args.feedback_from)
 
     # Roadmap §4 PR #113 — run-level cost / token caps. The
     # `strix.llm.run_budget` module reads these env vars on every
