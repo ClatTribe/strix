@@ -697,6 +697,16 @@ _DEFAULT_WEBAPP_SPECIALISTS: tuple[str, ...] = (
 )
 
 
+# §8.1 code-target team (row 2). The deterministic specialists that
+# read code_map.json and emit canonical findings without LLM
+# improvisation: secret scan, dependency / SBOM, SAST patterns.
+_DEFAULT_CODE_SPECIALISTS: tuple[str, ...] = (
+    "secret-agent",
+    "dependency-agent",
+    "sast-agent",
+)
+
+
 _WEBAPP_SPECIALIST_TASK_TEMPLATE = (
     "Web-application exploit pass scoped to a single specialist role.\n\n"
     "Target URL: {target_url}\n"
@@ -894,6 +904,193 @@ def spawn_webapp_specialist_team(  # noqa: PLR0912
         "message": (
             f"Spawned {len(spawned)} specialist(s) of {len(requested)} requested "
             f"against {target_host} (cap: {max_specialists}; skipped: {len(skipped)})."
+        ),
+    }
+
+
+_CODE_SPECIALIST_TASK_TEMPLATE = (
+    "Code-target exploit pass scoped to a single specialist role.\n\n"
+    "Repo path: {repo_path}\n"
+    "Repo name: {repo_name}\n\n"
+    "The Code-Map agent has produced `code_map.json` (in the run dir) "
+    "with the structural inventory: routes, models, DB queries, "
+    "external HTTP calls, auth boundaries — each with `file:line` "
+    "locations. Read the map for your starting context — do NOT "
+    "re-walk the repo.\n\n"
+    "Code-map summary at spawn time:\n"
+    "{summary_block}\n\n"
+    "Your scope addendum (auto-applied by the §8.0 specialist registry) "
+    "tells you which classes to probe and which to defer to peers. "
+    "Stay strictly within that scope. Emit canonical findings with "
+    "`file:line` evidence. When done, return findings via "
+    "`agent_finish`."
+)
+
+
+def _format_code_summary_block(code_map: dict[str, Any] | None) -> str:
+    if not isinstance(code_map, dict):
+        return "  (no code map available — invoke build_code_map first)"
+    summary = code_map.get("summary") or {}
+    lines = [
+        f"  - files scanned: {summary.get('files_scanned', 0)}",
+        f"  - routes discovered: {summary.get('routes_discovered', 0)}",
+        f"  - models discovered: {summary.get('models_discovered', 0)}",
+        f"  - DB query / ORM call sites: {summary.get('db_queries_discovered', 0)}",
+        f"  - external HTTP call sites: {summary.get('external_http_calls_discovered', 0)}",
+        f"  - auth-boundary markers: {summary.get('auth_boundaries_discovered', 0)}",
+    ]
+    return "\n".join(lines)
+
+
+@register_tool(sandbox_execution=False)
+def spawn_code_specialist_team(  # noqa: PLR0912
+    agent_state: Any,
+    repo_path: str,
+    specialists: str | None = None,
+    max_specialists: int = 4,
+    inherit_context: bool = False,
+) -> dict[str, Any]:
+    """Roadmap §8.1 row 2 — spawn the code-target specialist team.
+
+    The Decide-stage routing for a code target. Reads `code_map.json`
+    (produced by row 1's `build_code_map`) and spawns one specialist
+    per requested category in parallel. Each specialist is scoped via
+    the §8.0 specialist registry (skills + scope-addendum + budget
+    auto-applied).
+
+    Composes with §8.0 the same way `spawn_webapp_specialist_team`
+    does:
+    - #88 budget enforcement: each specialist gets the registry's
+      default budget (cost / token / time caps).
+    - #89 specialist scope discipline: each spawned agent receives
+      its scope addendum.
+    - #90 lead-team protocol: this is the canonical
+      lead-spawns-team primitive for §8.1.
+
+    Args:
+        repo_path: filesystem path the specialists will analyse. Each
+            spawned specialist receives this path in its task so it
+            knows where the cloned source lives.
+        specialists: comma-separated list of specialist categories
+            to spawn. Default: the 3 §8.1 deterministic categories
+            (secret-agent, dependency-agent, sast-agent). Validates
+            each category against the registry — unknown categories
+            are skipped with `skipped[]` entries.
+        max_specialists: hard cap on number of specialists spawned
+            (default 4). Each consumes its own LLM context.
+        inherit_context: pass-through to `create_agent`. Default
+            False — specialists reason from the code map, not the
+            lead's chain-of-thought.
+
+    Returns:
+        {
+          success, repo_path, repo_name,
+          code_map_path: path to the consumed map (or None),
+          spawned: [{agent_id, category, name}, ...],
+          skipped: [{category, reason}, ...],
+          total_spawned, max_specialists, message
+        }
+    """
+    if not isinstance(repo_path, str) or not repo_path.strip():
+        return {"success": False, "error": "repo_path required"}
+
+    repo_path = repo_path.strip()
+    from pathlib import Path
+
+    root = Path(repo_path).expanduser()
+    repo_name = root.name or repo_path
+
+    # ---- Auto-load code map ----
+    code_map: dict[str, Any] | None = None
+    code_map_path: str | None = None
+    try:
+        from strix.agents.handoffs.code_map import load_code_map
+        from strix.telemetry.tracer import get_global_tracer
+
+        tracer = get_global_tracer()
+        if tracer is not None:
+            run_dir = tracer.get_run_dir()
+            candidate = run_dir / "code_map.json"
+            if candidate.exists():
+                code_map_path = str(candidate)
+                code_map, _violations = load_code_map(candidate)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # ---- Resolve specialist list ----
+    requested: list[str] = (
+        [c.strip().lower() for c in specialists.split(",") if c.strip()]
+        if specialists else list(_DEFAULT_CODE_SPECIALISTS)
+    )
+
+    from strix.agents.specialists import get_specialist_profile
+
+    spawned: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for category in requested[: max(1, int(max_specialists))]:
+        if category in seen:
+            skipped.append({"category": category, "reason": "duplicate"})
+            continue
+        seen.add(category)
+
+        profile = get_specialist_profile(category)
+        if profile is None:
+            skipped.append({
+                "category": category,
+                "reason": "unknown specialist category (not in §8.0 registry)",
+            })
+            continue
+
+        task = _CODE_SPECIALIST_TASK_TEMPLATE.format(
+            repo_path=repo_path,
+            repo_name=repo_name,
+            summary_block=_format_code_summary_block(code_map),
+        )
+        name = f"Code/{category}: {repo_name}"
+
+        try:
+            result = create_agent(
+                agent_state=agent_state,
+                task=task,
+                name=name,
+                inherit_context=inherit_context,
+                category=category,
+            )
+        except Exception as e:  # noqa: BLE001
+            skipped.append({"category": category, "reason": f"spawn_failed: {e}"})
+            continue
+
+        if not result.get("success"):
+            skipped.append({
+                "category": category,
+                "reason": result.get("error") or "spawn returned success=False",
+            })
+            continue
+
+        spawned.append({
+            "agent_id": result.get("agent_id"),
+            "category": (result.get("agent_info") or {}).get("category") or category,
+            "name": name,
+        })
+
+    over = requested[max(1, int(max_specialists)):]
+    for cat in over:
+        skipped.append({"category": cat, "reason": "max_specialists cap"})
+
+    return {
+        "success": True,
+        "repo_path": repo_path,
+        "repo_name": repo_name,
+        "code_map_path": code_map_path,
+        "spawned": spawned,
+        "skipped": skipped,
+        "total_spawned": len(spawned),
+        "max_specialists": max_specialists,
+        "message": (
+            f"Spawned {len(spawned)} code specialist(s) of {len(requested)} requested "
+            f"against {repo_name} (cap: {max_specialists}; skipped: {len(skipped)})."
         ),
     }
 
