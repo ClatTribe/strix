@@ -1,9 +1,12 @@
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
 import litellm
+
+logger = logging.getLogger(__name__)
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from litellm import acompletion, completion_cost, stream_chunk_builder, supports_reasoning
 from litellm.utils import supports_prompt_caching, supports_vision
@@ -390,6 +393,22 @@ class LLM:
             self._total_stats.cached_tokens += cached_tokens
             self._total_stats.cost += cost
             self._total_stats.requests += 1
+
+            # Roadmap §4 PR #113 — accumulate run-level totals so
+            # `--max-cost` / `--max-input-tokens` self-exit can fire.
+            # Cheap module-level singleton, decoupled from per-LLM
+            # stats so multi-agent runs aggregate correctly.
+            try:
+                from strix.llm.run_budget import record_run_usage
+
+                record_run_usage(
+                    input_tokens=int(input_tokens),
+                    output_tokens=int(output_tokens),
+                    cached_tokens=int(cached_tokens),
+                    cost_usd=float(cost),
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("run_budget.record_run_usage failed", exc_info=True)
 
             # Roadmap §5 — emit per-event token usage so wrappers can
             # render live cost meters + enforce mid-flight cost caps.
