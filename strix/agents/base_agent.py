@@ -73,6 +73,18 @@ class BaseAgent(metaclass=AgentMeta):
                 max_iterations=self.max_iterations,
             )
 
+        # Roadmap §8.0: per-sub-agent budget. Lead agents pass these
+        # via the `budget` key in `config` when spawning specialists;
+        # 0 / unset means "no limit".
+        budget = config.get("budget") or {}
+        if isinstance(budget, dict) and budget:
+            self.state.set_budget(
+                max_input_tokens=budget.get("max_input_tokens"),
+                max_output_tokens=budget.get("max_output_tokens"),
+                max_cost_usd=budget.get("max_cost_usd"),
+                time_budget_seconds=budget.get("time_budget_seconds"),
+            )
+
         self.interactive = getattr(self.llm_config, "interactive", False)
         if self.interactive and self.state.parent_id is None:
             self.state.waiting_timeout = 0
@@ -82,6 +94,13 @@ class BaseAgent(metaclass=AgentMeta):
             self.llm.set_agent_identity(self.state.agent_name, self.state.agent_id)
         self._current_task: asyncio.Task[Any] | None = None
         self._force_stop = False
+
+        # Roadmap §8.0: track the last LLM cumulative-stats snapshot
+        # we pushed to the agent state, so we can record deltas
+        # incrementally without double-counting.
+        self._last_pushed_input_tokens = 0
+        self._last_pushed_output_tokens = 0
+        self._last_pushed_cost = 0.0
 
         from strix.telemetry.tracer import get_global_tracer
 
@@ -116,6 +135,76 @@ class BaseAgent(metaclass=AgentMeta):
                 tracer.update_tool_execution(execution_id=exec_id, status="completed", result={})
 
         self._add_to_agents_graph()
+
+    def _sync_budget_from_llm(self, tracer: Any | None) -> None:
+        """Push LLM cumulative-stats deltas into the agent state and,
+        if a budget was just exceeded, emit `agent.budget_exceeded`
+        once. Roadmap §8.0.
+
+        Reads `self.llm._total_stats` (RequestStats with input_tokens,
+        output_tokens, cost). Computes delta vs. last-pushed totals,
+        records onto `self.state`, then queries
+        `state.has_exceeded_budget()` to see if the just-recorded
+        usage tipped over a limit. The event is emitted only on the
+        first transition (`budget_exceeded_event_emitted`)."""
+        try:
+            stats = getattr(self.llm, "_total_stats", None)
+            if stats is None:
+                return
+            cur_input = int(getattr(stats, "input_tokens", 0) or 0)
+            cur_output = int(getattr(stats, "output_tokens", 0) or 0)
+            cur_cost = float(getattr(stats, "cost", 0.0) or 0.0)
+
+            d_input = max(0, cur_input - self._last_pushed_input_tokens)
+            d_output = max(0, cur_output - self._last_pushed_output_tokens)
+            d_cost = max(0.0, cur_cost - self._last_pushed_cost)
+
+            if d_input or d_output or d_cost:
+                self.state.record_token_usage(
+                    input_tokens=d_input,
+                    output_tokens=d_output,
+                    cost_usd=d_cost,
+                )
+                self._last_pushed_input_tokens = cur_input
+                self._last_pushed_output_tokens = cur_output
+                self._last_pushed_cost = cur_cost
+
+            exceeded, reason = self.state.has_exceeded_budget()
+            if exceeded and not self.state.budget_exceeded_event_emitted:
+                self.state.budget_exceeded_event_emitted = True
+                self.state.budget_exceeded_reason = reason
+                if tracer is not None:
+                    try:
+                        tracer._emit_event(
+                            "agent.budget_exceeded",
+                            payload={
+                                "agent_id": self.state.agent_id,
+                                "agent_name": self.state.agent_name,
+                                "category": self.state.category,
+                                "parent_id": self.state.parent_id,
+                                "reason": reason,
+                                "iteration": self.state.iteration,
+                                "input_tokens_consumed": self.state.input_tokens_consumed,
+                                "output_tokens_consumed": self.state.output_tokens_consumed,
+                                "cost_consumed_usd": round(
+                                    self.state.cost_consumed_usd, 4,
+                                ),
+                                "limits": {
+                                    "max_input_tokens": self.state.max_input_tokens,
+                                    "max_output_tokens": self.state.max_output_tokens,
+                                    "max_cost_usd": self.state.max_cost_usd,
+                                    "time_budget_seconds": self.state.time_budget_seconds,
+                                },
+                            },
+                            actor={"id": self.state.agent_id},
+                            status="error",
+                            source="strix.agents.budget",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception:  # noqa: BLE001
+            # Budget tracking must NEVER break the agent loop.
+            pass
 
     def _add_to_agents_graph(self) -> None:
         from strix.tools.agents_graph import agents_graph_actions
@@ -217,6 +306,12 @@ class BaseAgent(metaclass=AgentMeta):
                 self._current_task = iteration_task
                 should_finish = await iteration_task
                 self._current_task = None
+
+                # Roadmap §8.0: push LLM token-usage deltas into the
+                # agent state so the budget check in should_stop()
+                # has up-to-date counters. Emit `agent.budget_exceeded`
+                # event the first time a budget is exceeded.
+                self._sync_budget_from_llm(tracer)
 
                 if should_finish is None and self.interactive:
                     await self._enter_waiting_state(tracer, text_response=True)
