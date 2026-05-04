@@ -1,0 +1,56 @@
+<tools>
+  <tool name="kev_diff_check">
+    <description>Force a CISA KEV catalog refresh, diff against the prior cached snapshot, and emit info findings for new entries since the last scan. Second 🟡 important item from the §10 expert-pentester gap audit. Extends #9 (which lazy-loads KEV with a 24h cache) into a daily-scan workflow — each run highlights newly-actively-exploited CVEs the customer should drop other priorities to patch.
+
+Mechanism:
+1. Forces KEV refresh via `strix.telemetry.threat_intel.KevCatalog.refresh(force=True)` (the existing #9 cache).
+2. Reads prior snapshot from `~/.strix/kev_diff_snapshot.json` (override via `STRIX_KEV_DIFF_SNAPSHOT` env var; small file storing just the sorted CVE-ID list + timestamp).
+3. Computes set diff:
+   - **Added**: CVEs in current catalog but not in snapshot. Each emits an info finding with full KEV metadata (vendor / product / vuln_name / added_at / due_date / required_action / ransomware_use).
+   - **Removed**: CVEs in snapshot but not in current catalog. Recorded in the result for the agent (CISA occasionally retires KEV entries) but no finding emitted.
+4. Updates the snapshot to the current catalog.
+
+First-run behaviour: silently baselines the snapshot, emits zero findings (no flooding on first use). Use `include_first_run_findings=True` to override (capped at 50 findings) for one-shot scans where the operator wants a baseline KEV report.
+
+Findings tagged `category=vulnerable_software`, `cwe=CWE-1395`, with the CVE attached so the tracer's existing KEV enrichment auto-decorates with the full record. Severity=info (the tool is informational about the catalog itself; downstream `cve_lookup` (#61) / `nvd_lookup` (#73) surface the actual exploitability per CVE). `verification_status=verified` since CISA KEV is authoritative.
+
+Hard cap of 50 findings per run to prevent flooding when first-run findings are enabled.
+
+MITRE techniques: T1592.002 (Software fingerprint) + T1588.006 (Obtain Vulnerabilities).
+
+Composes with cluster-A safety. The KEV fetch goes through `strix.telemetry.threat_intel._fetch_json` (stdlib urllib), not the proxy chain — `--exclude-path` doesn't apply (URL is CISA's, not the customer's).</description>
+    <parameters>
+      <parameter name="timeout" type="number" required="false">
+        <description>Underlying HTTP timeout (advisory — KEV fetcher uses stdlib urllib with its own timeout). Default 30.</description>
+      </parameter>
+      <parameter name="force_refresh" type="bool" required="false">
+        <description>When True (default), forces a fresh KEV download regardless of the existing 24h cache. Set False to defer to whatever the cache has (useful for repeated calls within a single scan).</description>
+      </parameter>
+      <parameter name="include_first_run_findings" type="bool" required="false">
+        <description>When True, the first run (no prior snapshot) emits findings for ALL existing KEV entries (capped at 50). Default False — first run silently establishes the baseline so daily-scan workflows aren't flooded on day one.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, total_kev_entries, snapshotted_cve_count, prior_snapshot_at, snapshot_updated, first_run, new_entries: [{cve_id, vendor, product, vuln_name, added_at, due_date, required_action, ransomware_use}, ...], removed_entries: [cve_id, ...], findings_emitted, error?}.
+
+The agent should:
+1. Treat findings emitted by this tool as **highest-priority context** — they represent CVEs CISA has confirmed are being actively exploited, with binding patch deadlines for federal agencies.
+2. For each new entry, cross-reference with `cve_lookup` (#61) / `nvd_lookup` (#73) to confirm whether the customer's detected stack is affected.
+3. For ransomware-flagged entries (`ransomware_use=Known`), escalate above other newly-emerged CVEs.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<kev_diff_check>
+</kev_diff_check>
+
+<kev_diff_check>
+<parameter=include_first_run_findings>true</parameter>
+</kev_diff_check>
+
+<kev_diff_check>
+<parameter=force_refresh>false</parameter>
+</kev_diff_check>
+]]>
+    </example_usage>
+  </tool>
+</tools>
