@@ -589,6 +589,28 @@ Examples:
         ),
     )
 
+    # Roadmap §16 PR #129 — `--compliance-pack <dir>` writes a full
+    # auditor-ready evidence bundle.
+    parser.add_argument(
+        "--compliance-pack",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help=(
+            "Write an auditor-ready compliance evidence pack to "
+            "`<DIR>/<run_id>/` at scan-end. Bundle includes: "
+            "report.md, findings.csv, findings.json, scope.json, "
+            "scan_metadata.json, control_attestation.md (per-framework "
+            "rollup grouped by SOC 2 / PCI-DSS / ISO 27001 / HIPAA / GDPR / "
+            "NIST 800-53 / OWASP / CIS), manifest.json (sha256 of every "
+            "file), and signature.txt (detached signature over the "
+            "manifest, using the same `STRIX_SIGNING_KEY` / "
+            "`STRIX_SIGNING_CMD` contract as the audit-trail signing — "
+            "no-op when neither is set). Hand the directory to your "
+            "auditor; it's content-addressable + tamper-evident."
+        ),
+    )
+
     # Roadmap §4 PR #121 — --quiet for server-side / non-TTY usage.
     parser.add_argument(
         "--quiet",
@@ -1116,6 +1138,41 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             posthog.end(tracer, exit_reason=exit_reason)
 
     results_path = Path("strix_runs") / args.run_name
+
+    # Roadmap §16 PR #129 — write the compliance evidence pack
+    # before the completion message so the message can reference
+    # the bundle path. Best-effort — pack failures do not change
+    # the exit code.
+    if getattr(args, "compliance_pack", None):
+        try:
+            from strix.telemetry.compliance_pack import write_compliance_pack
+
+            tracer = get_global_tracer()
+            if tracer is not None:
+                pack_result = write_compliance_pack(
+                    output_dir=args.compliance_pack,
+                    run_id=tracer.run_id,
+                    run_metadata=tracer.run_metadata,
+                    findings=list(tracer.vulnerability_reports),
+                    run_dir=results_path,
+                    check_summary=(
+                        tracer.get_check_summary()
+                        if hasattr(tracer, "get_check_summary")
+                        else None
+                    ),
+                )
+                if not getattr(args, "quiet", False):
+                    Console().print(
+                        f"[bold #22c55e]Compliance pack written:[/] "
+                        f"[#60a5fa]{pack_result.get('pack_dir')}[/]"
+                    )
+        except Exception:  # noqa: BLE001
+            # Compliance-pack failure should never block the normal
+            # exit path — log to stderr and proceed.
+            import traceback as _tb
+
+            _tb.print_exc()
+
     display_completion_message(args, results_path)
 
     if args.non_interactive:
