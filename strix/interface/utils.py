@@ -1114,6 +1114,44 @@ def infer_target_type(target: str) -> tuple[str, dict[str, str]]:  # noqa: PLR09
     else:
         return "ip_address", {"target_ip": str(ip_obj)}
 
+    # Roadmap §3 PR #124 — CIDR / IP-range support on `-t`.
+    # `192.168.1.0/24` is a network; `192.168.1.10-50` is a range.
+    # Both fan out to per-host targets. We accept the CIDR form
+    # directly via ipaddress.ip_network — `strict=False` so
+    # `192.168.1.10/24` (host bits set) is accepted and silently
+    # rounded to the network. We cap the size to avoid accidental
+    # /8 fan-outs.
+    if "/" in target:
+        host_part, _, mask_part = target.partition("/")
+        if mask_part.isdigit() and "." in host_part:
+            try:
+                net = ipaddress.ip_network(target, strict=False)
+            except (ValueError, TypeError):
+                pass
+            else:
+                # Cap at /20 IPv4 (4096 hosts) / /116 IPv6 to prevent
+                # accidental /8 (16M hosts) wreaking havoc on the
+                # nmap subprocess. Operators who genuinely need
+                # bigger ranges should split into multiple --target
+                # invocations.
+                if (
+                    isinstance(net, ipaddress.IPv4Network) and net.num_addresses > 4096
+                ) or (
+                    isinstance(net, ipaddress.IPv6Network) and net.num_addresses > 4096
+                ):
+                    raise ValueError(
+                        f"CIDR range {target} contains "
+                        f"{net.num_addresses} addresses — exceeds the "
+                        f"safety cap of 4096. Split into smaller ranges "
+                        f"or pass individual hosts via repeated "
+                        f"--target flags."
+                    )
+                return "ip_address", {
+                    "target_ip": str(net),
+                    "is_cidr": True,
+                    "num_hosts": net.num_addresses,
+                }
+
     path = Path(target).expanduser()
     try:
         if path.exists():
