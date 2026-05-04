@@ -1039,6 +1039,106 @@ class Tracer:
     def get_existing_vulnerabilities(self) -> list[dict[str, Any]]:
         return list(self.vulnerability_reports)
 
+    def update_finding_verification(
+        self,
+        report_id: str,
+        new_status: str,
+        *,
+        evidence: str | None = None,
+        verifier_agent_id: str | None = None,
+    ) -> bool:
+        """Update a finding's `verification_status` after deterministic
+        re-verification (roadmap §8.2 row 3 — Verifier agent).
+
+        Args:
+            report_id: the `id` field of a finding (e.g. `vuln-0001`).
+            new_status: the post-verification status. Must be in the
+                canonical-finding contract's verification allow-list:
+                `verified`, `pattern_match`, `inconclusive`,
+                `needs_review`, `could_not_verify`.
+            evidence: optional human-readable note describing why the
+                verifier set this status. Persisted in the finding's
+                `verification_evidence` field.
+            verifier_agent_id: id of the agent that ran the
+                verification (for audit). Persisted in
+                `verification_agent_id`.
+
+        Returns:
+            True if a finding with `report_id` was found AND the new
+            status is in the allow-list. False otherwise (silent — the
+            verifier never raises).
+
+        Side effects:
+            - Mutates the finding in place.
+            - Emits `finding.verification_attempted` event with the
+              previous + new status, the evidence, and the agent id.
+            - Re-runs the canonical-finding contract validator on the
+              updated finding so any introduced violations are caught.
+            - Triggers `save_run_data()` so the on-disk artifact stays
+              current.
+        """
+        # Validate the requested status against the canonical contract's
+        # allow-list — keeps the verifier from accidentally introducing
+        # a non-canonical status.
+        try:
+            from strix.telemetry.finding_contract import (
+                VALID_VERIFICATION_STATUSES,
+            )
+        except ImportError:
+            VALID_VERIFICATION_STATUSES = frozenset({  # noqa: N806
+                "verified", "pattern_match", "inconclusive",
+                "needs_review", "could_not_verify",
+            })
+        normalised = (new_status or "").strip().lower()
+        if normalised not in VALID_VERIFICATION_STATUSES:
+            logger.warning(
+                "update_finding_verification: status %r is not canonical "
+                "(allow-list: %s)",
+                new_status, sorted(VALID_VERIFICATION_STATUSES),
+            )
+            return False
+
+        target = None
+        for r in self.vulnerability_reports:
+            if r.get("id") == report_id:
+                target = r
+                break
+        if target is None:
+            logger.debug(
+                "update_finding_verification: no finding with id %r",
+                report_id,
+            )
+            return False
+
+        previous = target.get("verification_status")
+        target["verification_status"] = normalised
+        if evidence:
+            target["verification_evidence"] = str(evidence)[:2000]
+        if verifier_agent_id:
+            target["verification_agent_id"] = verifier_agent_id
+        target["verification_updated_at"] = datetime.now(UTC).isoformat()
+
+        self._emit_event(
+            "finding.verification_attempted",
+            payload={
+                "report_id": report_id,
+                "fingerprint": target.get("fingerprint"),
+                "previous_status": previous,
+                "new_status": normalised,
+                "evidence": evidence,
+                "verifier_agent_id": verifier_agent_id,
+            },
+            actor={"id": verifier_agent_id} if verifier_agent_id else None,
+            status=normalised,
+            source="strix.findings.verification",
+        )
+
+        try:
+            self.save_run_data()
+        except Exception:  # noqa: BLE001
+            logger.debug("save_run_data failed during verification update", exc_info=True)
+        return True
+
     # ------------------------------------------------------------------
     # Phase + check events (roadmap §1)
     #
