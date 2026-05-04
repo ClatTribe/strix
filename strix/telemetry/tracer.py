@@ -968,6 +968,40 @@ class Tracer:
         except Exception:  # noqa: BLE001
             logger.warning("fingerprint computation failed", exc_info=True)
 
+        # Canonical-finding contract validation (roadmap §8.0). Runs AFTER
+        # all coercions so it sees the final shape. Never drops a finding
+        # — violations are attached to the report and emitted as a
+        # `finding.shape_violation` event so the wrapper can flag the
+        # run without breaking the agent loop.
+        try:
+            from strix.telemetry.finding_contract import (
+                has_canonical_errors,
+                validate_canonical_finding,
+                violations_to_dict_list,
+            )
+
+            violations = validate_canonical_finding(report)
+            if violations:
+                violation_dicts = violations_to_dict_list(violations)
+                report["shape_violations"] = violation_dicts
+                report["is_canonical"] = not has_canonical_errors(violations)
+                self._emit_event(
+                    "finding.shape_violation",
+                    payload={
+                        "report_id": report_id,
+                        "title": report.get("title"),
+                        "fingerprint": report.get("fingerprint"),
+                        "violations": violation_dicts,
+                        "is_canonical": report["is_canonical"],
+                    },
+                    status="warning" if report["is_canonical"] else "error",
+                    source="strix.findings",
+                )
+            else:
+                report["is_canonical"] = True
+        except Exception:  # noqa: BLE001
+            logger.warning("canonical-finding validation failed", exc_info=True)
+
         self.vulnerability_reports.append(report)
         logger.info(f"Added vulnerability report: {report_id} - {title}")
         posthog.finding(severity)
