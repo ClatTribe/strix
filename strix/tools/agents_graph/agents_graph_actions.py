@@ -381,16 +381,57 @@ def view_agent_graph(agent_state: Any) -> dict[str, Any]:
 
 
 @register_tool(sandbox_execution=False)
-def create_agent(
+def create_agent(  # noqa: PLR0913
     agent_state: Any,
     task: str,
     name: str,
     inherit_context: bool = True,
     skills: str | None = None,
     category: str | None = None,
+    budget: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
         parent_id = agent_state.agent_id
+
+        # Roadmap §8.0: specialist scope discipline. When `category`
+        # matches a registered specialist profile, supply defaults for
+        # any field the caller didn't override:
+        # - `skills` defaults to the profile's recommended subset (smaller
+        #   skill registry → smaller tool prompt → faster, more focused).
+        # - `budget` defaults to the profile's cap dict (cost / token /
+        #   time limits). Caller-supplied keys win per-field.
+        # - `inherit_context` defaults to the profile setting (some
+        #   specialists like Validator should reason fresh).
+        # - `task` gets the scope-discipline addendum prepended so the
+        #   spawned specialist sees its narrowed role explicitly.
+        from strix.agents.specialists import get_specialist_profile
+
+        profile = get_specialist_profile(category)
+        if profile is not None:
+            if skills is None:
+                skills = profile.recommended_skills
+            if budget is None or not budget:
+                budget = dict(profile.default_budget) if profile.default_budget else None
+            else:
+                # Merge: profile defaults fill gaps; caller wins on keys.
+                merged: dict[str, Any] = dict(profile.default_budget or {})
+                merged.update(budget)
+                budget = merged
+            if profile.scope_addendum and profile.scope_addendum not in task:
+                task = f"{profile.scope_addendum.strip()}\n\n{task}"
+            # `inherit_context_default` is a hint, not a hard override —
+            # caller-supplied value wins. If caller passed the
+            # signature default (True) AND profile says False, we take
+            # the profile's signal. We can't distinguish "caller
+            # explicitly passed True" from "caller used the default"
+            # at this layer, so the profile's False value is
+            # respected when the caller didn't explicitly set
+            # inherit_context to True via kwargs. To keep the
+            # contract simple here we ONLY reduce-not-expand: we
+            # set `inherit_context = False` when the profile says
+            # False AND `inherit_context` is True (the default).
+            if inherit_context is True and profile.inherit_context_default is False:
+                inherit_context = False
 
         from strix.skills import parse_skill_list, validate_requested_skills
 
@@ -456,10 +497,14 @@ def create_agent(
             interactive=interactive,
         )
 
-        agent_config = {
+        agent_config: dict[str, Any] = {
             "llm_config": llm_config,
             "state": state,
         }
+        if budget:
+            # Pass budget through to BaseAgent.__init__ which calls
+            # state.set_budget(...). Roadmap §8.0.
+            agent_config["budget"] = budget
 
         agent = StrixAgent(agent_config)
 
