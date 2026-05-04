@@ -386,3 +386,265 @@ def test_mitre_attached() -> None:
     from strix.tools.registry import get_tool_mitre_techniques
     techniques = get_tool_mitre_techniques("verify_findings")
     assert "T1190" in techniques
+
+
+# ---------------------------------------------------------------------------
+# §8.1 row 4 — code-target re-verification strategies
+# ---------------------------------------------------------------------------
+
+
+def test_taint_flow_strategy_dispatched(monkeypatch) -> None:
+    """taint_flow → re-runs taint_analysis."""
+    tracer = tracer_module.get_global_tracer()
+    rid = tracer.add_vulnerability_report(
+        title="Taint flow",
+        severity="high",
+        category="taint_flow",
+        cwe="CWE-20",
+        endpoint="app.py:42",
+        verification_status="pattern_match",
+        description_plain="p", recommended_action="a",
+        code_locations=[{"file": "app.py", "line": 42}],
+    )
+
+    # Stub taint_analysis to return a flow at line 42 (matching).
+    import strix.tools.taint.taint_analysis  # noqa: F401
+    captured = {"calls": []}
+
+    def fake_taint(repo_path, **kw):
+        captured["calls"].append(repo_path)
+        return {
+            "success": True,
+            "flows": [{"file": "app.py", "lineno": 42, "sink_label": "eval"}],
+        }
+
+    monkeypatch.setattr(
+        sys.modules["strix.tools.taint.taint_analysis"],
+        "taint_analysis", fake_taint,
+    )
+
+    # Create the file so the verifier finds it (it tries Path.cwd() / file).
+    from pathlib import Path
+    Path("app.py").write_text("# stub")
+
+    out = _verify_findings()()
+    assert out["processed_count"] == 1
+    assert any(v["report_id"] == rid for v in out["verified"])
+    findings = tracer.get_existing_vulnerabilities()
+    assert findings[0]["verification_status"] == "verified"
+
+
+def test_taint_flow_line_mismatch_marks_could_not_verify(monkeypatch) -> None:
+    """Same file but different line → could_not_verify."""
+    tracer = tracer_module.get_global_tracer()
+    rid = tracer.add_vulnerability_report(
+        title="Taint flow",
+        severity="high",
+        category="taint_flow",
+        cwe="CWE-20",
+        endpoint="app.py:42",
+        verification_status="pattern_match",
+        description_plain="p", recommended_action="a",
+        code_locations=[{"file": "app.py", "line": 42}],
+    )
+
+    import strix.tools.taint.taint_analysis  # noqa: F401
+
+    def fake_taint(repo_path, **kw):
+        # Returns a flow but at a different line
+        return {
+            "success": True,
+            "flows": [{"file": "app.py", "lineno": 99}],
+        }
+
+    monkeypatch.setattr(
+        sys.modules["strix.tools.taint.taint_analysis"],
+        "taint_analysis", fake_taint,
+    )
+
+    from pathlib import Path
+    Path("app.py").write_text("# stub")
+
+    out = _verify_findings()()
+    assert any(v["report_id"] == rid for v in out["could_not_verify"])
+    findings = tracer.get_existing_vulnerabilities()
+    assert findings[0]["verification_status"] == "could_not_verify"
+
+
+def test_taint_flow_file_missing_marks_could_not_verify(monkeypatch) -> None:
+    """File no longer exists → could_not_verify."""
+    tracer = tracer_module.get_global_tracer()
+    tracer.add_vulnerability_report(
+        title="Taint flow",
+        severity="high",
+        category="taint_flow",
+        cwe="CWE-20",
+        endpoint="nonexistent_file.py:42",
+        verification_status="pattern_match",
+        description_plain="p", recommended_action="a",
+        code_locations=[{"file": "nonexistent_file.py", "line": 42}],
+    )
+
+    out = _verify_findings()()
+    # Either could_not_verify (file-missing branch) or verifier_error.
+    findings = tracer.get_existing_vulnerabilities()
+    assert findings[0]["verification_status"] == "could_not_verify"
+
+
+def test_vulnerable_dependency_strategy_dispatched(monkeypatch) -> None:
+    """vulnerable_dependency → re-runs cve_lookup."""
+    tracer = tracer_module.get_global_tracer()
+    rid = tracer.add_vulnerability_report(
+        title="lodash CVE-2021-23337",
+        severity="high",
+        category="vulnerable_dependency",
+        cwe="CWE-77",
+        cve="CVE-2021-23337",
+        endpoint="npm://lodash@4.17.20",
+        verification_status="pattern_match",
+        description_plain="p", recommended_action="a",
+    )
+
+    import strix.tools.cve_lookup.cve_lookup  # noqa: F401
+    captured = {"calls": []}
+
+    def fake_cve_lookup(package_name, package_version, ecosystem=None, **kw):
+        captured["calls"].append({
+            "name": package_name, "version": package_version, "ecosystem": ecosystem,
+        })
+        return {
+            "success": True,
+            "vulnerabilities": [{"id": "CVE-2021-23337"}],
+        }
+
+    monkeypatch.setattr(
+        sys.modules["strix.tools.cve_lookup.cve_lookup"],
+        "cve_lookup", fake_cve_lookup,
+    )
+
+    out = _verify_findings()()
+    assert out["processed_count"] == 1
+    assert any(v["report_id"] == rid for v in out["verified"])
+    # cve_lookup got the right args.
+    assert captured["calls"][0]["name"] == "lodash"
+    assert captured["calls"][0]["version"] == "4.17.20"
+    assert captured["calls"][0]["ecosystem"] == "npm"
+
+
+def test_vulnerable_dependency_cve_no_longer_present(monkeypatch) -> None:
+    """cve_lookup re-run returns CVEs but not the original one →
+    could_not_verify (vendor patched it)."""
+    tracer = tracer_module.get_global_tracer()
+    tracer.add_vulnerability_report(
+        title="lodash CVE-2021-23337",
+        severity="high",
+        category="vulnerable_dependency",
+        cwe="CWE-77",
+        cve="CVE-2021-23337",
+        endpoint="npm://lodash@4.17.21",
+        verification_status="pattern_match",
+        description_plain="p", recommended_action="a",
+    )
+
+    import strix.tools.cve_lookup.cve_lookup  # noqa: F401
+
+    def fake_cve_lookup(package_name, package_version, ecosystem=None, **kw):
+        # Returns a different CVE — the patched version
+        return {
+            "success": True,
+            "vulnerabilities": [{"id": "CVE-2099-99999"}],
+        }
+
+    monkeypatch.setattr(
+        sys.modules["strix.tools.cve_lookup.cve_lookup"],
+        "cve_lookup", fake_cve_lookup,
+    )
+
+    out = _verify_findings()()
+    assert out["processed_count"] == 1
+    findings = tracer.get_existing_vulnerabilities()
+    assert findings[0]["verification_status"] == "could_not_verify"
+
+
+def test_vulnerable_dependency_no_cves_returned(monkeypatch) -> None:
+    """cve_lookup returns no CVEs → could_not_verify."""
+    tracer = tracer_module.get_global_tracer()
+    tracer.add_vulnerability_report(
+        title="package CVE",
+        severity="high",
+        category="vulnerable_dependency",
+        cwe="CWE-77",
+        endpoint="pypi://requests@2.31.0",
+        verification_status="pattern_match",
+        description_plain="p", recommended_action="a",
+    )
+
+    import strix.tools.cve_lookup.cve_lookup  # noqa: F401
+
+    def fake_cve_lookup(**kw):
+        return {"success": True, "vulnerabilities": []}
+
+    monkeypatch.setattr(
+        sys.modules["strix.tools.cve_lookup.cve_lookup"],
+        "cve_lookup", fake_cve_lookup,
+    )
+
+    out = _verify_findings()()
+    findings = tracer.get_existing_vulnerabilities()
+    assert findings[0]["verification_status"] == "could_not_verify"
+
+
+def test_vulnerable_dependency_malformed_endpoint(monkeypatch) -> None:
+    """Endpoint without ://...@ shape → graceful could_not_verify."""
+    tracer = tracer_module.get_global_tracer()
+    tracer.add_vulnerability_report(
+        title="bad endpoint",
+        severity="high",
+        category="vulnerable_dependency",
+        cwe="CWE-77",
+        endpoint="just-a-string",
+        verification_status="pattern_match",
+        description_plain="p", recommended_action="a",
+    )
+    out = _verify_findings()()
+    assert out["processed_count"] == 1
+    findings = tracer.get_existing_vulnerabilities()
+    assert findings[0]["verification_status"] == "could_not_verify"
+
+
+def test_scoped_npm_package_parsed_correctly(monkeypatch) -> None:
+    """`@scope/pkg@1.2.3` rsplit('@', 1) gives correct (name, version)."""
+    tracer = tracer_module.get_global_tracer()
+    tracer.add_vulnerability_report(
+        title="scoped pkg",
+        severity="medium",
+        category="vulnerable_dependency",
+        cwe="CWE-77",
+        cve="CVE-2024-99999",
+        endpoint="npm://@scope/pkg@1.2.3",
+        verification_status="pattern_match",
+        description_plain="p", recommended_action="a",
+    )
+
+    import strix.tools.cve_lookup.cve_lookup  # noqa: F401
+    captured = {"calls": []}
+
+    def fake_cve_lookup(package_name, package_version, ecosystem=None, **kw):
+        captured["calls"].append({"name": package_name, "version": package_version})
+        return {"success": True, "vulnerabilities": [{"id": "CVE-2024-99999"}]}
+
+    monkeypatch.setattr(
+        sys.modules["strix.tools.cve_lookup.cve_lookup"],
+        "cve_lookup", fake_cve_lookup,
+    )
+
+    _verify_findings()()
+    assert captured["calls"][0]["name"] == "@scope/pkg"
+    assert captured["calls"][0]["version"] == "1.2.3"
+
+
+def test_taint_flow_and_dependency_in_verifiable_categories() -> None:
+    """The two new categories are in the verifiable allow-list."""
+    from strix.tools.verify.verify_findings import _VERIFIABLE_CATEGORIES
+    assert "taint_flow" in _VERIFIABLE_CATEGORIES
+    assert "vulnerable_dependency" in _VERIFIABLE_CATEGORIES
