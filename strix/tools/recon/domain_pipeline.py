@@ -94,12 +94,31 @@ _SHALLOW_STATUS_CODES = {204, 304, 405, 406}
 
 
 def _resolve_subdomain(host: str) -> str | None:
-    """Return first A record IP, or None if doesn't resolve."""
+    """Return first A record IP (IPv4), or None if doesn't resolve.
+    Used by triage to decide whether to attempt HTTP. The IPv6 path
+    runs separately (see `_resolve_subdomain_v6`) so we don't gate
+    triage on AAAA presence."""
     out = dig(host, "A")
     for line in out.splitlines():
         line = line.strip()
         if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", line):
             return line
+    return None
+
+
+def _resolve_subdomain_v6(host: str) -> str | None:
+    """Return first AAAA (IPv6) record, or None. Roadmap §7.3 row
+    "AAAA / IPv6 reachability" (PR #110): v6-only services often
+    have different exposure (different firewalls, sometimes weaker
+    hardening). Surfacing the AAAA presence in the triage output
+    lets the agent + wrapper highlight v6-only paths."""
+    out = dig(host, "AAAA")
+    for line in out.splitlines():
+        line = line.strip()
+        # Lenient IPv6 match — `dig` returns canonical form, so a
+        # quick presence check on `:` and hex chars is enough.
+        if ":" in line and re.fullmatch(r"[0-9a-fA-F:]+", line):
+            return line.lower()
     return None
 
 
@@ -109,69 +128,191 @@ def _triage_subdomain(host: str) -> dict[str, Any]:
     deep    — likely a web app / authenticated surface worth deep testing
     shallow — live but probably not a primary target (static, redirect, etc.)
     skip    — doesn't resolve, or returns 5xx, or HEAD failed
+
+    Roadmap §7.3 row "HTTP / HTTPS asymmetry per subdomain" (PR #110):
+    we probe BOTH schemes when either responds successfully — the
+    asymmetry result lets us emit a low-severity finding when a
+    subdomain serves only over plaintext HTTP. The original behaviour
+    (HTTPS-first with HTTP fallback) is preserved for the chosen
+    `scheme` field; the second probe is purely for asymmetry detection.
     """
     ip = _resolve_subdomain(host)
+    ipv6 = _resolve_subdomain_v6(host)
+    if not ip and not ipv6:
+        return {
+            "host": host,
+            "ip": None,
+            "ipv6": None,
+            "live": False,
+            "triage": "skip",
+            "evidence": "no A or AAAA record",
+        }
+    # Edge case: IPv6-only subdomain — most environments still tolerate
+    # HEAD via `http_head` since httpx supports v6, but the host won't
+    # have an A record. Surface the AAAA so the agent picks up on it.
     if not ip:
         return {
             "host": host,
             "ip": None,
-            "live": False,
-            "triage": "skip",
-            "evidence": "no A record",
+            "ipv6": ipv6,
+            "live": True,
+            "triage": "shallow",
+            "scheme_asymmetry": "ipv6_only",
+            "evidence": f"AAAA-only ({ipv6})",
         }
 
-    # Try HTTPS first, fall back to HTTP for legacy hosts.
-    for scheme in ("https", "http"):
-        status, headers = http_head(f"{scheme}://{host}/", follow_redirects=False)
-        if status > 0:
-            content_type = (
-                headers.get("content-type") or headers.get("Content-Type") or ""
-            ).lower()
-            server = (headers.get("server") or headers.get("Server") or "")[:80]
+    https_status, https_headers = http_head(
+        f"https://{host}/", follow_redirects=False
+    )
+    http_status, http_headers = http_head(
+        f"http://{host}/", follow_redirects=False
+    )
 
-            evidence = f"{scheme.upper()} {status}"
-            if content_type:
-                evidence += f" {content_type.split(';')[0]}"
-            if server:
-                evidence += f" / Server: {server}"
+    # Determine the primary scheme — HTTPS preferred when it responds.
+    primary_scheme: str | None = None
+    primary_status = 0
+    primary_headers: dict[str, str] = {}
+    if https_status > 0:
+        primary_scheme = "https"
+        primary_status = https_status
+        primary_headers = https_headers
+    elif http_status > 0:
+        primary_scheme = "http"
+        primary_status = http_status
+        primary_headers = http_headers
 
-            triage: str
-            if status >= 500:
-                triage = "skip"
-            elif status in _DEEP_STATUS_CODES and (
-                "html" in content_type or status in (401, 403) or not content_type
-            ):
-                triage = "deep"
-            elif status in _DEEP_STATUS_CODES and "json" in content_type:
-                # JSON 200 → API surface — also valuable but a different focus.
-                triage = "deep"
-            elif status in _SHALLOW_STATUS_CODES:
-                triage = "shallow"
-            elif status in _DEEP_STATUS_CODES:
-                triage = "shallow"  # served, but not html/json — likely static
-            else:
-                triage = "shallow"
+    # Asymmetry classification.
+    # `https_only`: HTTPS responds, HTTP doesn't → standard well-configured.
+    # `http_only`:  HTTP responds, HTTPS doesn't → INSECURE — emit low.
+    # `both`:       both schemes respond — fine, but record for honesty.
+    # `neither`:    neither responds — caller already handles via primary_scheme is None.
+    asymmetry: str
+    if https_status > 0 and http_status > 0:
+        asymmetry = "both"
+    elif https_status > 0:
+        asymmetry = "https_only"
+    elif http_status > 0:
+        asymmetry = "http_only"
+    else:
+        asymmetry = "neither"
 
-            return {
-                "host": host,
-                "ip": ip,
-                "live": True,
-                "triage": triage,
-                "status": status,
-                "scheme": scheme,
-                "content_type": content_type or None,
-                "server": server or None,
-                "evidence": evidence,
-            }
+    # Emit asymmetry finding ONLY for the http_only case. The "both"
+    # case is normal (HTTP→HTTPS redirect lives at HTTP); the
+    # `https_only` case is the well-configured ideal.
+    if asymmetry == "http_only":
+        _emit_http_only_finding(host, http_status)
 
-    # Resolved but no HTTP/HTTPS response.
+    if primary_scheme is None:
+        return {
+            "host": host,
+            "ip": ip,
+            "ipv6": ipv6,
+            "live": False,
+            "triage": "skip",
+            "scheme_asymmetry": asymmetry,
+            "evidence": "resolves but no HTTP/HTTPS response",
+        }
+
+    content_type = (
+        primary_headers.get("content-type")
+        or primary_headers.get("Content-Type")
+        or ""
+    ).lower()
+    server = (
+        primary_headers.get("server") or primary_headers.get("Server") or ""
+    )[:80]
+
+    evidence = f"{primary_scheme.upper()} {primary_status}"
+    if content_type:
+        evidence += f" {content_type.split(';')[0]}"
+    if server:
+        evidence += f" / Server: {server}"
+    if asymmetry == "http_only":
+        evidence += " [HTTP-ONLY: insecure]"
+
+    triage: str
+    if primary_status >= 500:
+        triage = "skip"
+    elif primary_status in _DEEP_STATUS_CODES and (
+        "html" in content_type or primary_status in (401, 403) or not content_type
+    ):
+        triage = "deep"
+    elif primary_status in _DEEP_STATUS_CODES and "json" in content_type:
+        triage = "deep"
+    elif primary_status in _SHALLOW_STATUS_CODES:
+        triage = "shallow"
+    elif primary_status in _DEEP_STATUS_CODES:
+        triage = "shallow"
+    else:
+        triage = "shallow"
+
     return {
         "host": host,
         "ip": ip,
-        "live": False,
-        "triage": "skip",
-        "evidence": "resolves but no HTTP/HTTPS response",
+        "ipv6": ipv6,
+        "live": True,
+        "triage": triage,
+        "status": primary_status,
+        "scheme": primary_scheme,
+        "scheme_asymmetry": asymmetry,
+        "content_type": content_type or None,
+        "server": server or None,
+        "evidence": evidence,
     }
+
+
+def _emit_http_only_finding(host: str, http_status: int) -> None:
+    """Roadmap §7.3 — emit a low finding when a subdomain serves only
+    plaintext HTTP. Zero-FP: probed both schemes, https returned no
+    response, http returned a non-zero status. Binary fact."""
+    try:
+        from strix.telemetry.tracer import get_global_tracer
+    except ImportError:
+        return
+    tracer = get_global_tracer()
+    if tracer is None:
+        return
+    tracer.add_vulnerability_report(
+        title=f"Subdomain {host} serves only over plaintext HTTP",
+        severity="low",
+        category="cleartext_transmission",
+        cwe="CWE-319",
+        target=host,
+        endpoint=f"http://{host}/",
+        description=(
+            f"`{host}` responded to a HEAD probe over plaintext HTTP "
+            f"(status {http_status}) but did NOT respond over HTTPS. "
+            f"Any data transmitted to or from this subdomain — "
+            f"credentials, tokens, session cookies, API payloads — "
+            f"travels in plaintext over the network and is readable "
+            f"by any observer on path."
+        ),
+        impact=(
+            "Plaintext-HTTP subdomains in scope often share session "
+            "cookies with their HTTPS sister apps (especially when "
+            "cookies are scoped to the parent domain — see #109). "
+            "An attacker on the network — coffee-shop wifi, "
+            "compromised router, ISP-level adversary — can read "
+            "the cookies and pivot to the HTTPS apps."
+        ),
+        remediation_steps=(
+            "Either retire the subdomain (preferred) or front it with "
+            "TLS via the org's existing certificate management. If "
+            "the host is genuinely only an HTTP-redirect-to-HTTPS "
+            "endpoint, configure HSTS at the apex with `includeSubDomains` "
+            "so browsers refuse plaintext to any subdomain."
+        ),
+        description_plain=(
+            f"`{host}` only works over insecure HTTP. Anyone on the "
+            f"network can read what users send to or receive from it."
+        ),
+        recommended_action=(
+            "Migrate the subdomain to HTTPS, or retire it. Set HSTS "
+            "with `includeSubDomains` at the apex so browsers refuse "
+            "plaintext connections."
+        ),
+        verification_status="verified",
+    )
 
 
 # ---------------------------------------------------------------------------
