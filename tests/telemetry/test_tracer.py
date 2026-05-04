@@ -647,3 +647,154 @@ def test_machine_readable_outputs_use_lowercase_severity(monkeypatch, tmp_path) 
     assert sev_token == sev_token.upper(), (
         f"markdown display surface should uppercase severity; got {sev_token!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Roadmap §4: agent / target context inlined on every tool.execution.* event
+# ---------------------------------------------------------------------------
+
+
+def test_tool_execution_event_carries_agent_and_target_context(
+    monkeypatch, tmp_path
+) -> None:
+    """Every `tool.execution.*` event carries `agent_name`, `agent_category`,
+    and `target` directly on the actor block. Wrappers can render
+    'Agent X (auth-attacker) on api.example.com running send_request'
+    without joining `agent.created` + `target.started` + `tool.execution.*`.
+
+    Target resolution:
+      - per-call URL hint takes precedence
+      - falls back to the run's primary target when no URL arg is present
+    """
+    monkeypatch.chdir(tmp_path)
+    tracer = Tracer("tool-context")
+    set_global_tracer(tracer)
+    tracer.set_scan_config({"targets": ["https://primary.example.com"]})
+    tracer.log_agent_creation(
+        "agent-1",
+        "Auth Attacker",
+        "find auth bypass",
+        category="auth-attacker",
+    )
+
+    # Per-call URL hint — should win over the primary fallback.
+    exec_id = tracer.log_tool_execution_start(
+        "agent-1", "send_request", {"url": "https://api.example.com/login"}
+    )
+    tracer.update_tool_execution(exec_id, "completed", {"status_code": 200})
+
+    # No URL hint — should fall back to the run's primary target.
+    exec_id_2 = tracer.log_tool_execution_start(
+        "agent-1", "thinking", {"thought": "let me think"}
+    )
+    tracer.update_tool_execution(exec_id_2, "completed", {})
+
+    events_path = tmp_path / "strix_runs" / "tool-context" / "events.jsonl"
+    events = _load_events(events_path)
+
+    started_events = [
+        e for e in events if e.get("event_type") == "tool.execution.started"
+    ]
+    updated_events = [
+        e for e in events if e.get("event_type") == "tool.execution.updated"
+    ]
+    assert len(started_events) == 2
+    assert len(updated_events) == 2
+
+    # ---- per-call URL hint ----
+    started_send = next(
+        e for e in started_events if e["actor"].get("tool_name") == "send_request"
+    )
+    updated_send = next(
+        e for e in updated_events if e["actor"].get("tool_name") == "send_request"
+    )
+    for e in (started_send, updated_send):
+        assert e["actor"]["agent_name"] == "Auth Attacker"
+        assert e["actor"]["agent_category"] == "auth-attacker"
+        # Host extracted from the URL — comparable across tools.
+        assert e["actor"]["target"] == "api.example.com"
+
+    # ---- run-level fallback ----
+    started_think = next(
+        e for e in started_events if e["actor"].get("tool_name") == "thinking"
+    )
+    updated_think = next(
+        e for e in updated_events if e["actor"].get("tool_name") == "thinking"
+    )
+    for e in (started_think, updated_think):
+        assert e["actor"]["agent_name"] == "Auth Attacker"
+        assert e["actor"]["agent_category"] == "auth-attacker"
+        # Falls back to the run's primary target. URL parser preserves
+        # scheme-stripped form for stable rendering.
+        target = e["actor"]["target"]
+        assert target is not None
+        assert "primary.example.com" in target
+
+
+def test_tool_execution_target_falls_back_when_no_scan_config(
+    monkeypatch, tmp_path
+) -> None:
+    """When neither args nor scan_config offer a target, `target` is None
+    but the field is still present on the event. Wrappers should NEVER
+    have to handle the field being absent — only the value being null."""
+    monkeypatch.chdir(tmp_path)
+    tracer = Tracer("no-target")
+    set_global_tracer(tracer)
+    tracer.log_agent_creation("agent-x", "Operator", "investigate")
+
+    exec_id = tracer.log_tool_execution_start(
+        "agent-x", "thinking", {"thought": "let me think"}
+    )
+    tracer.update_tool_execution(exec_id, "completed", {})
+
+    events_path = tmp_path / "strix_runs" / "no-target" / "events.jsonl"
+    events = _load_events(events_path)
+
+    for event_type in ("tool.execution.started", "tool.execution.updated"):
+        evs = [e for e in events if e.get("event_type") == event_type]
+        assert evs, f"expected at least one {event_type} event"
+        for e in evs:
+            assert "target" in e["actor"], (
+                f"{event_type} actor block missing 'target' key — "
+                f"schema must always present the field"
+            )
+            assert e["actor"]["target"] is None
+            # agent context still present
+            assert e["actor"]["agent_name"] == "Operator"
+            # category is None on this agent — but the key must be present
+            assert "agent_category" in e["actor"]
+
+
+def test_tool_execution_url_extraction_from_various_arg_keys(
+    monkeypatch, tmp_path
+) -> None:
+    """Tools use different param names for their target URL. Test that
+    we pull the host out of any of `url` / `target_url` / `target` /
+    `endpoint` / `host` / `domain`."""
+    monkeypatch.chdir(tmp_path)
+    tracer = Tracer("arg-keys")
+    set_global_tracer(tracer)
+    tracer.log_agent_creation("agent-1", "Worker", "scan", category="scanner")
+
+    cases = [
+        ({"url": "https://a.example.com/path"}, "a.example.com"),
+        ({"target_url": "https://b.example.com/api"}, "b.example.com"),
+        ({"target": "https://c.example.com"}, "c.example.com"),
+        ({"endpoint": "https://d.example.com/v1"}, "d.example.com"),
+        ({"host": "e.example.com"}, "e.example.com"),
+        ({"domain": "f.example.com"}, "f.example.com"),
+    ]
+    for args, _expected in cases:
+        eid = tracer.log_tool_execution_start("agent-1", "fingerprint_tech_stack", args)
+        tracer.update_tool_execution(eid, "completed", {})
+
+    events_path = tmp_path / "strix_runs" / "arg-keys" / "events.jsonl"
+    events = _load_events(events_path)
+    started = [e for e in events if e.get("event_type") == "tool.execution.started"]
+
+    # 6 cases, in order.
+    assert len(started) == len(cases)
+    for ev, (_args, expected_host) in zip(started, cases, strict=True):
+        assert ev["actor"]["target"] == expected_host, (
+            f"expected target={expected_host!r}, got {ev['actor']['target']!r}"
+        )

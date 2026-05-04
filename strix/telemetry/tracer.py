@@ -1844,6 +1844,81 @@ class Tracer:
         )
         return message_id
 
+    def _resolve_tool_event_context(
+        self,
+        agent_id: str,
+        args: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Roadmap §4: surface `agent_name` / `agent_category` / `target`
+        directly on every `tool.execution.*` event so wrappers can render
+        "Agent X on target Y is running tool Z" without joining across
+        `agent.created` + `target.started` + `tool.execution.*`.
+
+        Resolution order for `target`:
+          1. Per-call hint from the tool args (`url` / `target_url` /
+             `target` / `endpoint` / `host` / `domain`) — host extracted
+             from URLs so the field is comparable across tools.
+          2. Run-level primary target (first entry of
+             `scan_config["targets"]`) when the tool didn't take any
+             URL-shaped argument.
+          3. None — the field is still emitted (so the schema is
+             stable) but downstream parsers handle the null.
+
+        Always returns a dict; never raises."""
+        ctx: dict[str, Any] = {
+            "agent_name": None,
+            "agent_category": None,
+            "target": None,
+        }
+
+        # Agent name + category from the in-memory agent registry.
+        try:
+            agent_record = self.agents.get(agent_id) if agent_id else None
+            if isinstance(agent_record, dict):
+                ctx["agent_name"] = agent_record.get("name")
+                ctx["agent_category"] = agent_record.get("category")
+        except Exception:  # noqa: BLE001
+            logger.debug("agent context lookup failed", exc_info=True)
+
+        # Per-call target hint from args.
+        per_call_target: str | None = None
+        if isinstance(args, dict):
+            for key in ("url", "target_url", "target", "endpoint", "host", "domain"):
+                value = args.get(key)
+                if isinstance(value, str) and value.strip():
+                    per_call_target = value.strip()
+                    break
+
+        # Normalize to host (so /login on https://api.example.com renders
+        # as `api.example.com`, comparable across tools that use the full
+        # URL vs ones that use bare host).
+        if per_call_target is not None:
+            try:
+                if "://" in per_call_target:
+                    from urllib.parse import urlparse
+
+                    parsed = urlparse(per_call_target)
+                    if parsed.netloc:
+                        per_call_target = parsed.netloc
+            except Exception:  # noqa: BLE001
+                logger.debug("target host extraction failed", exc_info=True)
+
+        if per_call_target:
+            ctx["target"] = per_call_target
+        else:
+            # Fall back to the run's primary target.
+            try:
+                config_targets = (self.scan_config or {}).get("targets") or []
+                if config_targets:
+                    primary = config_targets[0]
+                    normalized = _normalize_target_for_events(primary)
+                    if normalized and normalized.get("value"):
+                        ctx["target"] = str(normalized["value"])
+            except Exception:  # noqa: BLE001
+                logger.debug("primary target fallback failed", exc_info=True)
+
+        return ctx
+
     def log_tool_execution_start(
         self,
         agent_id: str,
@@ -1884,10 +1959,24 @@ class Tracer:
         except Exception:  # noqa: BLE001
             logger.debug("MITRE technique lookup failed", exc_info=True)
 
+        # Roadmap §4: agent + target context inlined onto the actor block
+        # so `tool.execution.*` events are self-contained.
+        ctx = self._resolve_tool_event_context(agent_id, args)
+
+        # Stash on the execution record so update_tool_execution can
+        # re-emit the same context without re-resolving (consistent
+        # across started/updated; cheap).
+        execution_data["agent_name"] = ctx.get("agent_name")
+        execution_data["agent_category"] = ctx.get("agent_category")
+        execution_data["target"] = ctx.get("target")
+
         actor: dict[str, Any] = {
             "agent_id": agent_id,
+            "agent_name": ctx.get("agent_name"),
+            "agent_category": ctx.get("agent_category"),
             "tool_name": tool_name,
             "execution_id": execution_id,
+            "target": ctx.get("target"),
             "mitre_techniques": mitre_techniques,
         }
 
@@ -1919,12 +2008,30 @@ class Tracer:
         agent_id = str(tool_data.get("agent_id", "unknown"))
         error_payload = result if status in {"error", "failed"} else None
 
+        # Reuse the context resolved at `started` time. If somehow it
+        # wasn't stashed (legacy / replay path), resolve now.
+        if (
+            "agent_name" not in tool_data
+            or "agent_category" not in tool_data
+            or "target" not in tool_data
+        ):
+            ctx = self._resolve_tool_event_context(agent_id, tool_data.get("args"))
+        else:
+            ctx = {
+                "agent_name": tool_data.get("agent_name"),
+                "agent_category": tool_data.get("agent_category"),
+                "target": tool_data.get("target"),
+            }
+
         self._emit_event(
             "tool.execution.updated",
             actor={
                 "agent_id": agent_id,
+                "agent_name": ctx.get("agent_name"),
+                "agent_category": ctx.get("agent_category"),
                 "tool_name": tool_name,
                 "execution_id": execution_id,
+                "target": ctx.get("target"),
             },
             payload={"result": result},
             status=status,
