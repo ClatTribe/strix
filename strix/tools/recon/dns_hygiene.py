@@ -34,19 +34,72 @@ from ._common import (
 _TOOL_NAME = "dns_hygiene_check"
 
 
+# Roadmap §7.3 row "DKIM selector wordlist expansion" (PR #110).
+# Each missed selector = a missed weak/expired DKIM key. The list
+# below combines the canonical short list with vendor-specific
+# selectors used by the most-deployed transactional / marketing /
+# managed-mail vendors. Order chosen so the most likely hits (RFC-
+# default + Google + Microsoft + selector1/2) probe first; kept
+# alphabetised within each vendor cohort for readability.
 _DKIM_SELECTORS = [
+    # ---- canonical short list (every vendor falls back to one of these) ----
     "default",
+    "dkim",
+    "mail",
+    "smtp",
     "google",
     "k1",
     "k2",
-    "mail",
+    "k3",
     "selector1",
     "selector2",
-    "dkim",
     "s1",
     "s2",
-    "mailo",
-    "smtp",
+    "s3",
+    # ---- Microsoft 365 / Exchange Online ----
+    "selector1-azurecomm-prod-net",
+    # ---- SendGrid ----
+    "smtpapi",
+    "s1-sendgrid",
+    "s2-sendgrid",
+    # ---- Mailchimp / Mandrill ----
+    "mandrill",
+    "k2-mandrill",
+    # ---- Mailgun ----
+    "mxvault",
+    "mg",
+    "smtp-mg",
+    # ---- Postmark ----
+    "20210112",
+    "pm",
+    "postmark",
+    # ---- Amazon SES ----
+    "ses",
+    "amazonses",
+    # ---- ProtonMail ----
+    "protonmail",
+    "protonmail2",
+    "protonmail3",
+    # ---- Zoho ----
+    "zoho",
+    "zmail",
+    # ---- Mimecast ----
+    "mta",
+    "mimecast",
+    # ---- Apple iCloud ----
+    "sig1",
+    # ---- Sparkpost / SocketLabs / SES variants ----
+    "scph0922",
+    "sparkpost",
+    "socketlabs",
+    # ---- Salesforce / Pardot / Marketing Cloud ----
+    "pf2014",
+    "et",
+    # ---- Misc selector conventions seen on big providers ----
+    "20161025",
+    "main",
+    "key1",
+    "key2",
 ]
 
 

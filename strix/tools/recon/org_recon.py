@@ -221,6 +221,33 @@ _HOMOGLYPHS: dict[str, list[str]] = {
     "nn": ["m"],
 }
 
+# Roadmap §7.3 row "Punycode / IDN homograph subdomains" (PR #110).
+# Cyrillic / Greek look-alikes are a different attacker profile than
+# the ASCII transformations above — phishing campaigns frequently
+# register IDN-homograph domains because most users can't visually
+# distinguish `examplе.com` (Cyrillic 'е' U+0435) from `example.com`
+# (ASCII 'e' U+0065).
+#
+# The output is encoded to punycode (`xn--…`) before the DNS query
+# so we don't depend on the resolver doing IDNA conversion. We
+# generate one candidate per (ascii_char, single_homoglyph)
+# substitution; the typosquat generator dedupes against the
+# all-ASCII candidate set.
+_IDN_HOMOGLYPHS: dict[str, list[str]] = {
+    # Cyrillic look-alikes (the high-FP-resistant set — these chars
+    # are visually identical to their ASCII counterparts in most
+    # fonts).
+    "a": ["а"],   # CYRILLIC SMALL LETTER A
+    "c": ["с"],   # CYRILLIC SMALL LETTER ES
+    "e": ["е"],   # CYRILLIC SMALL LETTER IE
+    "o": ["о"],   # CYRILLIC SMALL LETTER O
+    "p": ["р"],   # CYRILLIC SMALL LETTER ER
+    "x": ["х"],   # CYRILLIC SMALL LETTER HA
+    "y": ["у"],   # CYRILLIC SMALL LETTER U
+    # Greek look-alikes.
+    "i": ["ι"],   # GREEK SMALL LETTER IOTA — IDNA-encodable
+}
+
 _NEIGHBOUR_KEYS: dict[str, str] = {
     "q": "wa",
     "w": "qe",
@@ -310,6 +337,23 @@ def _typosquat_candidates(domain: str, max_candidates: int = 25) -> list[str]:
         for neighbour in _NEIGHBOUR_KEYS.get(ch, ""):
             sub = label[:i] + neighbour + label[i + 1 :]
             add(sub + "." + tld)
+            if len(out) >= max_candidates:
+                return out
+
+    # 6. IDN homoglyphs (Cyrillic / Greek) — single-character
+    #    substitution per position. Encoded to punycode so the DNS
+    #    query sees `xn--…`. Phishing campaigns lean on these heavily.
+    #    Roadmap §7.3 row "Punycode / IDN homograph subdomains".
+    for i, ch in enumerate(label):
+        for idn_ch in _IDN_HOMOGLYPHS.get(ch, []):
+            unicode_label = label[:i] + idn_ch + label[i + 1 :]
+            try:
+                puny = unicode_label.encode("idna").decode("ascii")
+            except (UnicodeError, UnicodeDecodeError):
+                continue
+            if puny == label:
+                continue
+            add(puny + "." + tld)
             if len(out) >= max_candidates:
                 return out
 
