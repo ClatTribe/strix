@@ -344,6 +344,7 @@ def _complete_check(check_id: str | None, result: str, evidence: str) -> None:
 @register_tool(
     sandbox_execution=True,
     mitre_techniques=["T1596"],  # Search Open Technical Databases
+    provenance="intel_feed",  # VirusTotal — multi-vendor reputation feed
 )
 def vt_reputation(
     ioc: str,

@@ -376,6 +376,7 @@ def _complete_check(check_id: str | None, result: str, evidence: str) -> None:
 @register_tool(
     sandbox_execution=True,
     mitre_techniques=["T1596"],  # Search Open Technical Databases
+    provenance="intel_feed",  # GreyNoise — IP-noise classification feed
 )
 def greynoise_classify(
     ip: str,

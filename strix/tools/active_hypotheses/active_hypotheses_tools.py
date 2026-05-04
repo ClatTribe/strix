@@ -4,8 +4,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from strix.agents import active_hypotheses
 from strix.tools.registry import register_tool
+
+
+# NOTE: the `strix.agents.active_hypotheses` module is imported
+# lazily inside each tool body (NOT at module-load time). Reason:
+# `strix.agents.__init__` pulls in `BaseAgent` which transitively
+# imports `strix.tools` — at module-load that's a circular re-entry
+# while `strix.tools.__init__` is still resolving us.
+def _module():
+    import strix.agents.active_hypotheses as m  # noqa: PLC0415
+
+    return m
 
 
 @register_tool(sandbox_execution=False, mitre_techniques=[])
@@ -35,7 +45,7 @@ def open_hypothesis(
         {success: bool, hypothesis_id: str, ...} — id is needed for
         confirm/dismiss.
     """
-    return active_hypotheses.open_hypothesis(
+    return _module().open_hypothesis(
         hypothesis=hypothesis,
         surface=surface,
         category=category,
@@ -53,7 +63,7 @@ def confirm_hypothesis(
     When you emitted a vulnerability report, pass `linked_finding_id`
     so the wrapper can join the hypothesis timeline to the finding.
     """
-    return active_hypotheses.confirm_hypothesis(
+    return _module().confirm_hypothesis(
         hypothesis_id=hypothesis_id,
         resolution=resolution,
         linked_finding_id=linked_finding_id,
@@ -75,7 +85,7 @@ def dismiss_hypothesis(
     `compensating_control`, `intended_behavior`, `test_fixture`,
     `deprecated_path`, `other`.
     """
-    return active_hypotheses.dismiss_hypothesis(
+    return _module().dismiss_hypothesis(
         hypothesis_id=hypothesis_id,
         dismissal_reason=dismissal_reason,
         resolution=resolution,
@@ -101,7 +111,7 @@ def list_hypotheses(
         {success: True, count: int, hypotheses: [...]} — list ordered
         by opened_at (oldest first).
     """
-    out = active_hypotheses.list_active_hypotheses(
+    out = _module().list_active_hypotheses(
         only_status=only_status,
         surface=surface,
         category=category,

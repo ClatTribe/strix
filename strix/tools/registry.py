@@ -188,6 +188,22 @@ def _should_register_tool(
     return not (requires_web_search_mode and not _has_perplexity_api())
 
 
+_VALID_PROVENANCE_CLASSES = frozenset({
+    "trusted_source",   # KEV catalog, OSV.dev, NVD, MITRE static maps —
+                        # authoritative third-party intelligence
+    "intel_feed",       # VirusTotal, Shodan, GreyNoise, OTX, AbuseIPDB —
+                        # third-party reputation feeds (trust with attribution)
+    "target",           # any tool whose output is HTTP body / response from
+                        # the customer's target — adversarial-by-default
+    "operator_input",   # operator-supplied artifact (HAR file, threat model,
+                        # prior findings) — trusted but operator-specific
+    "framework",        # internal Strix output (notes, todo, thinking, finish) —
+                        # not external content at all
+    "mixed",            # tool output combines target + intel; agent must
+                        # disambiguate per-field
+})
+
+
 def register_tool(
     func: Callable[..., Any] | None = None,
     *,
@@ -195,6 +211,7 @@ def register_tool(
     requires_browser_mode: bool = False,
     requires_web_search_mode: bool = False,
     mitre_techniques: list[str] | None = None,
+    provenance: str | None = None,
 ) -> Callable[..., Any]:
     """Register a tool.
 
@@ -207,6 +224,25 @@ def register_tool(
     (logged at debug level). Tools without explicit techniques get an
     empty list (the field is always present on the event for schema
     stability).
+
+    `provenance` (roadmap §17.6 / §18 row 10) — optional string
+    declaring the trust class of the tool's output. The agent's
+    system prompt explains that adversarial-by-default classes
+    (`target`, `mixed`) require treating output as potentially
+    attacker-controlled, while trusted classes (`trusted_source`,
+    `intel_feed`, `operator_input`, `framework`) carry stronger
+    epistemic weight. Surfaces on `tool.execution.*` events under
+    `actor.provenance`. Composes with #84 indirect-prompt-injection
+    sanitisation: #84 redacts unsafe patterns from any tool output;
+    provenance gives the agent an additional structural signal
+    about which outputs to weight more heavily.
+
+    Valid values: `trusted_source` / `intel_feed` / `target` /
+    `operator_input` / `framework` / `mixed`. Unrecognised values
+    are dropped (logged at debug); tools without explicit
+    provenance default to `target` for HTTP-class tools and
+    `framework` for in-process tools — but the safer bet is to
+    declare explicitly.
     """
     def decorator(f: Callable[..., Any]) -> Callable[..., Any]:
         if not _should_register_tool(
@@ -218,12 +254,29 @@ def register_tool(
 
         sandbox_mode = _is_sandbox_mode()
         normalized_techniques = _normalize_mitre_techniques(mitre_techniques)
+
+        # Provenance validation. Unrecognised values logged + dropped
+        # to None so a downstream consumer never sees a non-canonical
+        # class. Default fallback at lookup time (see
+        # `get_tool_provenance`) — declaring explicitly is safer.
+        normalized_provenance: str | None = None
+        if provenance is not None:
+            candidate = str(provenance).strip().lower()
+            if candidate in _VALID_PROVENANCE_CLASSES:
+                normalized_provenance = candidate
+            else:
+                logger.debug(
+                    "tool %s: dropped non-canonical provenance %r (valid: %s)",
+                    f.__name__, provenance, sorted(_VALID_PROVENANCE_CLASSES),
+                )
+
         func_dict = {
             "name": f.__name__,
             "function": f,
             "module": _get_module_name(f),
             "sandbox_execution": sandbox_execution,
             "mitre_techniques": normalized_techniques,
+            "provenance": normalized_provenance,
         }
 
         if not sandbox_mode:
@@ -318,6 +371,35 @@ def get_tool_mitre_techniques(name: str) -> list[str]:
                 return [str(t) for t in techniques]
             return []
     return []
+
+
+def get_tool_provenance(name: str) -> str:
+    """Return the provenance class for a tool. Always returns one
+    of the canonical values — falls back to a sensible default
+    when the tool didn't declare explicitly.
+
+    Default policy:
+      * sandbox_execution=False (in-process / framework tool) → `framework`
+      * sandbox_execution=True  (probes the target) → `target`
+
+    Tools that consume third-party intelligence (cve_lookup, kev_diff,
+    vt_reputation, etc.) SHOULD declare `intel_feed` or
+    `trusted_source` explicitly — the default `target` is safer
+    when undeclared.
+
+    Surfaces on `tool.execution.*` events under `actor.provenance`.
+    """
+    for tool in tools:
+        if tool.get("name") == name:
+            declared = tool.get("provenance")
+            if declared in _VALID_PROVENANCE_CLASSES:
+                return str(declared)
+            # Default policy.
+            if not tool.get("sandbox_execution", True):
+                return "framework"
+            return "target"
+    # Unknown tool — adversarial-by-default.
+    return "target"
 
 
 def needs_agent_state(tool_name: str) -> bool:

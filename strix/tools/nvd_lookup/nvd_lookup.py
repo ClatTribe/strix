@@ -427,6 +427,7 @@ def _complete_check(check_id: str | None, result: str, evidence: str) -> None:
 @register_tool(
     sandbox_execution=True,
     mitre_techniques=["T1592.002", "T1588.006"],  # Software fingerprint + Obtain Vulns
+    provenance="trusted_source",  # NVD (nist.gov) — canonical CVE registry
 )
 def nvd_lookup(
     cve: str,
