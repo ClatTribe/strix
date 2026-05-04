@@ -1,0 +1,73 @@
+<tools>
+  <tool name="otx_lookup">
+    <description>Look up an IoC in AlienVault OTX (Open Threat Exchange). Third 🟡 important item from the §10 expert-pentester gap audit. Different signal from VirusTotal (#71): OTX gives **attribution context** (which threat actor / campaign / TTP) rather than **multi-engine consensus** (how many AV vendors flagged it).
+
+OTX is AT&T's free community threat-intel platform — security researchers publish "pulses" (curated indicator lists tied to specific actors / campaigns / TTPs). When an IoC appears in multiple OTX pulses, it's been attributed to specific threat actors by independent analysts.
+
+Auto-detected IoC types:
+
+| IoC type | Detected by | OTX endpoint type |
+|---|---|---|
+| IPv4 / IPv6 | parses as `ipaddress` (private/loopback/link-local rejected) | `IPv4` / `IPv6` |
+| domain | apex/subdomain regex | `domain` |
+| file-md5 / file-sha1 / file-sha256 | hex string of 32/40/64 chars | `file` |
+| url | starts with `http://` / `https://` (URL-encoded for endpoint) | `url` |
+| cve | `CVE-YYYY-NNNN` | `cve` |
+
+Severity tuning (based on `pulse_info.count`):
+- **High** (CWE-453, malicious_target) — `pulse_count >= 3` (multi-analyst attribution).
+- **Medium** (CWE-453) — `pulse_count` 1-2.
+- *(no finding)* — no pulses reference the IoC.
+
+Each finding lists the top 5 pulses (name, author, modified date, description excerpt, tags, TLP, industries, targeted_countries) so the agent / user can investigate the attribution context.
+
+Auth: `STRIX_OTX_KEY` env var (free at otx.alienvault.com). Without it, returns `success=False` with a clear error so the agent falls back to other reputation sources (`vt_reputation` #71 / `domain_reputation` #63).
+
+OTX 404 response = "no data on this IoC" treated as success with `no_data=True`, NOT failure.
+
+Cache: per-(ioc_type, ioc_value) JSON cache under `~/.strix/otx_cache/`, 6-hour TTL. Stale-cache served on network failure (fail-open with `error` populated). Cache hit re-emits findings from cached data. Disable with `STRIX_OTX_NO_CACHE=1`.
+
+Each finding carries severity-tailored `description_plain` + `recommended_action` (high → review pulses for attribution, cross-reference IoCs from same pulses with scan findings, perimeter-block; medium → review pulse for attribution, treat as medium-priority signal). `verification_status=needs_review` since pulse data is community-authored.
+
+MITRE technique: T1596 (Search Open Technical Databases) — surfaced via #66 ATT&CK tagging.
+
+Composes with cluster-A safety: rate-limit applies; `--exclude-path` doesn't apply (URL is otx.alienvault.com, not the customer's domain).
+
+Pairs naturally with `vt_reputation` (#71) — VT for consensus signal, OTX for attribution / campaign context.</description>
+    <parameters>
+      <parameter name="ioc" type="string" required="true">
+        <description>Indicator value. Auto-detected as IP / domain / hash (md5/sha1/sha256) / URL / CVE. Private/loopback/link-local IPs rejected.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-request timeout in seconds. Default 15.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, ioc, ioc_type, otx_url, queried_at, from_cache, pulse_count, severity, pulses: [{id, name, author, modified, created, tags, description, tlp, industries, targeted_countries}, ...], general: {indicator, type, country_code, asn, ...}, findings_emitted, error?, no_data?}.
+
+The agent should:
+1. Pair OTX results with `vt_reputation` (#71) for a complete reputation picture (VT = consensus, OTX = attribution).
+2. Cross-reference high-severity OTX hits — if a pulse ties an IoC to a known APT group / campaign, the scan posture should reflect that threat-model context.
+3. Investigate top pulses' tags and `targeted_countries` / `industries` to understand whether the customer's scan target is on the actor's known targeting list.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<otx_lookup>
+<parameter=ioc>1.2.3.4</parameter>
+</otx_lookup>
+
+<otx_lookup>
+<parameter=ioc>example.com</parameter>
+</otx_lookup>
+
+<otx_lookup>
+<parameter=ioc>CVE-2021-44228</parameter>
+</otx_lookup>
+
+<otx_lookup>
+<parameter=ioc>44d88612fea8a8f36de82e1278abb02f</parameter>
+</otx_lookup>
+]]>
+    </example_usage>
+  </tool>
+</tools>
