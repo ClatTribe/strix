@@ -189,6 +189,112 @@ _SPECIALISTS: tuple[SpecialistProfile, ...] = (
             "max_output_tokens": 15_000,
         },
     ),
+    # §8.2 — webapp team additions
+    SpecialistProfile(
+        category="authz-matrix-specialist",
+        # `broken_function_level_authorization` is the matrix-style
+        # authz skill; `idor` complements with object-reference
+        # checks at the same time.
+        recommended_skills="broken_function_level_authorization,idor",
+        scope_addendum=(
+            "You are the Authorization-Matrix specialist. For each "
+            "(role × endpoint × verb) tuple from the surface map, "
+            "use `authz_matrix_check` to probe whether the endpoint "
+            "honours the documented role boundary. Always include "
+            "an `unauth` role with empty headers as the floor. Emit "
+            "findings with `category=improper_authorization`. Do "
+            "NOT probe SQLi, XSS, SSRF, etc. — defer those."
+        ),
+        default_budget={
+            "max_cost_usd": 0.50,
+            "max_input_tokens": 80_000,
+            "max_output_tokens": 20_000,
+        },
+    ),
+    SpecialistProfile(
+        category="injection-specialist",
+        # Broader than sqli-specialist: covers SQLi, command,
+        # SSTI, path-traversal, file-inclusion. Pairs well with
+        # `path_traversal_lfi_rfi` + `rce` skill packs.
+        recommended_skills="sql_injection,rce,path_traversal_lfi_rfi,xxe",
+        scope_addendum=(
+            "You are the Injection specialist. Your scope covers "
+            "SQL injection, command injection, SSTI (server-side "
+            "template injection), path traversal / LFI / RFI, "
+            "XXE, and similar input-validation classes. For each "
+            "endpoint with parameters from the surface map, probe "
+            "context-aware payloads per parameter. Confirm via "
+            "out-of-band signal (e.g. controlled DNS callback) or "
+            "deterministic side-channel (e.g. SQL `version()` "
+            "reflection). Defer XSS to `xss-specialist`, SSRF to "
+            "`ssrf-scanner`, IDOR to `idor-specialist`."
+        ),
+        default_budget={
+            "max_cost_usd": 0.75,
+            "max_input_tokens": 120_000,
+            "max_output_tokens": 30_000,
+        },
+    ),
+    SpecialistProfile(
+        category="graphql-specialist",
+        recommended_skills="graphql",
+        scope_addendum=(
+            "You are the GraphQL specialist. For each GraphQL "
+            "endpoint identified by recon, use "
+            "`graphql_specialist_check` to test the four "
+            "protocol-specific abuse classes: introspection "
+            "exposure, query-depth abuse, alias overloading, "
+            "batch abuse. Then probe field-level authz: enumerate "
+            "the schema, attempt to query fields the role "
+            "shouldn't access. Do NOT probe REST endpoints — "
+            "defer to peer specialists."
+        ),
+        default_budget={
+            "max_cost_usd": 0.40,
+            "max_input_tokens": 70_000,
+            "max_output_tokens": 18_000,
+        },
+    ),
+    SpecialistProfile(
+        category="business-logic-specialist",
+        recommended_skills="business_logic,race_conditions,mass_assignment",
+        scope_addendum=(
+            "You are the Business-Logic specialist. Your scope is "
+            "workflow-abuse and entitlement-bypass classes that "
+            "deterministic probes miss: state-machine skipping, "
+            "double-spend / negative-quantity, race-condition on "
+            "state-changing endpoints, mass-assignment / parameter "
+            "pollution, role-escalation via overlooked admin "
+            "fields. Read the customer's threat model (when "
+            "supplied) for domain-specific workflows. Defer "
+            "deterministic classes (SQLi/XSS/SSRF/IDOR/CSRF) to "
+            "peer specialists."
+        ),
+        default_budget={
+            "max_cost_usd": 1.00,
+            "max_input_tokens": 100_000,
+            "max_output_tokens": 30_000,
+        },
+    ),
+    SpecialistProfile(
+        category="webapp-recon-lead",
+        # Recon-lead reads surface_map; doesn't need exploit skills.
+        recommended_skills="httpx,katana",
+        scope_addendum=(
+            "You are the Web-App Recon Lead. Your job is to ensure "
+            "`webapp_recon_pipeline` ran to completion, validate "
+            "the resulting `webapp_surface_map.json` against the "
+            "handoff contract, and decide which specialist exploit "
+            "agents to spawn next via `spawn_webapp_specialist_team`. "
+            "Do NOT probe vulnerabilities yourself — your role is "
+            "Decide-stage routing, not Act-stage execution."
+        ),
+        default_budget={
+            "max_cost_usd": 0.30,
+            "max_input_tokens": 60_000,
+            "max_output_tokens": 15_000,
+        },
+    ),
     # ---- Code-target team (§8.1) ----
     SpecialistProfile(
         category="secret-agent",

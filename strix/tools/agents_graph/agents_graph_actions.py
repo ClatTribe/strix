@@ -685,6 +685,219 @@ def spawn_webapp_subteam(
     }
 
 
+_DEFAULT_WEBAPP_SPECIALISTS: tuple[str, ...] = (
+    "authz-matrix-specialist",
+    "injection-specialist",
+    "xss-specialist",
+    "ssrf-scanner",
+    "idor-specialist",
+    "csrf-specialist",
+    "graphql-specialist",
+    "auth-attacker",
+)
+
+
+_WEBAPP_SPECIALIST_TASK_TEMPLATE = (
+    "Web-application exploit pass scoped to a single specialist role.\n\n"
+    "Target URL: {target_url}\n"
+    "Target host: {target_host}\n\n"
+    "The recon group has produced `webapp_surface_map.json` (in the run "
+    "dir) with the endpoint inventory, tech-stack fingerprint, and "
+    "security-headers / TLS / well-known posture. Read the map for your "
+    "starting context — do NOT re-run the recon pipeline.\n\n"
+    "Surface-map summary at spawn time:\n"
+    "{summary_block}\n\n"
+    "Your scope addendum (auto-applied by the §8.0 specialist registry) "
+    "tells you which classes to probe and which to defer to peers. "
+    "Stay strictly within that scope. When done, return findings via "
+    "`agent_finish`."
+)
+
+
+def _format_summary_block(surface_map: dict[str, Any] | None) -> str:
+    """Render the key surface_map counters into a human-readable
+    block for the spawned specialist's task."""
+    if not isinstance(surface_map, dict):
+        return "  (no surface map available — invoke webapp_recon_pipeline first)"
+    summary = surface_map.get("summary") or {}
+    lines = [
+        f"  - endpoints discovered: {summary.get('endpoints_discovered', 0)}",
+        f"  - JS bundles harvested: {summary.get('javascript_bundles', 0)}",
+        f"  - OpenAPI specs found: {summary.get('openapi_specs_found', 0)}",
+        f"  - tech-stack detections: {summary.get('tech_stack_detections', 0)}",
+        f"  - skills auto-loaded: {summary.get('skills_auto_loaded', 0)}",
+        f"  - security-header issues: {summary.get('security_header_issues', 0)}",
+        f"  - well-known hits: {summary.get('well_known_hits', 0)}",
+        f"  - tls audit findings: {summary.get('tls_audit_findings', 0)}",
+    ]
+    return "\n".join(lines)
+
+
+@register_tool(sandbox_execution=False)
+def spawn_webapp_specialist_team(  # noqa: PLR0912
+    agent_state: Any,
+    target_url: str,
+    specialists: str | None = None,
+    max_specialists: int = 8,
+    inherit_context: bool = False,
+) -> dict[str, Any]:
+    """Roadmap §8.2 row 2 — spawn the specialist exploit team.
+
+    The lead's Decide-stage routing for a web-application target.
+    Reads `webapp_surface_map.json` (produced by row 1's
+    `webapp_recon_pipeline`) and spawns one specialist per
+    requested category in parallel. Each specialist is scoped via
+    the §8.0 specialist registry (skills + scope-addendum + budget
+    auto-applied).
+
+    Composes with §8.0:
+    - #88 budget enforcement: each specialist gets the registry's
+      default budget; runaway specialists hit `agent.budget_exceeded`
+      independently.
+    - #89 specialist scope discipline: each spawned agent receives
+      its scope addendum.
+    - #90 lead-team protocol: this tool is the canonical
+      lead-spawns-team primitive for §8.2.
+
+    Args:
+        target_url: full URL to probe. Auto-prefixed `https://` for
+            bare hosts.
+        specialists: comma-separated list of specialist categories
+            to spawn. Default: the 8 §8.2 categories
+            (authz-matrix-specialist, injection-specialist,
+            xss-specialist, ssrf-scanner, idor-specialist,
+            csrf-specialist, graphql-specialist, auth-attacker).
+            Validates each category against the registry —
+            unknown categories are skipped with `skipped[]` entries.
+        max_specialists: hard cap on number of specialists spawned
+            (default 8). Each consumes its own LLM context.
+        inherit_context: pass-through to `create_agent`. Default
+            False — specialists reason from the surface map, not
+            the lead's chain-of-thought.
+
+    Returns:
+        {
+          success, target_url, target_host,
+          surface_map_path: path to the consumed map (or None),
+          spawned: [{agent_id, category, name}, ...],
+          skipped: [{category, reason}, ...],
+          total_spawned, max_specialists, message
+        }
+
+    Always returns `success=True` even when no surface map exists or
+    every spawn fails — the lead is expected to read the structured
+    result, not branch on success."""
+    from urllib.parse import urlparse
+
+    target = (target_url or "").strip()
+    if not target:
+        return {"success": False, "error": "target_url required"}
+    if "://" not in target:
+        target = f"https://{target}"
+    parsed = urlparse(target)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return {"success": False, "error": f"invalid target_url: {target_url!r}"}
+    target_host = (parsed.hostname or "").lower()
+
+    # ---- Auto-load surface map ----
+    surface_map: dict[str, Any] | None = None
+    surface_map_path: str | None = None
+    try:
+        from strix.agents.handoffs.webapp_surface_map import load_webapp_surface_map
+        from strix.telemetry.tracer import get_global_tracer
+
+        tracer = get_global_tracer()
+        if tracer is not None:
+            run_dir = tracer.get_run_dir()
+            candidate = run_dir / "webapp_surface_map.json"
+            if candidate.exists():
+                surface_map_path = str(candidate)
+                surface_map, violations = load_webapp_surface_map(candidate)
+                # Violations don't block spawn — recorded via the
+                # producer-side handoff event already.
+    except Exception:  # noqa: BLE001
+        # Surface map is optional; proceed without if unavailable.
+        pass
+
+    # ---- Resolve specialist list ----
+    requested: list[str] = (
+        [c.strip().lower() for c in specialists.split(",") if c.strip()]
+        if specialists else list(_DEFAULT_WEBAPP_SPECIALISTS)
+    )
+
+    from strix.agents.specialists import get_specialist_profile
+
+    spawned: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for category in requested[: max(1, int(max_specialists))]:
+        if category in seen:
+            skipped.append({"category": category, "reason": "duplicate"})
+            continue
+        seen.add(category)
+
+        profile = get_specialist_profile(category)
+        if profile is None:
+            skipped.append({
+                "category": category,
+                "reason": "unknown specialist category (not in §8.0 registry)",
+            })
+            continue
+
+        task = _WEBAPP_SPECIALIST_TASK_TEMPLATE.format(
+            target_url=target,
+            target_host=target_host,
+            summary_block=_format_summary_block(surface_map),
+        )
+        name = f"WebApp/{category}: {target_host}"
+
+        try:
+            result = create_agent(
+                agent_state=agent_state,
+                task=task,
+                name=name,
+                inherit_context=inherit_context,
+                category=category,
+                # skills + budget auto-applied from the registry profile.
+            )
+        except Exception as e:  # noqa: BLE001
+            skipped.append({"category": category, "reason": f"spawn_failed: {e}"})
+            continue
+
+        if not result.get("success"):
+            skipped.append({
+                "category": category,
+                "reason": result.get("error") or "spawn returned success=False",
+            })
+            continue
+
+        spawned.append({
+            "agent_id": result.get("agent_id"),
+            "category": (result.get("agent_info") or {}).get("category") or category,
+            "name": name,
+        })
+
+    over = requested[max(1, int(max_specialists)):]
+    for cat in over:
+        skipped.append({"category": cat, "reason": "max_specialists cap"})
+
+    return {
+        "success": True,
+        "target_url": target,
+        "target_host": target_host,
+        "surface_map_path": surface_map_path,
+        "spawned": spawned,
+        "skipped": skipped,
+        "total_spawned": len(spawned),
+        "max_specialists": max_specialists,
+        "message": (
+            f"Spawned {len(spawned)} specialist(s) of {len(requested)} requested "
+            f"against {target_host} (cap: {max_specialists}; skipped: {len(skipped)})."
+        ),
+    }
+
+
 @register_tool(sandbox_execution=False)
 def send_message_to_agent(
     agent_state: Any,
