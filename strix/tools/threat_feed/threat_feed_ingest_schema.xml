@@ -1,0 +1,79 @@
+<tools>
+  <tool name="threat_feed_ingest">
+    <description>Fetch a threat-intelligence feed (MISP / STIX 2.x / TAXII 2.1) and extract indicators-of-compromise. Last open §10 item. For enterprise deployments that already curate threat-intel feeds, this lets the agent treat customer-curated IoCs as additional context — when an IoC matches a scan target, the scan's prioritisation reflects that this asset is part of the customer's adversary picture.
+
+Three formats auto-detected from the JSON response:
+
+| Format | Detection signal | Extraction |
+|---|---|---|
+| **MISP** | `response[]` / `Event` / `Attribute[]` keys | `Attribute.type` ∈ {ip-src, ip-dst, domain, hostname, url, md5, sha1, sha256, ...}; value from `Attribute.value` |
+| **STIX 2.x bundle** | `"type": "bundle"` + `"objects": [...]` | parse each `indicator.pattern` field via regex (`[ipv4-addr:value = '1.2.3.4']`, etc.) |
+| **TAXII 2.1 collection** | `"objects": [...]` with `"id": "indicator--<uuid>"` | same as STIX 2.x indicators |
+
+Auth: optional `auth_token` (sent verbatim as the `Authorization` header — for MISP this is the API key with no `Bearer` prefix) OR `auth_basic` (`user:pass` for HTTP Basic — common for TAXII servers). When both supplied, `auth_token` wins.
+
+When `target_filter` is supplied (a domain or IP), each extracted IoC is matched against it and matches emit info findings. Matching:
+- IP target ← IP IoC: exact-string match.
+- Domain target ← domain IoC: equality OR suffix match (`.target`).
+- Domain target ← URL IoC: hostname extracted, then equality OR suffix match.
+
+Per-(type, value) dedup so the same indicator doesn't emit twice.
+
+Findings: **info** (CWE-200, threat_feed_match) per IoC matching the filter. `verification_status=needs_review` since threat-intel feeds carry varying confidence; the agent should review the feed source before treating any single match as definitive.
+
+Hard cap of 500 indicators per ingest (configurable via `max_records`) so a feed returning thousands doesn't flood findings.
+
+Cache: per-(feed_url, auth-fingerprint) JSON cache under `~/.strix/threat_feed_cache/`, 1-hour TTL (threat-intel feeds change fast). Stale-cache served on network failure (fail-open with `error` populated). Auth material is hashed for the cache key (not stored). Disable with `STRIX_THREAT_FEED_NO_CACHE=1`.
+
+MITRE technique: T1597 (Search Closed Sources — threat-intel feeds).
+
+Composes with cluster-A safety: rate-limit applies to outbound HTTP requests; `--exclude-path` doesn't apply (URLs target the threat-intel server, not the customer).</description>
+    <parameters>
+      <parameter name="feed_url" type="string" required="true">
+        <description>Absolute http(s) URL returning a JSON feed document. Examples: `https://misp.example.org/events/restSearch/last:1d`, `https://taxii.example.org/api/v21/collections/<uuid>/objects/`, `https://example.com/stix-bundle.json`.</description>
+      </parameter>
+      <parameter name="auth_token" type="string" required="false">
+        <description>API key / bearer-style token sent verbatim as the `Authorization` header. For MISP this is the API key (no `Bearer` prefix). Empty string = no auth.</description>
+      </parameter>
+      <parameter name="auth_basic" type="string" required="false">
+        <description>`user:pass` for HTTP Basic auth (TAXII servers often require this). Mutually exclusive with `auth_token` — if both are set, `auth_token` wins.</description>
+      </parameter>
+      <parameter name="target_filter" type="string" required="false">
+        <description>Optional domain or IP. When supplied, IoCs matching the filter emit info findings. Useful when the agent has a specific target and wants only relevant IoCs surfaced as findings.</description>
+      </parameter>
+      <parameter name="max_records" type="number" required="false">
+        <description>Hard cap on extracted indicators. Default 500. Avoids flooding when a feed returns thousands of indicators.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-request timeout in seconds. Default 30.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, feed_url, feed_format, fetched_at, from_cache, indicators: [{type, value, source, tags, first_seen, last_seen, comment, ...}, ...], record_count, target_filter, matched_count, findings_emitted, error?}.
+
+The agent should:
+1. Use the IoC list as context for downstream scan decisions — e.g. tag findings whose endpoints match an IoC.
+2. Cross-reference matched IoCs with `cve_lookup` (#61) / `attack_surface_intel` (#65) for additional pivots.
+3. If `feed_format` is `unknown`, the feed isn't in a supported format — fall back to manual review of the response payload.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<threat_feed_ingest>
+<parameter=feed_url>https://misp.example.org/events/restSearch/returnFormat:json/last:7d</parameter>
+<parameter=auth_token>YOUR_MISP_API_KEY</parameter>
+<parameter=target_filter>example.com</parameter>
+</threat_feed_ingest>
+
+<threat_feed_ingest>
+<parameter=feed_url>https://taxii.example.org/api/v21/collections/abc-123/objects/</parameter>
+<parameter=auth_basic>user:password</parameter>
+</threat_feed_ingest>
+
+<threat_feed_ingest>
+<parameter=feed_url>https://example.com/stix-bundle.json</parameter>
+<parameter=max_records>1000</parameter>
+</threat_feed_ingest>
+]]>
+    </example_usage>
+  </tool>
+</tools>
