@@ -931,6 +931,21 @@ class Tracer:
         except Exception:  # noqa: BLE001
             logger.warning("threat-intel enrichment failed", exc_info=True)
 
+        # Compliance / GRC enrichment (roadmap §16) — fail-open static
+        # map. Adds `compliance_controls: {soc2: [...], pci_dss: [...],
+        # ...}` based on CWE, plus `data_classification: pii/phi/pci/
+        # credentials/internal/confidential` inferred from category +
+        # title + description. Wrappers render compliance overlays from
+        # this; auditors consume by control ID.
+        try:
+            from strix.telemetry import compliance
+
+            compliance_fields = compliance.enrich_finding_with_compliance(report)
+            if compliance_fields:
+                report.update(compliance_fields)
+        except Exception:  # noqa: BLE001
+            logger.warning("compliance enrichment failed", exc_info=True)
+
         # Roadmap §11 — auto-derive non-tech-output fields from the
         # signals we now have. priority_label is user-time-aware
         # (severity + KEV + how cheap the fix is). exploitation_in_wild_plain
@@ -2019,6 +2034,23 @@ class Tracer:
                     self.end_time = datetime.now(UTC).isoformat()
                 self.run_metadata["end_time"] = self.end_time
                 self.run_metadata["status"] = "completed"
+
+            # Compliance posture (roadmap §16). Attached to run_metadata
+            # so it lands in run_meta.json + run.summary event. Wrappers
+            # render the cadence_status badge + audit-log-retention
+            # contract.
+            try:
+                from strix.telemetry import compliance
+
+                # days_since_last_scan is computed by the wrapper (we
+                # don't yet read prior runs from the runs dir; that's
+                # a §16 wrapper-side row). When None, the field is
+                # omitted from the posture block.
+                self.run_metadata["compliance_posture"] = (
+                    compliance.build_compliance_posture()
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("compliance_posture build failed", exc_info=True)
 
             # Always write run_meta.json — small, idempotent, lets any consumer
             # reconstruct the scan config from a structured artifact instead of
