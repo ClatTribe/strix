@@ -167,8 +167,90 @@ class LLM:
             except Exception as e:  # noqa: BLE001
                 if attempt >= max_retries or not self._should_retry(e):
                     self._raise_error(e)
-                wait = min(90, 2 * (2**attempt))
+                # Roadmap §4 — exponential backoff schedule. The
+                # roadmap specifies 5s / 15s / 45s for attempts
+                # 0/1/2 (geometric ratio = 3) — the math is
+                # `5 * 3**attempt`, capped at 90s for higher
+                # attempt counts. A tiny ±20% jitter is added so
+                # the retries don't lock-step against the upstream's
+                # rate-limiter (helps when many strix runs are
+                # retrying at once).
+                import random
+
+                base_wait = min(90, 5 * (3 ** attempt))
+                jitter = base_wait * (0.8 + 0.4 * random.random())  # noqa: S311
+                wait = max(1.0, jitter)
+
+                # Emit a structured `llm.retry_attempted` event so
+                # wrappers can surface "Strix is waiting on a
+                # rate-limit" signals without parsing exception
+                # strings. Best-effort — never fails the retry loop.
+                self._emit_retry_attempted_event(
+                    attempt=attempt + 1,
+                    max_retries=max_retries,
+                    wait_seconds=wait,
+                    exception=e,
+                )
+
                 await asyncio.sleep(wait)
+
+    def _emit_retry_attempted_event(
+        self,
+        *,
+        attempt: int,
+        max_retries: int,
+        wait_seconds: float,
+        exception: BaseException,
+    ) -> None:
+        """Emit a `llm.retry_attempted` event so consumers can
+        render upstream-trouble UI without scraping logs.
+
+        Payload schema (stable):
+            attempt:        1-indexed retry attempt about to wait
+            max_retries:    configured cap
+            wait_seconds:   how long we're about to sleep before
+                            the retry call
+            status_code:    HTTP status from the upstream, when
+                            available (litellm exposes either
+                            `status_code` or `response.status_code`)
+            error_type:     class name of the exception (e.g.
+                            "ServiceUnavailableError")
+            error_message:  short str(exception) — useful for UI
+                            tooltips. Truncated at 240 chars.
+        """
+        try:
+            from strix.telemetry.tracer import get_global_tracer
+        except ImportError:
+            return
+        tracer = get_global_tracer()
+        if tracer is None:
+            return
+
+        status_code = getattr(exception, "status_code", None) or getattr(
+            getattr(exception, "response", None), "status_code", None
+        )
+        try:
+            tracer._emit_event(  # noqa: SLF001
+                "llm.retry_attempted",
+                actor={
+                    "agent_id": getattr(self, "agent_id", None),
+                    "agent_name": self.agent_name,
+                    "model": getattr(self.config, "model_name", None),
+                },
+                payload={
+                    "attempt": int(attempt),
+                    "max_retries": int(max_retries),
+                    "wait_seconds": round(float(wait_seconds), 2),
+                    "status_code": status_code,
+                    "error_type": type(exception).__name__,
+                    "error_message": str(exception)[:240],
+                },
+                status="retrying",
+                source="strix.llm",
+            )
+        except Exception:  # noqa: BLE001
+            # Never let bookkeeping kill the retry loop.
+            pass
 
     async def _stream(self, messages: list[dict[str, Any]]) -> AsyncIterator[LLMResponse]:
         accumulated = ""
