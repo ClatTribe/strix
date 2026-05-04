@@ -1,0 +1,90 @@
+<tools>
+  <tool name="session_entropy_check">
+    <description>Analyze session-cookie predictability / entropy. Two acquisition modes:
+
+**1. auth-N-times** — provide `target_url` and `cookie_name`. Tool hits the URL `samples` times via cluster-A and reads the named cookie from each `Set-Cookie` response.
+
+**2. pre-collected** — provide `cookie_values: list[str]` directly. Useful when the agent / wrapper has already harvested cookies via its own login flow.
+
+Analyses applied to the sample set:
+
+- **Sample diversity** — `unique_count < 2` → critical CWE-330 (cookie is constant across logins).
+- **Shannon entropy** (per-cookie average + min, in bits) — &lt; 32 bits → high; 32-64 bits → medium; 64-80 bits → low; ≥ 80 bits → no entropy finding.
+- **Alphabet detection** — auto-detects hex_lower / hex_upper / base64_urlsafe / base64_standard / base32 / printable. Used for χ² bias.
+- **Pearson χ²** vs uniform distribution over the detected alphabet. p &lt; 0.001 → bias finding (medium).
+- **Sequential-counter detection** — strips common prefix/suffix from cookie values; if the residue decodes to a monotonically-increasing decimal or hex sequence → high CWE-330 (sessions are predictable from a single observed cookie).
+- **NIST SP 800-22 mini-tests** on the concatenated bit stream:
+    - Frequency / monobit
+    - Runs test
+    - Longest-run test (M=8 block)
+  Each failure → medium CWE-330 (only when entropy ≥ 64 bits; otherwise the entropy finding subsumes the NIST/χ² finding).
+
+Severity:
+- **Critical** CWE-330 — cookie is constant across logins.
+- **High** CWE-330 — sequential-counter detected; or avg Shannon entropy &lt; 32 bits.
+- **Medium** CWE-330 — entropy 32-64 bits; or any NIST sub-test fails (when entropy ≥ 64); or χ² p &lt; 0.001.
+- **Low** CWE-330 — entropy 64-80 bits.
+
+Skip / soft-fail:
+- `samples &lt; 2` collected (and no `cookie_values`) → tool returns `inconclusive=True` (the endpoint may not mint a fresh cookie per request).
+- `--exclude-path` blocks the URL → graceful no-op.
+- `cookie_values` &lt; 2 → inconclusive.
+
+**Safety**:
+- Read-only.
+- Default `samples=16`, max 128. Per-probe rate-limit comes from cluster-A `--rate-limit`.
+- Composes with cluster-A safety (`--exclude-path` / `--rate-limit` / `--auth-*`).
+- All findings carry severity-tailored `description_plain` + `recommended_action` (use a CSPRNG — `secrets.token_urlsafe(32)` in Python, `crypto/rand` in Go, `SecureRandom` in Java; minimum 128 bits of entropy; rotate on privilege escalation; never derive session IDs from user IDs / timestamps / sequential counters) and `verification_status=needs_review` since low-sample-size analyses have variance — the agent should re-run with `samples=64` if flagged and the user wants confirmation.</description>
+    <parameters>
+      <parameter name="target_url" type="string" required="false">
+        <description>URL that mints the session cookie. Required unless `cookie_values` is supplied. Bare hostnames are auto-prefixed with `https://`. Examples: `https://app.example.com/login`, `https://api.example.com/auth/init`.</description>
+      </parameter>
+      <parameter name="cookie_name" type="string" required="false">
+        <description>Name of the cookie to harvest from `Set-Cookie`. Default `session`. Common alternatives: `JSESSIONID`, `PHPSESSID`, `connect.sid`, `_app_session`, `sid`.</description>
+      </parameter>
+      <parameter name="samples" type="integer" required="false">
+        <description>How many cookies to harvest in auth-N-times mode. Default 16, min 2, max 128.</description>
+      </parameter>
+      <parameter name="method" type="string" required="false">
+        <description>HTTP method for the auth probe. Default `GET`. Use `POST` for form-based login endpoints.</description>
+      </parameter>
+      <parameter name="body" type="string" required="false">
+        <description>Optional request body (e.g. `username=test&amp;password=test` for POST-form logins).</description>
+      </parameter>
+      <parameter name="headers" type="object" required="false">
+        <description>Optional extra request headers (e.g. `{"Content-Type": "application/x-www-form-urlencoded"}`). Cluster-A `--auth-*` env headers are layered on top automatically.</description>
+      </parameter>
+      <parameter name="cookie_values" type="array" required="false">
+        <description>Pre-harvested cookie values. When supplied, bypasses the HTTP probe phase entirely. Useful when the agent / wrapper has already collected cookies via its own login flow.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-probe timeout in seconds. Default 10.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, target_url?, cookie_name, samples_requested, samples_collected, unique_count, analyses: {samples, unique_count, shannon_entropy_avg_bits, shannon_entropy_min_bits, alphabet, chi_squared, chi_squared_p_value, sequential_counter: {detected, evidence}, nist: {frequency: {passed, proportion}, runs: {passed, run_count}, longest_run: {passed, longest_run}}}, findings_emitted, inconclusive?, reason?}.
+
+The agent should follow up high-severity findings by re-running with `samples=64` to rule out small-sample variance, then attempt session prediction (extrapolate from observed values to predict the next minted session ID and verify with a fresh login).</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<session_entropy_check>
+<parameter=target_url>https://app.example.com/login</parameter>
+<parameter=cookie_name>session</parameter>
+<parameter=samples>16</parameter>
+</session_entropy_check>
+
+<session_entropy_check>
+<parameter=target_url>https://app.example.com/auth/init</parameter>
+<parameter=cookie_name>JSESSIONID</parameter>
+<parameter=samples>32</parameter>
+</session_entropy_check>
+
+<session_entropy_check>
+<parameter=cookie_values>["abc123def...", "abc124def...", "abc125def..."]</parameter>
+<parameter=cookie_name>session</parameter>
+</session_entropy_check>
+]]>
+    </example_usage>
+  </tool>
+</tools>
