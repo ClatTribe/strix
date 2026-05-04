@@ -555,6 +555,7 @@ side rendering / integration surface for the next batch shipped in PRs
 - Engine PRs informing §10-§11: #98 (cross-tool dedup + detected_by), #99 (reachability scoring), #100 (SRI audit), #101 (CSV-formula injection), #102 (race-condition prober), #103 (compliance control mapping + data classification + posture), #104 (per-event token usage + run.heartbeat + exit-code contract)
 - Engine PRs informing §12: #106 (stable lowercase severity), #107 (agent + target context on `tool.execution.*`), #108 (DOM-XSS static probe), #109 (cross-subdomain cookie/JWT scoping), #110 (DNS hygiene bundle — DKIM expansion + IDN homographs + HTTP/HTTPS asymmetry + IPv6/AAAA)
 - Engine PRs informing §13: #112 (LLM retry backoff + `llm.retry_attempted`), #113 (`--max-cost` / `--max-input-tokens` self-exit + `run.terminated`), #114 (SIGTERM/SIGINT graceful cancel + `run.cancelled`), #115 (zero-FP `secrets_scan`), #116 (WebSocket handshake audit), #117 (`--branch <ref>`), #118 (`finding.dismissed` event + `dismiss_finding` tool), #119 (DNSSEC algorithm strength + RRSIG hygiene), #120 (SVCB / HTTPS DNS records), #121 (`--quiet` mode), #122 (DNS rebinding feasibility), #123 (`--surface-map-only` recon-only mode), #124 (CIDR / IP-range targets)
+- Engine PRs informing §14: #126 (legal-document presence — privacy / cookie / DPA / terms / imprint / accessibility), #127 (cryptographically-signed audit trail — per-event hash chain + HMAC / external signer), #128 (logging / monitoring posture detection — 0-6 score across redaction + reporting + rate-limit), #129 (`--compliance-pack` evidence bundle — 8-file auditor artifact with manifest + signature), #130 (GRC SaaS export shapes — Vanta / Drata / Hyperproof / Secureframe / ServiceNow / generic), #131 (SBOM extraction from web targets — CycloneDX 1.5 from CDN URLs + headers + HTML markers), #132 (MFA enforcement attestation — 4-point posture score per auth surface), #133 (`--vendor-mode` + 0-100 vendor-risk score)
 
 ---
 
@@ -591,3 +592,72 @@ the §4 resilience + §7-§8 zero-FP detector batch shipped in PRs
 | ⬜ | **CI mode preset.** "Run as CI" toggle that enables `--quiet` + `--non-interactive` + sane defaults. Generates a copy-pasteable CI snippet (GitHub Actions / GitLab CI). | [#121](https://github.com/ClatTribe/strix/pull/121) — `--quiet` flag. | Wrapper preset UI. |
 | ⬜ | **"Recon nightly, scan daily" pattern.** Pre-built workflow template that runs `--surface-map-only` on a nightly cron AND triggers targeted scans against the discovered surface daily. Reads `surface_map.json` to drive the targeted scans' scope. | [#123](https://github.com/ClatTribe/strix/pull/123) — `--surface-map-only` mode. | Wrapper workflow templates. |
 | ⬜ | **CIDR target preview.** When operator types a CIDR target, preview the host count BEFORE submission ("/24 = 256 hosts; /20 = 4096 (cap)"). Reject inline at the safety cap. | [#124](https://github.com/ClatTribe/strix/pull/124) — engine accepts CIDR with `num_hosts` in target details. | Wrapper target-input validation. |
+
+---
+
+## 14. Wrapper-side companions to engine PRs #126–#133 (Compliance, GRC, audit)
+
+The §13 sections covered PRs #112–#124 (resilience + zero-FP + CLI ergonomics).
+This section adds the wrapper-side rendering / integration surface for the
+§16 Compliance / GRC / Audit batch shipped in PRs #126–#133.
+
+### 14.1 Legal-document presence (engine #126)
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **Legal-document compliance card per target.** Per-target card listing the 6 doc classes (privacy / cookie / terms / DPA / imprint / accessibility) with ✅ / ❌ / 🔗 link-rel-discovered. Hover shows the canonical URL. | [#126](https://github.com/ClatTribe/strix/pull/126) — `legal_compliance_probe` returns a structured `documents[]` list. | Per-target compliance dashboard card. |
+| ⬜ | **GDPR-class doc absence alert.** When privacy_policy / cookie_policy / dpa is absent, render a top-level alert linking to the wrapper's "publish a privacy policy" walk-through. | [#126](https://github.com/ClatTribe/strix/pull/126) — low-severity finding on absence. | Wrapper alert layer. |
+
+### 14.2 Cryptographically-signed audit trail (engine #127)
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **Audit-trail verification UI.** Operator pastes/uploads `events.jsonl` + `run.signature.json` + their signing key. Wrapper verifies (a) chain integrity, (b) signature against the chain terminal hash. Surfaces tampering with line-level diff. | [#127](https://github.com/ClatTribe/strix/pull/127) — `audit_trail.verify_signature` + per-event `prev_event_hash` + `event_hash` + `run.signature.json`. | New verification page in the wrapper. |
+| ⬜ | **HSM signing UI.** First-class `STRIX_SIGNING_CMD` config — operator selects "AWS KMS" / "Hashicorp Vault Transit" / "GCP KMS" / custom; wrapper generates the appropriate signing command + sets the env var on scan launch. | [#127](https://github.com/ClatTribe/strix/pull/127) — `STRIX_SIGNING_CMD` contract. | Wrapper config layer + per-platform signing command templates. |
+| ⬜ | **Signed-bundle preview on share.** When operator shares a run externally (link, downloadable bundle), pre-flight check that the chain is intact + the signature verifies. Block share when verification fails. | [#127](https://github.com/ClatTribe/strix/pull/127). | Wrapper share-flow guard. |
+
+### 14.3 Logging / monitoring posture (engine #128)
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **Monitoring-posture gauge.** Per-target gauge widget showing the 6-point score (identifying-headers / 4 monitoring buckets / rate-limit). Click to expand the breakdown with per-recommendation action items. | [#128](https://github.com/ClatTribe/strix/pull/128) — `monitoring_posture_check` returns structured `{score, identifying_headers, monitoring_headers, rate_limit}`. | Per-target dashboard widget. |
+| ⬜ | **CSP-with-report-uri auto-generator.** When the monitoring score lacks `csp_reporting`, the wrapper offers a one-click "generate a CSP for me" — generates a CSP based on the observed scripts/styles + a `report-uri` to a wrapper-hosted endpoint. | [#128](https://github.com/ClatTribe/strix/pull/128) + wrapper CSP introspection. | Wrapper CSP-generator widget. |
+
+### 14.4 Compliance evidence pack (engine #129)
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **One-click "download for auditor" button.** Calls strix with `--compliance-pack <tmp>`; bundles the resulting `<tmp>/<run_id>/` directory into a zip and serves it. Pre-fill auditor-friendly filename: `<customer>-<scan-date>-<run_id>.zip`. | [#129](https://github.com/ClatTribe/strix/pull/129) — `--compliance-pack` flag + bundle layout. | Wrapper download-pipeline UI. |
+| ⬜ | **Auditor-share link.** Time-bounded shareable link to the compliance-pack zip; auditor browses inline (manifest.json verifier + control_attestation viewer + findings.csv table). Audit log captures every auditor read. | [#129](https://github.com/ClatTribe/strix/pull/129). | New auditor-share renderer. |
+| ⬜ | **Cross-scan attestation diff.** Between scan N and N+1: which controls had findings → which were remediated. Renders the customer's "evidence of remediation" trail across audit cycles. | [#129](https://github.com/ClatTribe/strix/pull/129) — `control_attestation.md` per-control rollup. | Wrapper diff renderer over historical packs. |
+
+### 14.5 GRC SaaS exports (engine #130)
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **One-click upload to GRC platform.** Operator picks Vanta / Drata / Hyperproof / Secureframe / ServiceNow; wrapper calls strix with `--export-format <platform>`, takes the resulting JSON, and POSTs to the platform's import endpoint with the operator's API key. | [#130](https://github.com/ClatTribe/strix/pull/130) — per-platform JSON exporters. | Wrapper integration layer per platform. |
+| ⬜ | **GRC platform health badges.** Show which platforms are configured (✅ Drata + ✅ Vanta + ❌ ServiceNow) + last-export timestamp per platform. | [#130](https://github.com/ClatTribe/strix/pull/130). | Wrapper config dashboard. |
+
+### 14.6 SBOM (engine #131)
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **SBOM viewer + diff.** Render `sbom.cdx.json` as a sortable / filterable table (name / version / purl / detected_via / confidence). Diff across runs to surface "package added in this scan" / "package version changed" / "vulnerable component appeared". | [#131](https://github.com/ClatTribe/strix/pull/131) — `sbom.cdx.json` artifact in run dir. | New SBOM viewer page. |
+| ⬜ | **SBOM → GHSA / OSV cross-reference.** Wrapper-side enrichment: every component with `version` is queried against OSV/GHSA at render time, surfacing CVE / KEV indicators alongside the SBOM table. | [#131](https://github.com/ClatTribe/strix/pull/131) + existing CVE-lookup data. | Wrapper enrichment + UI. |
+| ⬜ | **CycloneDX export download.** Plain "Download SBOM (CycloneDX 1.5)" button on every web-target run summary. | [#131](https://github.com/ClatTribe/strix/pull/131). | Wrapper download button. |
+
+### 14.7 MFA attestation (engine #132)
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **MFA-posture badge.** Per-target badge showing the 4-point MFA score with hover-breakdown (login_tokens / challenge_keys / webauthn_header / mfa_setup_paths). Tied to the auditor's "show me MFA is enforced" question with a one-line attestation copy-paste. | [#132](https://github.com/ClatTribe/strix/pull/132) — `mfa_attestation_check` returns structured score + breakdown. | Per-target dashboard badge + auditor-attestation widget. |
+| ⬜ | **WebAuthn migration prompt.** When the score is medium / no WebAuthn header observed, surface a wrapper-side guide: "Most user-friendly + least-phishable MFA = WebAuthn / Passkeys. Walk-through here." | [#132](https://github.com/ClatTribe/strix/pull/132). | Wrapper migration-guide page. |
+
+### 14.8 Vendor-risk score (engine #133)
+
+| | Item | Engine signal | Wrapper surface |
+|---|---|---|---|
+| ⬜ | **Vendor-risk score gauge on every target.** Always shown — `vendor_risk` lands in `run_meta.json` regardless of `--vendor-mode`. Big numeric gauge (0-100) with color-coded band (low_risk green / medium_risk amber / high_risk red). Hover reveals top 3 deduction categories. | [#133](https://github.com/ClatTribe/strix/pull/133) — `run_metadata.vendor_risk` block with deductions_by_category + recommendation. | Per-target dashboard hero widget. |
+| ⬜ | **Vendor-onboarding workflow.** Operator imports a vendor list (CSV); wrapper triggers `--vendor-mode` scans against each; produces a sortable table of (vendor, score, band, top_category) for the procurement team. | [#133](https://github.com/ClatTribe/strix/pull/133). | New vendor-onboarding workflow page. |
+| ⬜ | **Vendor-score trend chart.** Cross-scan: track the vendor-risk score for a target over time. Useful for ongoing supplier monitoring (SOC 2 CC9.0 / ISO 27001 A.15.2). | [#133](https://github.com/ClatTribe/strix/pull/133). | Wrapper analytics — historical run aggregation. |
+| ⬜ | **"Why is this vendor a high_risk?" explainer.** When `band=high_risk`, render a dedicated page summarising: top deduction categories, the specific findings driving each category's deduction, the engine's `recommendation` field, and links to per-finding remediation. | [#133](https://github.com/ClatTribe/strix/pull/133). | Wrapper explainer page. |
