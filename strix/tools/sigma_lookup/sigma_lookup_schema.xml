@@ -1,0 +1,51 @@
+<tools>
+  <tool name="sigma_rules_for_technique">
+    <description>Look up Sigma detection rules for a MITRE ATT&CK technique. First 🟡 important item from the §10 expert-pentester gap audit. Closes the loop on the #66 ATT&CK tagging — turns "this finding maps to T1190" into "this finding maps to T1190; here are 12 Sigma rules across Splunk / Elastic / Sentinel that detect attempts in your SIEM".
+
+Sigma rules carry MITRE ATT&CK tags like `attack.t1190` / `attack.t1190.001` in their YAML `tags:` field. We use GitHub Code Search with `attack.<technique-lower> repo:SigmaHQ/sigma extension:yml`.
+
+**Display-only** — does NOT emit findings (LLM-output / corpus search; agent should treat as enrichment data). The agent integrates the rule list into existing findings via the report's `references` field or the wrapper's display layer. Same pattern as `exploit_refs` (#62).
+
+Auth: `STRIX_GITHUB_TOKEN` is **required** (GitHub Code Search needs authentication). Without it, returns `success=False` with a clear error so the agent knows the data isn't available for this scan. `github_token` parameter overrides the env var.
+
+Cache: per-(technique, max_results) JSON cache under `~/.strix/sigma_cache/`, 24-hour TTL. Stale-cache served on network failure (fail-open with `error` populated). Disable with `STRIX_SIGMA_NO_CACHE=1`.
+
+MITRE technique: T1593.003 (Search Open Websites/Domains: Code Repositories) — surfaced via #66 ATT&CK tagging.
+
+Composes with cluster-A safety: rate-limit applies; `--exclude-path` doesn't apply (URL is api.github.com / SigmaHQ, not the customer's domain).</description>
+    <parameters>
+      <parameter name="technique" type="string" required="true">
+        <description>ATT&CK technique ID (e.g. `T1190`, `T1190.001`). Case-insensitive on input; normalised to upper-case. Returns `success=False` for malformed input (anything not matching `T<digits>(.<digits>)?`).</description>
+      </parameter>
+      <parameter name="max_results" type="number" required="false">
+        <description>Hard cap on rules returned. Default 20. GitHub Code Search per_page max is 100; values above 100 are clamped.</description>
+      </parameter>
+      <parameter name="timeout" type="number" required="false">
+        <description>Per-request timeout in seconds. Default 15.</description>
+      </parameter>
+      <parameter name="github_token" type="string" required="false">
+        <description>Optional override for the GitHub API token. Default reads from `STRIX_GITHUB_TOKEN` env. **Required** — GitHub Code Search needs authentication.</description>
+      </parameter>
+    </parameters>
+    <returns type="dict">
+      <description>{success, technique, queried_at, from_cache, rules: [{name, path, html_url, url, sha, repo}, ...], rule_count, max_results, source_errors, error?}.
+
+The agent should:
+1. Surface the `rules[].html_url` list in finding descriptions / report references so the customer's SIEM team can deploy the rules directly.
+2. Pair with `cve_lookup` (#61) and `exploit_refs` (#62) to give a full enrichment package per finding: "vulnerable component → public exploit → SIEM detection rule".
+3. Note that the rules use SigmaHQ's YAML format; the customer's SIEM may need a Sigma → backend conversion (sigmac / pySigma) to consume them.</description>
+    </returns>
+    <example_usage>
+<![CDATA[
+<sigma_rules_for_technique>
+<parameter=technique>T1190</parameter>
+</sigma_rules_for_technique>
+
+<sigma_rules_for_technique>
+<parameter=technique>T1078.004</parameter>
+<parameter=max_results>50</parameter>
+</sigma_rules_for_technique>
+]]>
+    </example_usage>
+  </tool>
+</tools>
