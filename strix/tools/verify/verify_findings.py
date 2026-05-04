@@ -74,6 +74,7 @@ _TOOL_NAME = "verify_findings"
 
 # Categories where deterministic re-probe is supported.
 _VERIFIABLE_CATEGORIES: frozenset[str] = frozenset({
+    # Web-app categories (#93 / §8.2 row 3)
     "information_disclosure",
     "cors_misconfiguration",
     "open_redirect",
@@ -82,6 +83,9 @@ _VERIFIABLE_CATEGORIES: frozenset[str] = frozenset({
     "webdav_exposure",
     "host_header_injection",
     "cache_poisoning",
+    # Code-target categories (§8.1 row 4)
+    "taint_flow",
+    "vulnerable_dependency",
 })
 
 
@@ -192,6 +196,155 @@ def _verify_host_header(finding: dict[str, Any]) -> tuple[bool, str]:
     return (False, "host_header_check found nothing on re-run")
 
 
+# ---------------------------------------------------------------------------
+# §8.1 code-target re-verification strategies
+# ---------------------------------------------------------------------------
+
+
+def _verify_taint_flow(finding: dict[str, Any]) -> tuple[bool, str]:
+    """Re-run taint_analysis on the same file; check if the same
+    source→sink flow still exists at the same line.
+
+    Findings have endpoint=`<file>:<line>` from the taint_analysis
+    emitter. We parse that to drive the re-run."""
+    endpoint = finding.get("endpoint") or ""
+    code_locations = finding.get("code_locations") or []
+
+    file_path: str | None = None
+    lineno: int | None = None
+
+    # Prefer code_locations when available (more reliable shape).
+    if isinstance(code_locations, list) and code_locations:
+        loc = code_locations[0]
+        if isinstance(loc, dict):
+            file_path = loc.get("file")
+            try:
+                lineno = int(loc.get("line") or 0) or None
+            except (TypeError, ValueError):
+                lineno = None
+
+    if file_path is None and ":" in endpoint:
+        # Fall back to parsing endpoint=`file:line`.
+        parts = endpoint.rsplit(":", 1)
+        file_path = parts[0]
+        try:
+            lineno = int(parts[1])
+        except (TypeError, ValueError):
+            pass
+
+    if not file_path:
+        return (False, "missing file location for re-analysis")
+
+    # The file may have been recorded relative to the repo root
+    # (taint_analysis uses Path.relative_to). Without the repo root
+    # we can't resolve the absolute path here; the re-run uses the
+    # cwd as a best-effort fallback. For tests + sandbox cases the
+    # cwd is typically the run dir or project root.
+    from pathlib import Path
+
+    candidate = Path(file_path)
+    if not candidate.exists():
+        # Try relative to cwd.
+        candidate = Path.cwd() / file_path
+    if not candidate.exists():
+        return (False, f"file no longer at {file_path}")
+
+    try:
+        import strix.tools.taint.taint_analysis  # noqa: F401
+        ta_module = sys.modules["strix.tools.taint.taint_analysis"]
+        result = ta_module.taint_analysis(
+            repo_path=str(candidate),
+            emit_findings=False,  # don't double-emit on re-verification
+        )
+    except Exception as e:  # noqa: BLE001
+        return (False, f"verifier_error: {e}")
+
+    if not isinstance(result, dict):
+        return (False, "taint_analysis returned non-dict")
+
+    flows = result.get("flows") or []
+    if not flows:
+        return (False, "taint_analysis re-run found no flows in this file")
+
+    # Match by line number when we have one — otherwise any flow on
+    # the file is sufficient evidence.
+    if lineno is not None:
+        for flow in flows:
+            if flow.get("lineno") == lineno:
+                return (True, f"taint flow still detected at line {lineno}")
+        return (
+            False,
+            f"file has {len(flows)} flow(s) but none at line {lineno}",
+        )
+
+    return (True, f"taint_analysis re-run detected {len(flows)} flow(s)")
+
+
+def _verify_vulnerable_dependency(finding: dict[str, Any]) -> tuple[bool, str]:
+    """Re-run cve_lookup with the same (package, version, ecosystem);
+    check CVE still applies.
+
+    Findings from cve_lookup emit endpoint=`<ecosystem>://<name>@<version>`.
+    We parse that to drive the re-run."""
+    endpoint = finding.get("endpoint") or ""
+    target = finding.get("target") or ""
+
+    # Parse `pkg://name@version` style endpoint.
+    if "://" not in endpoint or "@" not in endpoint:
+        return (False, f"endpoint {endpoint!r} doesn't match cve_lookup shape")
+
+    try:
+        ecosystem_part, rest = endpoint.split("://", 1)
+        if "@" not in rest:
+            return (False, "endpoint missing version separator @")
+        # Right-most '@' is the version separator (handles scoped npm
+        # packages like @scope/name@1.2.3).
+        name, version = rest.rsplit("@", 1)
+    except (ValueError, AttributeError):
+        return (False, f"failed to parse endpoint {endpoint!r}")
+
+    if not name or not version:
+        return (False, "name or version empty after parse")
+
+    try:
+        import strix.tools.cve_lookup.cve_lookup  # noqa: F401
+        cve_module = sys.modules["strix.tools.cve_lookup.cve_lookup"]
+        result = cve_module.cve_lookup(
+            package_name=name,
+            package_version=version,
+            ecosystem=ecosystem_part if ecosystem_part != "pkg" else None,
+        )
+    except Exception as e:  # noqa: BLE001
+        return (False, f"verifier_error: {e}")
+
+    if not isinstance(result, dict):
+        return (False, "cve_lookup returned non-dict")
+
+    vulns = result.get("vulnerabilities") or []
+    finding_cve = (finding.get("cve") or "").upper()
+
+    if not vulns:
+        return (
+            False,
+            f"cve_lookup re-run found 0 CVE(s) for {name}@{version}",
+        )
+
+    if finding_cve:
+        for v in vulns:
+            v_id = (v.get("id") or v.get("cve") or "").upper()
+            if v_id == finding_cve:
+                return (
+                    True,
+                    f"CVE {finding_cve} still applies to {name}@{version}",
+                )
+        return (
+            False,
+            f"cve_lookup found {len(vulns)} CVE(s) but {finding_cve} no longer present",
+        )
+
+    return (True, f"cve_lookup re-run found {len(vulns)} CVE(s) for {name}@{version}")
+
+
 _STRATEGY_DISPATCH: dict[str, Any] = {
     "information_disclosure": _verify_information_disclosure,
     "cors_misconfiguration": _verify_cors,
@@ -201,6 +354,9 @@ _STRATEGY_DISPATCH: dict[str, Any] = {
     "webdav_exposure": _verify_method_tamper,
     "host_header_injection": _verify_host_header,
     "cache_poisoning": _verify_host_header,
+    # §8.1 row 4 code-target additions
+    "taint_flow": _verify_taint_flow,
+    "vulnerable_dependency": _verify_vulnerable_dependency,
 }
 
 
