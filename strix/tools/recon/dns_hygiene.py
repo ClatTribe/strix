@@ -302,7 +302,207 @@ def _check_dnssec(domain: str) -> dict[str, Any]:
             verification_status="verified",
         )
         return {"check": "dnssec", "signed": False}
-    return {"check": "dnssec", "signed": True, "has_rrsig": bool(rrsig)}
+
+    # Roadmap §7.3 PR #119 — DNSSEC algorithm strength + signature
+    # hygiene. DNSKEY rdata format is:
+    #     <flags> <protocol> <algorithm> <base64-key>
+    # We parse the algorithm number per RFC 8624 §3.1 and flag weak
+    # algorithms (RSA-1024, RSA-MD5, DSA, etc.). Algorithm numbers
+    # come from the IANA DNSSEC Algorithm Numbers registry.
+    weak_algorithms = _parse_dnskey_algorithms(dnskey, domain)
+    rrsig_expiring = _check_rrsig_expiry(rrsig, domain)
+
+    return {
+        "check": "dnssec",
+        "signed": True,
+        "has_rrsig": bool(rrsig),
+        "weak_algorithms": weak_algorithms,
+        "rrsig_expiring_soon": rrsig_expiring,
+    }
+
+
+# Roadmap §7.3 PR #119 — IANA DNSSEC Algorithm Numbers
+# (https://www.iana.org/assignments/dns-sec-alg-numbers).
+# Algorithm metadata: (name, deprecated_or_weak, severity).
+# Severity is "high" when the algorithm is broken (must-not-use),
+# "medium" when it's deprecated (should-not-use), None when modern.
+_DNSSEC_ALGORITHMS: dict[int, tuple[str, str | None]] = {
+    # 0: reserved
+    1: ("RSAMD5", "high"),                # RFC 6944 — must not use
+    3: ("DSA-SHA1", "high"),              # NIST sunset
+    5: ("RSASHA1", "medium"),             # SHA-1 weak; deprecated
+    6: ("DSA-NSEC3-SHA1", "high"),
+    7: ("RSASHA1-NSEC3-SHA1", "medium"),  # SHA-1 weak
+    8: ("RSASHA256", None),               # OK
+    10: ("RSASHA512", None),              # OK
+    12: ("ECC-GOST", "medium"),           # niche / regional only
+    13: ("ECDSAP256SHA256", None),        # modern; widely deployed
+    14: ("ECDSAP384SHA384", None),        # modern
+    15: ("ED25519", None),                # modern
+    16: ("ED448", None),                  # modern
+}
+
+
+def _parse_dnskey_algorithms(dnskey_text: str, domain: str) -> list[str]:
+    """Parse DNSKEY rdata lines and return weak algorithm names.
+    Each DNSKEY line from `dig` looks like:
+
+        <flags> <protocol> <algorithm-number> <base64-key>
+
+    Spaces / tabs separate fields. Lines that don't fit the shape
+    are silently skipped (they're query metadata, not records)."""
+    weak: list[str] = []
+    seen_algos: set[int] = set()
+
+    for raw in dnskey_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(";"):
+            continue
+        # First three fields are integers. Use a tolerant split.
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        try:
+            algo = int(parts[2])
+        except ValueError:
+            continue
+        if algo in seen_algos:
+            continue
+        seen_algos.add(algo)
+
+        meta = _DNSSEC_ALGORITHMS.get(algo)
+        if meta is None:
+            # Unrecognised algorithm number — flag as medium so the
+            # operator inspects it rather than silently passing.
+            algo_name = f"algorithm-{algo}"
+            weak.append(algo_name)
+            emit_finding(
+                title=f"Unrecognised DNSSEC algorithm {algo} on {domain}",
+                severity="medium",
+                category="dns_security",
+                cwe="CWE-326",
+                target=domain,
+                description=(
+                    f"DNSKEY for `{domain}` declares algorithm number "
+                    f"{algo}, which isn't in the canonical IANA registry "
+                    f"set checked by Strix. Operator should verify this "
+                    f"is intentional."
+                ),
+                impact=(
+                    "Unrecognised DNSSEC algorithms typically indicate a "
+                    "misconfiguration or use of a niche / experimental "
+                    "algorithm that resolvers may not validate, weakening "
+                    "the chain-of-trust."
+                ),
+                remediation=(
+                    "Migrate to a modern algorithm (ECDSAP256SHA256 / "
+                    "ED25519). RSASHA256 is also widely supported."
+                ),
+                verification_status="verified",
+            )
+            continue
+
+        algo_name, severity = meta
+        if severity is not None:
+            weak.append(algo_name)
+            emit_finding(
+                title=f"Weak DNSSEC algorithm {algo_name} on {domain}",
+                severity=severity,
+                category="dns_security",
+                cwe="CWE-326",
+                target=domain,
+                description=(
+                    f"DNSKEY for `{domain}` uses {algo_name} (algorithm "
+                    f"number {algo}). Per RFC 8624 / NIST SP 800-57, this "
+                    f"algorithm is "
+                    f"{'broken (MUST NOT use)' if severity == 'high' else 'deprecated (SHOULD NOT use)'}."
+                ),
+                impact=(
+                    "Weak DNSSEC algorithms allow signature forgery — an "
+                    "attacker can produce valid-looking responses that "
+                    "spoof your records, undermining the chain-of-trust "
+                    "DNSSEC was deployed to provide."
+                ),
+                remediation=(
+                    "Roll keys to ECDSAP256SHA256 (algorithm 13) or "
+                    "ED25519 (algorithm 15). Coordinate with your "
+                    "registrar to update DS records at the parent zone "
+                    "after rollover."
+                ),
+                verification_status="verified",
+            )
+
+    return weak
+
+
+def _check_rrsig_expiry(rrsig_text: str, domain: str) -> bool:
+    """Parse RRSIG rdata and warn when any signature expires within
+    7 days. RRSIG rdata format (RFC 4034 §3.1):
+
+        <type-covered> <algo> <labels> <orig-ttl>
+        <sig-expiration> <sig-inception> <key-tag> <signer-name> <signature>
+
+    `sig-expiration` and `sig-inception` are UNIX-style YYYYMMDDHHMMSS
+    seconds from `dig` text output. We parse and compare to now+7d.
+    Returns True iff at least one expiration is within the warning
+    window."""
+    from datetime import datetime, timedelta, timezone
+
+    warn_window = timedelta(days=7)
+    now = datetime.now(timezone.utc)
+    threshold = now + warn_window
+    expiring = False
+
+    for raw in rrsig_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(";"):
+            continue
+        parts = line.split()
+        # Expect at least: type, algo, labels, ttl, expiration, inception, ...
+        if len(parts) < 6:
+            continue
+        exp_token = parts[4]
+        # Format YYYYMMDDHHMMSS — 14 digits.
+        if len(exp_token) != 14 or not exp_token.isdigit():
+            continue
+        try:
+            exp_dt = datetime.strptime(exp_token, "%Y%m%d%H%M%S").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            continue
+        if exp_dt <= threshold:
+            expiring = True
+            days_left = (exp_dt - now).total_seconds() / 86400
+            emit_finding(
+                title=f"DNSSEC RRSIG expiring soon on {domain}",
+                severity="medium" if days_left > 0 else "high",
+                category="dns_security",
+                cwe="CWE-345",
+                target=domain,
+                description=(
+                    f"At least one RRSIG for `{domain}` "
+                    f"{'expires' if days_left > 0 else 'has ALREADY EXPIRED'} "
+                    f"({days_left:.1f} days from now, expiration "
+                    f"{exp_dt.isoformat()})."
+                ),
+                impact=(
+                    "Once RRSIG signatures expire, DNSSEC-validating "
+                    "resolvers (Cloudflare 1.1.1.1, Google 8.8.8.8, "
+                    "many ISPs) will SERVFAIL the lookup — taking the "
+                    "domain offline for those clients. Real-world "
+                    "outage-shaped event."
+                ),
+                remediation=(
+                    "Re-sign the zone now and ensure your DNS provider's "
+                    "automatic re-signing is healthy. Enable monitoring "
+                    "on signature lifetime — most providers offer it."
+                ),
+                verification_status="verified",
+            )
+            break
+
+    return expiring
 
 
 def _check_wildcard(domain: str) -> dict[str, Any]:
