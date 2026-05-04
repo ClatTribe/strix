@@ -324,6 +324,25 @@ class BaseAgent(metaclass=AgentMeta):
 
             self._check_agent_messages(self.state)
 
+            # Roadmap §4 PR #113 — run-level cost / token cap.
+            # When --max-cost / --max-input-tokens fires, every
+            # agent in the run terminates cleanly and the runner
+            # exits with EXIT_BUDGET_EXCEEDED (3). Belt-and-braces
+            # against the per-sub-agent budget (#88).
+            try:
+                from strix.llm.run_budget import (
+                    emit_run_terminated_event_once,
+                    is_run_budget_exceeded,
+                )
+
+                exceeded, _reason = is_run_budget_exceeded()
+                if exceeded:
+                    emit_run_terminated_event_once()
+                    self.state.request_stop()
+            except Exception:  # noqa: BLE001
+                # Bookkeeping failure should never break the loop.
+                pass
+
             if self.state.is_waiting_for_input():
                 await self._wait_for_input()
                 continue

@@ -527,6 +527,32 @@ Examples:
             "Recommended for production traffic: 5-10 qps."
         ),
     )
+    # Roadmap §4 PR #113 — run-level cost / token caps.
+    safety_group.add_argument(
+        "--max-cost",
+        type=float,
+        default=None,
+        metavar="USD",
+        help=(
+            "Hard cap on total LLM spend for the run (USD). Strix exits "
+            "cleanly with code 3 when the cumulative cost crosses the cap, "
+            "emitting `run.terminated`. Findings emitted up to that point "
+            "are still in vulnerabilities.json — the run is partial. "
+            "Default: unlimited."
+        ),
+    )
+    safety_group.add_argument(
+        "--max-input-tokens",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Hard cap on cumulative input tokens for the run. Same self-exit "
+            "+ exit-code-3 contract as --max-cost. Use when your billing is "
+            "token-denominated (most providers) and you need a deterministic "
+            "stop independent of fluctuating $-per-token. Default: unlimited."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -872,6 +898,23 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             sys.exit(2)
         os.environ["STRIX_RATE_LIMIT"] = str(args.rate_limit)
 
+    # Roadmap §4 PR #113 — run-level cost / token caps. The
+    # `strix.llm.run_budget` module reads these env vars on every
+    # `is_run_budget_exceeded()` call so they plumb through Docker
+    # sandbox boundaries the same way the rest of STRIX_* args do.
+    if getattr(args, "max_cost", None) is not None:
+        if args.max_cost <= 0:
+            console = Console()
+            console.print("[red]--max-cost must be a positive USD amount.[/red]")
+            sys.exit(2)
+        os.environ["STRIX_MAX_COST_USD"] = str(args.max_cost)
+    if getattr(args, "max_input_tokens", None) is not None:
+        if args.max_input_tokens <= 0:
+            console = Console()
+            console.print("[red]--max-input-tokens must be a positive integer.[/red]")
+            sys.exit(2)
+        os.environ["STRIX_MAX_INPUT_TOKENS_RUN"] = str(args.max_input_tokens)
+
     crawl_steering: list[str] = []
     if args.seed_url:
         os.environ["STRIX_SEED_URLS"] = ",".join(args.seed_url)
@@ -962,6 +1005,23 @@ def main() -> None:  # noqa: PLR0912, PLR0915
     display_completion_message(args, results_path)
 
     if args.non_interactive:
+        # Roadmap §4 PR #113 — `--max-cost` / `--max-input-tokens`
+        # self-exit. When the run-level budget tripped during the
+        # scan, exit with the documented EXIT_BUDGET_EXCEEDED (3)
+        # rather than 0/2. Findings emitted up to the termination
+        # point are still in vulnerabilities.json — the run is
+        # partial.
+        try:
+            from strix.interface.exit_codes import EXIT_BUDGET_EXCEEDED
+            from strix.llm.run_budget import is_run_budget_exceeded
+
+            exceeded, _reason = is_run_budget_exceeded()
+            if exceeded:
+                sys.exit(EXIT_BUDGET_EXCEEDED)
+        except Exception:  # noqa: BLE001
+            # Bookkeeping failure should never block the normal exit path.
+            pass
+
         tracer = get_global_tracer()
         if tracer and tracer.vulnerability_reports:
             sys.exit(2)
