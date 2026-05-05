@@ -29,6 +29,29 @@ _SENSITIVE_KEY_PATTERN = re.compile(
     r"(api[_-]?key|token|secret|password|authorization|cookie|session|credential|private[_-]?key)",
     re.IGNORECASE,
 )
+# Token-count semantic keys (LLM usage telemetry — `input_tokens`,
+# `cached_tokens`, `tokens_remaining`, …). These are NOT credentials.
+# Without this allow-list, the existing `llm.request.completed`,
+# `run.terminated`, and the new `llm.token_breakdown` (§8.5 Phase 0.A)
+# events end up with `[REDACTED]` in their token-count fields —
+# which defeats cost-bisection and broke incident #147 suggestion 5.
+# Matched keys skip the sensitive-key redaction; their numeric
+# values pass through. This is safe because LLM token *counts* are
+# small integers (≤ context window size), not bearer tokens.
+_TOKEN_COUNT_KEY_PATTERN = re.compile(
+    # Matches "tokens" used as a count noun: as a suffix
+    # (`input_tokens`), prefix (`tokens_remaining`), or infix
+    # (`total_input_tokens_estimated`). Also bare `tokens` and
+    # `token_count`. **Pluralisation (with `s`) is the disambiguator**
+    # from auth-credential field names which are conventionally
+    # singular (`auth_token`, `api_token`, `bearer_token`,
+    # `session_token`) — those still get redacted via the existing
+    # `_SENSITIVE_KEY_PATTERN`. Word-boundaried match avoids
+    # false-positives on words containing "tokens" as a substring
+    # (e.g. hypothetical `tokensauthorizer`).
+    r"(?:^|_)tokens(?:_|$)|^token_count$",
+    re.IGNORECASE,
+)
 _SENSITIVE_TOKEN_PATTERN = re.compile(
     r"(?i)\b("
     r"bearer\s+[a-z0-9._-]+|"
@@ -78,7 +101,10 @@ class TelemetrySanitizer:
                 key_str = str(key)
                 if _SCREENSHOT_KEY_PATTERN.search(key_str):
                     sanitized[key_str] = _SCREENSHOT_OMITTED
-                elif _SENSITIVE_KEY_PATTERN.search(key_str):
+                elif (
+                    _SENSITIVE_KEY_PATTERN.search(key_str)
+                    and not _TOKEN_COUNT_KEY_PATTERN.search(key_str)
+                ):
                     sanitized[key_str] = _REDACTED
                 else:
                     sanitized[key_str] = self.sanitize(value, key_hint=key_str)
@@ -91,7 +117,11 @@ class TelemetrySanitizer:
             return [self.sanitize(item, key_hint=key_hint) for item in data]
 
         if isinstance(data, str):
-            if key_hint and _SENSITIVE_KEY_PATTERN.search(key_hint):
+            if (
+                key_hint
+                and _SENSITIVE_KEY_PATTERN.search(key_hint)
+                and not _TOKEN_COUNT_KEY_PATTERN.search(key_hint)
+            ):
                 return _REDACTED
 
             cleaned = self._scrubber.clean(data)
