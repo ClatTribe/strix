@@ -43,6 +43,34 @@ _FINGERPRINT_VERSION = 1
 _WS_COLLAPSE = _re_fingerprint.compile(r"\s+")
 
 
+def _empty_token_breakdown_summary() -> dict[str, Any]:
+    """Empty result shape for `Tracer.token_breakdown_summary` —
+    used when no `llm.token_breakdown` events have been emitted yet
+    or events.jsonl is unreadable."""
+    return {
+        "schema_version": 1,
+        "call_count": 0,
+        "totals": {
+            "system_tokens": 0,
+            "agent_identity_tokens": 0,
+            "conversation_tokens": 0,
+            "total_input_tokens_estimated": 0,
+            "measured_input_tokens": 0,
+            "measured_output_tokens": 0,
+            "measured_cached_tokens": 0,
+            "measured_cost_usd": 0.0,
+        },
+        "component_fractions": {
+            "system_fraction": 0.0,
+            "agent_identity_fraction": 0.0,
+            "conversation_fraction": 0.0,
+        },
+        "cache_hit_ratio_run": 0.0,
+        "per_agent": {},
+        "per_call_count": 0,
+    }
+
+
 def _fingerprint_normalize(s: str | None) -> str:
     if not s:
         return ""
@@ -1698,6 +1726,123 @@ class Tracer:
             status=normalised_result,
             source="strix.checks",
         )
+
+    def token_breakdown_summary(self) -> dict[str, Any]:
+        """Roadmap §8.5 Phase 0.A — aggregate `llm.token_breakdown`
+        events from `events.jsonl` for cost-bisection analysis.
+
+        Returns per-component totals across the entire run plus the
+        aggregate cache-hit ratio. Decision-gate input for the
+        single-lead-agent migration: if `conversation_tokens` is
+        the dominant bucket (and `inherit_context=True` is responsible
+        for most of it), the §8.5 Phase 0.B default-flip is the
+        cheapest fix; full architectural migration is deferred.
+
+        Best-effort. Returns zeros when no breakdown events have
+        been emitted (e.g. run hasn't called the LLM yet).
+        """
+        totals = {
+            "system_tokens": 0,
+            "agent_identity_tokens": 0,
+            "conversation_tokens": 0,
+            "total_input_tokens_estimated": 0,
+            "measured_input_tokens": 0,
+            "measured_output_tokens": 0,
+            "measured_cached_tokens": 0,
+            "measured_cost_usd": 0.0,
+        }
+        per_call: list[dict[str, Any]] = []
+        per_agent: dict[str, dict[str, int | float]] = {}
+        call_count = 0
+
+        try:
+            events_path = self._events_file_path
+            if events_path is None or not events_path.exists():
+                return _empty_token_breakdown_summary()
+            for raw in events_path.read_text(encoding="utf-8").splitlines():
+                if not raw.strip():
+                    continue
+                try:
+                    ev = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("event_type") != "llm.token_breakdown":
+                    continue
+                payload = ev.get("payload") or {}
+                call_count += 1
+
+                for k in (
+                    "system_tokens", "agent_identity_tokens",
+                    "conversation_tokens", "total_input_tokens_estimated",
+                    "measured_input_tokens", "measured_output_tokens",
+                    "measured_cached_tokens",
+                ):
+                    totals[k] += int(payload.get(k, 0) or 0)
+                totals["measured_cost_usd"] += float(payload.get("measured_cost_usd", 0.0) or 0.0)
+
+                # Per-call summary (lightweight — for histogram rendering).
+                per_call.append({
+                    "model": payload.get("model"),
+                    "agent_id": payload.get("agent_id"),
+                    "agent_name": payload.get("agent_name"),
+                    "system_tokens": int(payload.get("system_tokens", 0) or 0),
+                    "conversation_tokens": int(payload.get("conversation_tokens", 0) or 0),
+                    "measured_cached_tokens": int(payload.get("measured_cached_tokens", 0) or 0),
+                    "measured_cost_usd": float(payload.get("measured_cost_usd", 0.0) or 0.0),
+                    "cache_hit_ratio": float(payload.get("cache_hit_ratio", 0.0) or 0.0),
+                })
+
+                # Per-agent aggregation.
+                agent_key = str(payload.get("agent_name") or payload.get("agent_id") or "unknown")
+                slot = per_agent.setdefault(
+                    agent_key,
+                    {
+                        "calls": 0,
+                        "system_tokens": 0,
+                        "conversation_tokens": 0,
+                        "measured_input_tokens": 0,
+                        "measured_cached_tokens": 0,
+                        "measured_cost_usd": 0.0,
+                    },
+                )
+                slot["calls"] = int(slot["calls"]) + 1
+                for k in (
+                    "system_tokens", "conversation_tokens",
+                    "measured_input_tokens", "measured_cached_tokens",
+                ):
+                    slot[k] = int(slot[k]) + int(payload.get(k, 0) or 0)
+                slot["measured_cost_usd"] = (
+                    float(slot["measured_cost_usd"])
+                    + float(payload.get("measured_cost_usd", 0.0) or 0.0)
+                )
+        except OSError:
+            logger.debug("token_breakdown_summary: read failed", exc_info=True)
+            return _empty_token_breakdown_summary()
+
+        # Component fractions of total estimated input.
+        denom = totals["total_input_tokens_estimated"] or 1
+        component_fractions = {
+            "system_fraction": round(totals["system_tokens"] / denom, 4),
+            "agent_identity_fraction": round(totals["agent_identity_tokens"] / denom, 4),
+            "conversation_fraction": round(totals["conversation_tokens"] / denom, 4),
+        }
+
+        # Aggregate cache-hit ratio.
+        meas_input = totals["measured_input_tokens"] or 1
+        cache_hit_ratio_run = round(totals["measured_cached_tokens"] / meas_input, 4)
+
+        return {
+            "schema_version": 1,
+            "call_count": call_count,
+            "totals": {
+                **totals,
+                "measured_cost_usd": round(totals["measured_cost_usd"], 6),
+            },
+            "component_fractions": component_fractions,
+            "cache_hit_ratio_run": cache_hit_ratio_run,
+            "per_agent": per_agent,
+            "per_call_count": len(per_call),
+        }
 
     def get_check_summary(self) -> dict[str, Any]:
         """Aggregate completed checks for end-of-run reporting.

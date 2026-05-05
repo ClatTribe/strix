@@ -73,6 +73,11 @@ class LLM:
         self._total_stats = RequestStats()
         self.memory_compressor = MemoryCompressor(model_name=config.litellm_model)
         self.system_prompt = self._load_system_prompt(agent_name)
+        # Roadmap §8.5 Phase 0.A — cost-bisection telemetry. Stash
+        # the most-recent prepared-message breakdown so
+        # `_update_usage_stats` can emit it alongside the usage event.
+        # Best-effort; never blocks the LLM call.
+        self._last_token_breakdown: dict[str, int] | None = None
 
         reasoning = Config.get("strix_reasoning_effort")
         if reasoning:
@@ -330,6 +335,20 @@ class LLM:
         if self._is_anthropic() and self.config.enable_prompt_caching:
             messages = self._add_cache_control(messages)
 
+        # Roadmap §8.5 Phase 0.A — stash a per-component token
+        # breakdown for `_update_usage_stats` to emit. Best-effort:
+        # any failure leaves `_last_token_breakdown` as None and the
+        # `llm.token_breakdown` event simply doesn't fire.
+        try:
+            from strix.llm.token_breakdown import breakdown_messages
+
+            self._last_token_breakdown = breakdown_messages(
+                messages, model=self.config.litellm_model,
+            )
+        except Exception:  # noqa: BLE001
+            self._last_token_breakdown = None
+            logger.debug("token_breakdown failed", exc_info=True)
+
         return messages
 
     def _build_completion_args(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -441,6 +460,56 @@ class LLM:
                         status="ok",
                         source="strix.llm",
                     )
+            except Exception:  # noqa: BLE001, S110
+                pass  # noqa: PIE790
+
+            # Roadmap §8.5 Phase 0.A — emit per-component token
+            # breakdown so the operator can bisect where the per-call
+            # token cost lives. New event `llm.token_breakdown` is
+            # additive (wrappers ignoring unknown events keep working
+            # per engine-usage.md §6 versioning contract).
+            try:
+                breakdown = self._last_token_breakdown
+                if breakdown is not None:
+                    from strix.telemetry.tracer import get_global_tracer
+
+                    tracer = get_global_tracer()
+                    if tracer is not None:
+                        tracer._emit_event(
+                            "llm.token_breakdown",
+                            payload={
+                                "schema_version": breakdown.get("schema_version", 1),
+                                "model": getattr(self.config, "canonical_model", None)
+                                    or getattr(self.config, "model", None),
+                                "agent_id": self.agent_id,
+                                "agent_name": self.agent_name,
+                                # Estimated per-component (tokens).
+                                "system_tokens": int(breakdown.get("system_tokens", 0)),
+                                "agent_identity_tokens": int(
+                                    breakdown.get("agent_identity_tokens", 0)
+                                ),
+                                "conversation_tokens": int(
+                                    breakdown.get("conversation_tokens", 0)
+                                ),
+                                "total_input_tokens_estimated": int(
+                                    breakdown.get("total_input_tokens_estimated", 0)
+                                ),
+                                "message_count": int(breakdown.get("message_count", 0)),
+                                # Measured (from the response — provider-reported).
+                                "measured_input_tokens": int(input_tokens),
+                                "measured_output_tokens": int(output_tokens),
+                                "measured_cached_tokens": int(cached_tokens),
+                                "measured_cost_usd": round(float(cost), 6),
+                                # Cache-hit ratio for this call.
+                                "cache_hit_ratio": (
+                                    round(float(cached_tokens) / float(input_tokens), 4)
+                                    if input_tokens > 0 else 0.0
+                                ),
+                            },
+                            actor={"id": self.agent_id} if self.agent_id else None,
+                            status="ok",
+                            source="strix.llm.token_breakdown",
+                        )
             except Exception:  # noqa: BLE001, S110
                 pass  # noqa: PIE790
 
