@@ -14,5 +14,14 @@ See [`single-agent.md §2.2`](../../single-agent.md) for the full
 specification.
 """
 
+# `__all__` is explicitly empty so `from .specialist import *` from
+# `strix/tools/__init__.py` does NOT propagate the `registry` /
+# `result` / `scan_misconfig` submodules into `strix.tools.*`. The
+# `registry` submodule name in particular would otherwise shadow
+# `strix.tools.registry` — broke `tests/tools/test_mitre_attack_
+# tagging.py` and `tests/tools/test_tool_registration_modes.py` post-
+# Phase-1 sweep. Side-effect import below still registers the tool.
+__all__: list[str] = []
+
 # Import side-effects register tools.
 from strix.tools.specialist import scan_misconfig as _scan_misconfig  # noqa: F401
