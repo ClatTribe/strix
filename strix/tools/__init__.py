@@ -26,6 +26,7 @@ from .registry import (
     register_tool,
     tools,
 )
+from .findings import *  # noqa: F403  # roadmap §8.5 Phase 5
 from .reporting import *  # noqa: F403
 from .self_audit import *  # noqa: F403
 from .specialist import *  # noqa: F403  # roadmap §8.5 Phase 1

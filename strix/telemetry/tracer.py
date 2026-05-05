@@ -1434,6 +1434,335 @@ class Tracer:
     def get_existing_vulnerabilities(self) -> list[dict[str, Any]]:
         return list(self.vulnerability_reports)
 
+    def update_finding(
+        self,
+        *,
+        fingerprint: str | None = None,
+        report_id: str | None = None,
+        verification_status: str | None = None,
+        confidence: float | None = None,
+        severity: str | None = None,
+        reasoning_trace: list[str] | str | None = None,
+        counter_proof: dict[str, Any] | None = None,
+        poc_script_code: str | None = None,
+        additional_evidence: str | None = None,
+        updater_agent_id: str | None = None,
+        update_reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Roadmap §8.5 Phase 5 — mutate an already-emitted finding.
+
+        Use after eager-emission + follow-up evidence (e.g. validator
+        confirmed; severity needs a bump; counter_proof discovered).
+        Per [`single-agent.md §2.4`](single-agent.md), this is the
+        review-then-emit half of the eager-emit pattern (B.10): emit
+        early at `verification_status="pattern_match"`, then call
+        `update_finding(...)` once the validator confirms or refutes.
+
+        Args:
+            fingerprint: stable cross-scan finding id (#11 / #137).
+                Either this OR `report_id` must be provided.
+            report_id: per-run finding id (e.g. `vuln-0001`). Either
+                this OR `fingerprint` must be provided.
+            verification_status: optional new value. Validated against
+                #86 closed-enum. Clears `auto_dismissed` state when
+                set to `verified` (re-promotes a previously auto-
+                dismissed finding via the operator-driven path; the
+                wrapper's force-show button writes `verdict=tp` to
+                feedback.jsonl, but the engine itself can also re-
+                promote when a validator confirms).
+            confidence: optional new value (0.0–1.0). Same semantics
+                as #137.
+            severity: optional new value. Validated against the
+                canonical 5-value enum. Records the prior value under
+                `severity_pre_update` for audit.
+            reasoning_trace: optional new bullets (capped at 20 ×
+                320 chars per #137). REPLACES the existing trace.
+                Use when the validator has cleaner reasoning than
+                the original eager-emit.
+            counter_proof: optional new counter-proof block. REPLACES
+                existing.
+            poc_script_code: optional new PoC. When set on an
+                existing finding without one, also bumps
+                `verification_status` toward `verified` if the caller
+                didn't pass it explicitly.
+            additional_evidence: free-text appended to a new
+                `update_evidence_log` field (capped 4096 chars per
+                update). Each call appends a new entry.
+            updater_agent_id: id of the agent that ran the update
+                (for audit). Persisted in `last_updated_by`.
+            update_reason: free-text justification (for the
+                `finding.updated` event payload).
+
+        Returns:
+            ```python
+            {
+                "success": bool,
+                "report_id": str | None,
+                "fingerprint": str | None,
+                "fields_changed": list[str],
+                "previous_values": dict,
+                "error": str | None,  # set when success=False
+            }
+            ```
+
+        Side effects:
+          * Mutates the finding in place.
+          * Records `severity_pre_update` / `update_evidence_log` /
+            `last_updated_at` / `last_updated_by`.
+          * Emits `finding.updated` event (additive — wrappers
+            ignoring unknowns keep working per engine-usage.md §6).
+          * Re-runs #86 contract validation; violations attach to
+            the finding's `shape_violations` list.
+          * Re-runs #142 features extraction so the FP classifier's
+            input reflects latest values.
+          * Saves run data so the on-disk `vulnerabilities.json`
+            stays current.
+        """
+        if not fingerprint and not report_id:
+            return {
+                "success": False,
+                "report_id": None,
+                "fingerprint": None,
+                "fields_changed": [],
+                "previous_values": {},
+                "error": "either fingerprint or report_id required",
+            }
+
+        target: dict[str, Any] | None = None
+        for r in self.vulnerability_reports:
+            if fingerprint and r.get("fingerprint") == fingerprint:
+                target = r
+                break
+            if report_id and r.get("id") == report_id:
+                target = r
+                break
+        if target is None:
+            return {
+                "success": False,
+                "report_id": report_id,
+                "fingerprint": fingerprint,
+                "fields_changed": [],
+                "previous_values": {},
+                "error": (
+                    f"no finding with fingerprint={fingerprint!r} "
+                    f"or report_id={report_id!r}"
+                ),
+            }
+
+        previous: dict[str, Any] = {}
+        fields_changed: list[str] = []
+
+        # Validate verification_status against the canonical enum.
+        try:
+            from strix.telemetry.finding_contract import (
+                VALID_VERIFICATION_STATUSES,
+            )
+        except ImportError:
+            VALID_VERIFICATION_STATUSES = frozenset({  # noqa: N806
+                "verified", "pattern_match", "inconclusive",
+                "needs_review", "could_not_verify",
+            })
+        if verification_status is not None:
+            normalised = str(verification_status).strip().lower()
+            if normalised not in VALID_VERIFICATION_STATUSES:
+                return {
+                    "success": False,
+                    "report_id": target.get("id"),
+                    "fingerprint": target.get("fingerprint"),
+                    "fields_changed": [],
+                    "previous_values": {},
+                    "error": (
+                        f"verification_status {verification_status!r} not "
+                        f"in canonical enum"
+                    ),
+                }
+            if target.get("verification_status") != normalised:
+                previous["verification_status"] = target.get("verification_status")
+                target["verification_status"] = normalised
+                fields_changed.append("verification_status")
+                # Re-promote if previously auto-dismissed and now verified.
+                if normalised == "verified" and target.get("auto_dismissed"):
+                    previous["auto_dismissed"] = True
+                    target["auto_dismissed"] = False
+                    target["re_promoted"] = True
+                    fields_changed.append("auto_dismissed")
+
+        # Severity update.
+        if severity is not None:
+            sev = str(severity).strip().lower()
+            if sev not in {"info", "low", "medium", "high", "critical"}:
+                return {
+                    "success": False,
+                    "report_id": target.get("id"),
+                    "fingerprint": target.get("fingerprint"),
+                    "fields_changed": fields_changed,
+                    "previous_values": previous,
+                    "error": f"severity {severity!r} not in canonical enum",
+                }
+            if target.get("severity") != sev:
+                previous["severity"] = target.get("severity")
+                target["severity_pre_update"] = target.get("severity")
+                target["severity"] = sev
+                fields_changed.append("severity")
+
+        # Confidence update.
+        if confidence is not None:
+            try:
+                c = float(confidence)
+            except (TypeError, ValueError):
+                return {
+                    "success": False,
+                    "report_id": target.get("id"),
+                    "fingerprint": target.get("fingerprint"),
+                    "fields_changed": fields_changed,
+                    "previous_values": previous,
+                    "error": f"confidence must be numeric, got {confidence!r}",
+                }
+            if not 0.0 <= c <= 1.0:
+                return {
+                    "success": False,
+                    "report_id": target.get("id"),
+                    "fingerprint": target.get("fingerprint"),
+                    "fields_changed": fields_changed,
+                    "previous_values": previous,
+                    "error": f"confidence {c} out of range [0.0, 1.0]",
+                }
+            if target.get("confidence") != c:
+                previous["confidence"] = target.get("confidence")
+                target["confidence"] = c
+                fields_changed.append("confidence")
+
+        # reasoning_trace — REPLACE (caller passes the new trace).
+        if reasoning_trace is not None:
+            if isinstance(reasoning_trace, str):
+                trace = [s.strip() for s in reasoning_trace.split("\n") if s.strip()]
+            else:
+                trace = [
+                    str(s).strip()[:320] for s in reasoning_trace if str(s).strip()
+                ][:20]
+            previous["reasoning_trace"] = target.get("reasoning_trace")
+            target["reasoning_trace"] = trace
+            fields_changed.append("reasoning_trace")
+
+        # counter_proof — REPLACE.
+        if counter_proof is not None and isinstance(counter_proof, dict):
+            previous["counter_proof"] = target.get("counter_proof")
+            cp_normalised: dict[str, Any] = {}
+            desc = counter_proof.get("description")
+            evid = counter_proof.get("evidence")
+            if isinstance(desc, str):
+                cp_normalised["description"] = desc[:1024]
+            if isinstance(evid, str):
+                cp_normalised["evidence"] = evid[:2048]
+            target["counter_proof"] = cp_normalised
+            fields_changed.append("counter_proof")
+
+        # PoC code update — bumps verification_status to verified
+        # when not explicitly set by caller and PoC was previously
+        # absent.
+        if poc_script_code is not None:
+            new_poc = str(poc_script_code)[:16384]
+            if target.get("poc_script_code") != new_poc:
+                previous["poc_script_code"] = target.get("poc_script_code")
+                target["poc_script_code"] = new_poc
+                fields_changed.append("poc_script_code")
+                if (
+                    verification_status is None
+                    and target.get("verification_status") in (
+                        "pattern_match", "inconclusive", "needs_review",
+                    )
+                ):
+                    previous.setdefault(
+                        "verification_status", target.get("verification_status"),
+                    )
+                    target["verification_status"] = "verified"
+                    if "verification_status" not in fields_changed:
+                        fields_changed.append("verification_status")
+
+        # Append-only evidence log.
+        if additional_evidence is not None and str(additional_evidence).strip():
+            log = target.get("update_evidence_log") or []
+            if not isinstance(log, list):
+                log = []
+            log.append({
+                "evidence": str(additional_evidence)[:4096],
+                "at": datetime.now(UTC).isoformat(),
+                "agent_id": updater_agent_id,
+            })
+            target["update_evidence_log"] = log
+            if "update_evidence_log" not in fields_changed:
+                fields_changed.append("update_evidence_log")
+
+        if not fields_changed:
+            return {
+                "success": True,
+                "report_id": target.get("id"),
+                "fingerprint": target.get("fingerprint"),
+                "fields_changed": [],
+                "previous_values": {},
+                "error": None,
+            }
+
+        target["last_updated_at"] = datetime.now(UTC).isoformat()
+        if updater_agent_id:
+            target["last_updated_by"] = updater_agent_id
+
+        # Re-run #142 features extraction so the FP classifier sees
+        # the latest values (the features block already lives on the
+        # finding; re-extract to refresh).
+        try:
+            from strix.telemetry.finding_features import extract_features
+
+            target["features"] = extract_features(target)
+        except Exception:  # noqa: BLE001
+            logger.debug("update_finding: features re-extraction failed", exc_info=True)
+
+        # Re-run canonical-finding contract validation. Violations
+        # attach to the finding rather than aborting the update.
+        try:
+            from strix.telemetry.finding_contract import (
+                validate_canonical_finding,
+            )
+
+            shape_violations = validate_canonical_finding(target)
+            target["shape_violations"] = shape_violations
+            target["is_canonical"] = not any(
+                v.get("severity") == "error" for v in shape_violations
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("update_finding: contract revalidation failed", exc_info=True)
+
+        # Emit the additive `finding.updated` event. Wrapper-side:
+        # additive per engine-usage.md §6 versioning contract.
+        self._emit_event(
+            "finding.updated",
+            payload={
+                "report_id": target.get("id"),
+                "fingerprint": target.get("fingerprint"),
+                "fields_changed": fields_changed,
+                "previous_values": previous,
+                "update_reason": update_reason,
+                "updater_agent_id": updater_agent_id,
+            },
+            actor={"id": updater_agent_id} if updater_agent_id else None,
+            status="updated",
+            source="strix.findings.update",
+        )
+
+        try:
+            self.save_run_data()
+        except Exception:  # noqa: BLE001
+            logger.debug("update_finding: save_run_data failed", exc_info=True)
+
+        return {
+            "success": True,
+            "report_id": target.get("id"),
+            "fingerprint": target.get("fingerprint"),
+            "fields_changed": fields_changed,
+            "previous_values": previous,
+            "error": None,
+        }
+
     def update_finding_verification(
         self,
         report_id: str,
