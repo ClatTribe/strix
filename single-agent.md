@@ -129,6 +129,30 @@ This composes with §17.1 / §18 row 1 (validator agent) — under the new archi
 
 This ↦ §2.4 mutation API gains a "review-then-emit" pattern note.
 
+### B.11 Memory tiering — hot / warm / crystal / cold
+
+Long-running agents accumulate context past the model's quality knee (the "lost in the middle" effect — Liu et al. 2023, ["Lost in the Middle: How Language Models Use Long Contexts"](https://arxiv.org/abs/2307.03172) — models retrieve information from the middle of long contexts ~30% less accurately than from the beginning or end, with the effect growing roughly linearly past ~50% of advertised window).
+
+Production agents converge on tiered memory:
+
+- **Claude Code's auto-compaction** — automatic summary + replace when context approaches the limit; explicit `/compact` for user-driven triggers; `CLAUDE.md` files for project-level long-term memory.
+- **Aider's repo-map** — the entire codebase summarised into a token-bounded structural map at session start, regenerated as needed; conversational summarisation kicks in on long sessions.
+- **Cursor Composer's codebase indexing + @-mentions** — out-of-band embedding index; the agent retrieves relevant files via semantic search; user explicitly attaches files / docs / pages.
+- **Cline's "Memory Bank" pattern** — Cline-managed markdown files (`projectbrief.md`, `productContext.md`, `activeContext.md`, etc.) that the agent reads at session start and updates throughout.
+- **MemGPT / Letta** ([Packer et al. 2023](https://arxiv.org/abs/2310.08560)) — virtual context management; main context is a small "working set," with overflow paged to "external storage" the agent retrieves from explicitly via tool calls.
+- **Generative-agent memory streams** ([Park et al. 2023](https://arxiv.org/abs/2304.03442)) — every observation stored as a record with timestamp + importance score; retrieved via recency × importance × relevance; periodic reflection generates higher-level summaries.
+
+In strix terms, four tiers:
+
+- **Hot** — last ~10 turns of conversation. Full fidelity. Shapes the model's attention.
+- **Warm** — older turns compressed to 1-5 line summaries. Hierarchical (cluster → phase summaries).
+- **Crystal** — `surface_map.json`, `vulnerabilities.json`, `active_hypotheses.jsonl`, `coverage.json`, `feedback.jsonl`. Durable structured state read on-demand via tool calls; **never in conversation history**.
+- **Cold** — compacted-and-evicted raw history. In `events.jsonl` for audit; never re-loaded into conversation.
+
+The single load-bearing rule: **the lead never re-derives crystal-memory content from prose**. When the lead needs to know "what endpoints did recon find," it calls `read_surface_map()`; never asks itself "what was in turn 30." The crystal layer absorbs the durable output; the conversation only carries planning + reasoning.
+
+This ↦ §2.5 memory and context-window strategy (significantly expanded from the prior "context compaction" section).
+
 ---
 
 ## 1. Invariants (the wrapper-engine interface that MUST NOT change)
@@ -483,16 +507,172 @@ if first_credible_evidence:
     )
 ```
 
-### 2.5 Context compaction
+### 2.5 Memory and context-window strategy
 
-Today: `strix/llm/memory_compressor.py` exists and runs in `_prepare_messages`. Compresses inline messages but does NOT summarise older turns.
+The lead-agent loop accumulates conversation history every turn — system prompt + tool results + thinking blocks + tool calls. Without explicit memory management, a 60-min scan accumulates 500-800K tokens of history and the model's quality degrades past the "lost in the middle" knee (B.11). Production agent systems converge on a layered approach; this section operationalises it for strix.
 
-Extension:
-- New `compact_context(retain_findings=True, retain_hypotheses=True, summary_token_target=2000)` tool callable by the lead agent.
-- Triggers automatically when `len(conversation_history) > 500K tokens`.
-- Drops verbose tool outputs from older turns, replaces with `[Compacted: <one-line summary>]`.
-- Always preserves: findings emitted so far, active hypotheses, the test plan, the most recent 10 turns at full fidelity.
-- Existing `trajectory.jsonl` already captures the full pre-compaction history (events.jsonl is append-only and untouched), so the audit trail is complete regardless.
+**Wrapper-side impact: zero throughout.** The wrapper consumes the same `events.jsonl` stream + the same durable artifacts; how the lead manages its in-memory conversation is internal.
+
+#### 2.5.1 The four memory tiers
+
+| Tier | What lives there | Lifetime | Access path |
+|---|---|---|---|
+| **Hot** | Recent ~10 turns at full fidelity (system prompt, tool calls, tool results, thinking blocks). | This turn + the next ~10. | Direct in conversation history. Shapes the model's attention. |
+| **Warm** | Older turns compressed to 1-5 line summaries. Multi-level (turn cluster → phase summary). | Until next compaction or run end. | In conversation history as `[Compacted turns N-M: <summary>]` markers. |
+| **Crystal** | Durable structured state: `surface_map.json`, `vulnerabilities.json`, `active_hypotheses.jsonl`, `coverage.json`, `feedback.jsonl`. | Run lifetime + persisted to disk. | NOT in conversation history. The lead reads on-demand via tool calls (`list_active_hypotheses`, `get_existing_vulnerabilities`, `read_surface_map`, etc.). |
+| **Cold** | Compacted-and-evicted raw turns. | `events.jsonl` only. | Audit / debug only — never in conversation. `trajectory.jsonl` walks this post-hoc. |
+
+The single load-bearing rule: **the lead never re-derives crystal-memory content from prose.** When the lead needs to know "what endpoints did recon find," it calls `read_surface_map()`; doesn't ask itself "what was in the recon results 30 turns ago." The crystal layer absorbs the durable output; the conversation carries only planning + reasoning.
+
+#### 2.5.2 Compaction policy
+
+**Trigger:** hot+warm context exceeds 60% of model window. Per-provider thresholds are explicit because the "quality knee" varies (B.11 / Liu et al. 2023):
+
+| Provider / model | Window | Compaction trigger | Quality flat through |
+|---|---|---|---|
+| Anthropic Claude Sonnet 4.5/4.6 | 200K | > 120K | ~120K |
+| Anthropic Claude Opus 4.x (1M plan) | 1M | > 600K | ~600K |
+| OpenAI GPT-5.4 | 256K | > 150K | ~150K |
+| Gemini 2.5 Pro | 2M | > 800K | ~500K |
+| Vertex AI gemini-3-pro-preview | 1M | > 500K | ~500K |
+
+When triggered, `compact_context()` runs. Three buckets:
+
+1. **Preserve always** (never compact):
+   - System prompt + cached prefix (cache invariance — see §2.5.4).
+   - Run metadata (test plan + target list + scope).
+   - Most-recent 10 turns (hot).
+   - Active-hypotheses-related turns (lead's todo list — B.6).
+   - Last-emit turn for each fingerprint (so the model knows what it already emitted; prevents re-emission).
+2. **Hierarchically summarise** (warm → warmer):
+   - Cluster older turns into 5-turn windows.
+   - Generate a 2-3 line summary per cluster: _"Turns 21-25: probed `/admin` via 7 payloads; 401 on all; concluded auth required."_
+   - On the next compaction, re-summarise clusters into phase-level summaries: _"Recon phase: 14 endpoints discovered; 8 auth-protected; misconfig-specialist found 2 medium HSTS issues."_
+3. **Evict** (drop from conversation; keep in cold tier):
+   - Raw tool results past the cluster boundary (replaced by `[Compacted: 5 tool calls, 8 thinking blocks → cluster summary above]`).
+   - Heavy intermediate outputs already compressed in-flight via §2.5.3.
+
+Preservation lists are deterministic, so two runs against the same events produce the same warm-memory shape (idempotency — important for §2.5.4).
+
+#### 2.5.3 Tool-result compression (in-flight, not just at compaction)
+
+Specialist-tools return `SpecialistResult` (B.8) — already structured + bounded. But primitive tools (`send_request`, `terminal_execute`, `browser_action`, `read_file`) can return arbitrarily-large outputs. A single sqlmap stdout dump or a full DOM snapshot can be 50KB+; 10 of those in a row blow the context window before compaction even triggers.
+
+**Rule:** every tool result passes through a compressor before entering conversation history.
+
+```
+raw_output (50KB)
+  ↓ executor.py post-processing
+inline_excerpt (≤ 2KB) + stash_pointer (events.jsonl line N)
+  ↓ enter conversation history
+"<output: first-1KB...last-1KB; full at events.jsonl#L1247>"
+```
+
+- **Inline cap**: 2KB per tool result. Heavy outputs replaced with `[Tool result compressed: <one-line summary>; full output at events.jsonl line N]`.
+- **Stash**: full output remains in `events.jsonl` (compliance / audit untouched — wrappers see the full record).
+- **Critical evidence extraction**: specialist-tools own this in `SpecialistResult.evidence` (capped 4KB). Primitive tools fall back to head-and-tail truncation.
+- **Format-aware extraction**: HTTP responses keep status + headers + first-1KB body; sqlmap output keeps the verdict line + injection-point summary; browser DOM keeps the form/script subset.
+
+Same pattern as Claude Code's `Bash` tool (heavy stdout → summary; agent doesn't re-read 50KB of grep output) and Cursor's chunked-file-read.
+
+#### 2.5.4 Cache-stability rules (the cost-model load-bearing constraint)
+
+Compaction REWRITES conversation history; this breaks the cache prefix on the next LLM call (the prefix-hash changes → cache miss). If we compact every 20 turns, cache is invalidated 5× per scan — destroys the cost model the migration was justified by.
+
+Rules:
+
+1. **Compact infrequently but deeply.** One compaction per 60-80 turns, evicting ~50K tokens, beats 10 compactions per 8 turns each. Net cache-hit rate: ~70-80% on a 60-turn scan with 1 compaction; ~30-40% with 5 compactions.
+2. **Keep system prompt + run-metadata invariant.** These are the most-cached prefix. Never modify them mid-run.
+3. **Compact deterministically.** Use templated summaries (_"Cluster N: X probes against Y, results: Z"_), not free-form LLM summarisation. Two compactions on the same conversation must produce identical warm-memory shape — otherwise cache prefix drifts every compaction.
+4. **Cache the compacted summaries themselves.** Once a cluster summary is generated, it's part of the prefix. Subsequent turns hit cache on it.
+5. **Never reorder the conversation.** Compaction can REPLACE a span with a summary; it must NOT re-arrange surviving turns. Order-preservation is a cache-stability invariant.
+
+This is what makes the Phase 8 cache-hit-ratio gate (≥60% across the whole scan) achievable in practice.
+
+#### 2.5.5 Reflection — periodic synthesis (Park et al. 2023 pattern)
+
+Every N turns (configurable, default 30) OR at every `phase.completed`, the lead invokes `reflect()`:
+
+```python
+@register_tool(sandbox_execution=False, provenance="framework")
+def reflect(
+    *,
+    scope: Literal["last_n_turns", "current_phase", "current_target"],
+    n: int = 30,
+) -> ReflectionResult:
+    """Synthesise a high-level summary of recent activity. Returns
+    1-2 paragraphs the lead can use as scratchpad. The summary is
+    appended to active_hypotheses.jsonl as a 'reflection' record-
+    type so it survives compaction. Lead can recall via
+    list_reflections(...) instead of re-summarising."""
+    ...
+```
+
+Reflections become **crystal memory** — durable across compactions, retrievable on-demand. This is the Park et al. 2023 "memory streams" pattern adapted: raw observations → reflections → phase-level conclusions.
+
+**Schema impact:** `active_hypotheses.jsonl` gains a new record-type `reflection` alongside the existing `hypothesis.opened/confirmed/dismissed` types. This is **additive** — wrappers ignoring unknown record-types per the engine-usage.md §6 versioning contract keep working. Wrappers that care can render reflections in a "what the engine concluded so far" panel.
+
+#### 2.5.6 Cross-run episodic memory (deferred to existing §17.6 row)
+
+Per-target memory across scans is the long-term layer:
+
+```
+~/.strix/memory/<target_hash>/
+  ├── prior_findings.jsonl       (fingerprints + verdicts from prior runs)
+  ├── prior_surface_map.json     (last-known endpoint set)
+  ├── prior_dismissals.jsonl     (operator FP labels — also in feedback.jsonl)
+  └── prior_reflections.jsonl    (phase-level summaries from prior runs)
+```
+
+The lead loads relevant slices at scan start (mirroring Cline's Memory Bank: read at session open, update at session close). Today's scan becomes "delta against last week's scan" rather than "from scratch."
+
+**This is already tracked in roadmap §17.6** ("Cross-run memory") as ⬜. **Out of scope for this migration** — the single-agent shift doesn't require it. Once it ships, the lead's first turn becomes _"load `~/.strix/memory/<target>/` → seed working memory with prior context"_ instead of starting fresh; the §2.5.1 hot tier seeds with the prior run's reflections + open-hypotheses-from-last-time.
+
+This composes cleanly: cross-run memory is orthogonal to within-run memory tiering. Both layers ship independently.
+
+#### 2.5.7 Implementation: extending `MemoryCompressor`
+
+Today: `strix/llm/memory_compressor.py` exists. It compresses INLINE messages (long tool outputs within a single message) but does NOT do the multi-tier strategy above.
+
+Extensions (Phase 6):
+
+```python
+# strix/llm/memory_compressor.py (EXTENDED)
+
+class MemoryCompressor:
+    # Existing: inline-message compression.
+
+    def should_compact(self, history: list[Message], model: str) -> bool:
+        """True when hot+warm context exceeds the per-provider threshold."""
+        ...
+
+    def compact(
+        self,
+        history: list[Message],
+        *,
+        preserve_recent_n: int = 10,
+        preserve_hypothesis_turns: bool = True,
+        preserve_emit_turns: bool = True,
+        cluster_size: int = 5,
+    ) -> list[Message]:
+        """Multi-tier compaction per §2.5.2. Deterministic — same
+        input produces the same output (cache invariance §2.5.4)."""
+        ...
+
+    def compress_tool_result(
+        self,
+        tool_name: str,
+        raw_output: str | dict,
+        *,
+        inline_cap: int = 2048,
+    ) -> CompressedResult:
+        """In-flight compression per §2.5.3. Format-aware: HTTP
+        response / sqlmap / DOM / file content all have specific
+        extraction rules."""
+        ...
+```
+
+Plus new `strix/agents/lead_agent/reflection.py` for the §2.5.5 reflection mechanism.
 
 ### 2.6 Watchdog + per-tool-call timeout
 
@@ -600,22 +780,33 @@ The lead reasons over remaining budget when planning the next turn. New `check_b
 @register_tool(sandbox_execution=False, provenance="framework")
 def check_budget() -> dict[str, Any]:
     return {
+        # Cost / token caps (existing #88 / #113 surface)
         "cost_usd_consumed": 0.42,
         "cost_usd_cap": 1.50,
         "cost_usd_remaining": 1.08,
         "input_tokens_consumed": 85_000,
-        "input_tokens_cap": 0,  # 0 = unlimited
+        "input_tokens_cap": 0,                     # 0 = unlimited
         "wall_seconds_elapsed": 420,
         "wall_seconds_cap": 0,
-        "cache_hit_ratio": 0.62,         # B.2 measurement
+        "cache_hit_ratio": 0.62,                   # B.2 / §2.5.4 measurement
+        # Context-window utilisation (§2.5)
+        "context_tokens_active": 78_000,           # hot + warm in conversation
+        "context_window_cap": 200_000,             # provider-dependent (§2.5.2)
+        "context_window_utilisation": 0.39,        # active / cap
+        "context_compaction_threshold": 0.60,      # at this point compact
+        "compactions_so_far": 0,
+        "ttf_compaction_estimated_turns": 50,      # turns to next compaction at current rate
+        "findings_emitted": 4,                     # for self-correction logic
     }
 ```
 
 Lead's system prompt:
 
-> When `cost_usd_remaining` falls below `0.20` AND `findings_emitted` count is below baseline expectation, prioritise the highest-leverage remaining specialist-tool over breadth. Eager-emit on existing partial evidence rather than gathering more.
+> When `cost_usd_remaining` falls below `0.20` AND `findings_emitted` is below baseline expectation, prioritise the highest-leverage remaining specialist-tool over breadth. Eager-emit on existing partial evidence rather than gathering more.
+>
+> When `context_window_utilisation` exceeds `0.50`, prefer specialist-tools that emit findings and clear hypotheses over broad recon (which inflates context). When it exceeds `0.55`, call `compact_context()` proactively before the next big specialist-tool call — compaction in the middle of a long sequence is cheaper than compaction immediately before a cache-miss.
 
-This is what makes "$2.50 cap exhausted with 0 findings" (incident #147) self-correctable.
+This is what makes "$2.50 cap exhausted with 0 findings" (incident #147) self-correctable, and what makes the lead avoid "lost in the middle" attention degradation as the conversation grows.
 
 ---
 
@@ -739,24 +930,36 @@ See §2.4.
 
 **Test gate:** mutation correctness + #86 contract revalidation + #142 features re-extraction + #98 cross-tool dedup composition.
 
-### 3.8 Phase 6 — Context compaction + watchdog + async specialist-tools
+### 3.8 Phase 6 — Memory + context-window strategy + watchdog + async specialist-tools
 
 See §2.5 + §2.6 + §2.7.
 
-This phase combines the two mechanisms that handle long-running runs:
-- **Context compaction** — keeps the lead's conversation under ~500K tokens.
-- **Watchdog + per-tool-call timeout** — catches stuck-loop pathologies.
-- **Async / background specialist-tools** (B.5 / §2.7) — long-running probes (nuclei against 10K endpoints, masscan, recon-ng pipelines) opt into `async_capable=True`, return a `task_id` immediately, and the lead observes their completion as a deferred `tool.execution.completed` event.
+This phase combines the four mechanisms that handle long-running runs:
+
+- **Multi-tier memory** (B.11 / §2.5) — hot / warm / crystal / cold; lead never re-derives crystal content from prose.
+- **Hierarchical compaction** (§2.5.2) — per-provider thresholds (60% of window); cluster summaries → phase summaries; deterministic / cache-stable (§2.5.4).
+- **In-flight tool-result compression** (§2.5.3) — heavy outputs capped at 2KB inline + stashed in `events.jsonl`; format-aware extraction.
+- **Reflection** (§2.5.5) — periodic synthesis; reflections written to `active_hypotheses.jsonl` as a new `reflection` record-type (additive); survive compaction.
+- **Watchdog + per-tool-call timeout** (§2.6) — catches stuck-loop pathologies.
+- **Async / background specialist-tools** (B.5 / §2.7) — long-running probes opt into `async_capable=True`, return `task_id` immediately, completion arrives as deferred `tool.execution.completed`.
 
 **Invariant impact:**
-- `events.jsonl` hash-chain (#127) preserved — chain still walks left-to-right; compaction is in-memory only.
-- `run.terminated.payload.reason` adds a new value `watchdog_no_progress` (additive within the closed-enum because [`engine-usage.md §6`](engine-usage.md) treats unknown reason values as informational).
-- Async tool: `tool.execution.started` and `tool.execution.completed` events still fire as today; the gap between them just gets larger on async tools. Wrapper sees no schema change.
+
+- `events.jsonl` hash-chain (#127) preserved — chain still walks left-to-right; compaction is in-memory only; pre-compaction tool outputs preserved in `events.jsonl` for audit (cold-tier access).
+- `run.terminated.payload.reason` adds a new value `watchdog_no_progress` (additive — engine-usage.md §6 treats unknown reason values as informational).
+- `active_hypotheses.jsonl` gains a new record-type `reflection` (additive; wrappers ignoring unknown types keep working).
+- Async tool: `tool.execution.started` and `tool.execution.completed` still fire; the gap between them grows on async tools. Wrapper sees no schema change.
+- `check_budget` (§2.9) returns extra context-window utilisation fields (additive per [`engine-usage.md §6`](engine-usage.md#6-versioning--compatibility)).
 
 **Test gate:**
-- Forced-stuck-agent test (mocked LLM returning `think` 6 turns in a row); watchdog fires; `run.terminated` emitted; exit code 0 (or 1 if findings); `vulnerabilities.json` reflects collected findings.
-- Async-tool integration test: fire `bulk_subdomain_scan(...)` with mocked 60s wall-time; lead continues with parallel synchronous calls; deferred `tool.execution.completed` arrives; lead observes + emits findings from the async result.
-- Long-run compaction test: 200-turn synthetic run; compaction triggers ≥3 times; final `vulnerabilities.json` count matches non-compacted baseline.
+
+- **Forced-stuck-agent** test (mocked LLM returning `think` 6 turns in a row); watchdog fires; `run.terminated` emitted; exit code 0 (or 1 if findings); `vulnerabilities.json` reflects collected findings.
+- **Async-tool integration**: fire `bulk_subdomain_scan(...)` with mocked 60s wall-time; lead continues with parallel synchronous calls; deferred `tool.execution.completed` arrives; lead observes + emits findings from the async result.
+- **Long-run compaction**: 200-turn synthetic run; compaction triggers exactly 1-2 times (sparse-but-deep — §2.5.4 cache stability); final `vulnerabilities.json` count matches non-compacted baseline ±1.
+- **Cache-stability**: replay the same 60-turn conversation twice; warm-memory shape after compaction is byte-identical (deterministic templates — §2.5.4 rule 3).
+- **Tool-result compression**: heavy outputs (50KB sqlmap stdout, 100KB DOM) compressed to ≤2KB inline; full output preserved in `events.jsonl`; lead's conversation total stays within the per-provider threshold.
+- **Reflection durability**: 100-turn run with 3 compactions; reflections from turn 25 still queryable via `list_reflections()` after compaction at turn 90.
+- **Quality-knee respect**: scan against gemini-2.5-pro stays under 800K context; scan against Sonnet 4.5 stays under 120K. Compaction triggers fire at the right threshold per §2.5.2 table.
 
 ### 3.9 Phase 7 — Trajectory-capture re-anchoring
 
@@ -779,7 +982,7 @@ This produces per-finding trajectories that are scoped to the specialist tool th
 - PR sets `STRIX_AGENT_ARCHITECTURE=single-lead` as the default.
 - `STRIX_AGENT_ARCHITECTURE=legacy` env var stays for one release cycle as escape hatch.
 
-**Acceptance criteria** (from RFC):
+**Acceptance criteria** (from RFC + memory/context additions):
 
 | Metric | Baseline (legacy) | Target (single-lead) | Gate |
 |---|---|---|---|
@@ -790,6 +993,10 @@ This produces per-finding trajectories that are scoped to the specialist tool th
 | webappsec integration suite | green | green (zero wrapper change) | hard pass |
 | `events.jsonl` schema diff vs legacy | n/a | additive only | hard pass |
 | `vulnerabilities.json` shape diff | n/a | byte-equal except finding count | hard pass |
+| Cache-hit ratio across whole scan (§2.5.4) | n/a | ≥60% | hard pass |
+| Peak context-window utilisation (§2.5.2 / §2.5.7 quality-knee) | n/a | ≤60% per provider table | hard pass |
+| Compactions per 60-turn scan (§2.5.4 sparse-but-deep) | n/a | ≤2 | soft pass (warn if >3) |
+| Reflections written across run (§2.5.5) | n/a | ≥1 per phase | soft pass |
 
 **Test gate:** all of the above. Any miss → PR not merged; investigate; revert if needed.
 
@@ -822,7 +1029,7 @@ single lead agent + specialist-tools. Implementation plan in
 | ⬜ | **Phase 3 — `LeadAgent` class + parallel-tool-dispatch loop (B.3) + 3 LLM-driven specialist-tools (XSS / SQLi / IDOR) + synthetic `agent.created` rule + per-target-type catalog filtering (§2.8) + `check_budget` (§2.9).** | Architectural step. Lead's system prompt explicitly instructs parallel-tool-calls, `active_hypotheses.jsonl` as todo list (B.6), provenance-reasoning (B.7), eager-emit-then-review (B.10). Behind `STRIX_AGENT_ARCHITECTURE=single-lead` env-gate. | New: `strix/agents/lead_agent.py` + `lead_agent/system_prompt.jinja` + `lead_agent/tool_catalog.py` + `strix/tools/findings/check_budget.py`. | L |
 | ⬜ | **Phase 4 — wrap remaining 9 specialists as `llm=True` tools (and migrate any deterministic remainders to `llm=False`).** | One PR per specialist for reversibility. | `strix/tools/specialist/`. | L |
 | ⬜ | **Phase 5 — `update_finding` mutation + eager-emission shorthand + review-then-emit pattern for high-stakes findings (B.10).** | Eager emission requires partial-finding write + later refinement. New `finding.updated` event (additive). Review path composes with §17.1 / §18 row 1 validator. | New: `strix/tools/findings/update_finding.py`. | S |
-| ⬜ | **Phase 6 — context compaction + watchdog + per-tool-call timeout + async / background specialist-tools (B.5 / §2.7).** | Lead-agent context bloat past ~500K hurts attention quality; watchdog catches stuck-loop pathologies; async tools handle nuclei / masscan / recon-ng without blocking the lead loop. | Extend `strix/llm/memory_compressor.py` + `strix/agents/lead_agent.py` + new `strix/tools/specialist/async_dispatch.py`. | M |
+| ⬜ | **Phase 6 — memory + context-window strategy (4 tiers, hierarchical compaction, in-flight tool-result compression, reflection) + watchdog + per-tool-call timeout + async / background specialist-tools (B.5 / B.11 / §2.5 / §2.7).** | "Lost in the middle" attention degradation past ~50% of advertised window (Liu et al. 2023); without explicit memory tiering and per-provider compaction thresholds, long scans degrade in quality even before they exhaust budget. Watchdog catches stuck-loop pathologies; async tools handle nuclei / masscan / recon-ng without blocking the lead loop. | Extend `strix/llm/memory_compressor.py` (multi-tier compaction, in-flight tool-result compression) + `strix/agents/lead_agent.py` (hot/warm tier management) + new `strix/agents/lead_agent/reflection.py` + new `strix/tools/specialist/async_dispatch.py` + `active_hypotheses.jsonl` schema extension (additive `reflection` record-type). | M-L |
 | ⬜ | **Phase 7 — trajectory-capture re-anchoring.** | Per-finding trajectory anchors on specialist-tool boundaries instead of `agent.created` so #142 features stay meaningful. | `strix/telemetry/trajectory_capture.py`. | S |
 | ⬜ | **Phase 8 — benchmark gate + default flip to `single-lead`.** | Acceptance gate on demo.testfire.net + DVWA + juice-shop. webappsec integration suite must pass with zero wrapper change. Cache-hit-ratio ≥60% gate (B.2 measurement). | `tests/benchmarks/`. | M |
 
@@ -903,7 +1110,27 @@ Cache prefixes drift as the lead agent's conversation grows. If cache-hit ratio 
 **Mitigation:**
 - Cache TTL = max(1h, scan_duration * 1.5) so the cache lives long enough for the scan.
 - Cache-key derivation uses the SUMMARISED prior turns (post-Phase-6 compaction), not the full turn-by-turn — so compaction stabilises the prefix.
+- Compact infrequently but deeply (§2.5.4) — 1-2 compactions per scan rather than 5+.
 - Phase 0.A telemetry includes per-turn cache-hit ratio; Phase 8 gate checks ratio ≥60% across the whole scan.
+
+### 5.7 Quality-knee hit before compaction
+
+If compaction threshold is set too high (e.g. > 80% of advertised window), the model's quality has already degraded before compaction fires (Liu et al. 2023 — "lost in the middle"). The lead's reasoning quality drops; emission quality follows. Cost-cap holds but findings get worse.
+
+**Mitigation:**
+- Per-provider thresholds in §2.5.2 deliberately undershoot the advertised window (60% of spec) to stay in the flat-quality region.
+- Phase 8 acceptance gate measures peak context-window utilisation (table in §3.10) — must stay ≤60% per provider. Failing this gate means the threshold is wrong.
+- Reflections (§2.5.5) crystallise older context proactively, so even before compaction triggers, the lead has a high-density summary of older work without paying full attention cost.
+- The trade-off: more compactions for higher per-turn quality. The single-lead architecture already commits to fewer-but-deeper compactions (§2.5.4); the right knob is "compact a bit early" not "compact more often."
+
+### 5.8 Reflection schema drift
+
+`active_hypotheses.jsonl` gains a `reflection` record-type in Phase 6. If a wrapper enforces a closed-enum on the existing 3 record-types, this breaks them.
+
+**Mitigation:**
+- [`engine-usage.md §6 versioning`](engine-usage.md#6-versioning--compatibility) already mandates "wrappers SHOULD treat unknown values as `other` rather than crashing." Phase 6 is consistent with this contract.
+- Pre-Phase-6 PR sweep checks webappsec PRs that consume `active_hypotheses.jsonl` for any closed-enum guards on record-type. If found, wrapper PR ships first to widen the enum to "ignore unknown."
+- Schema_version on `active_hypotheses.jsonl` does NOT bump — `reflection` is additive.
 
 ---
 
