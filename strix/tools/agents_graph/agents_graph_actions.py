@@ -380,12 +380,54 @@ def view_agent_graph(agent_state: Any) -> dict[str, Any]:
         }
 
 
+def _resolve_default_inherit_context() -> bool:
+    """Roadmap §8.5 Phase 0.B — operator-controlled default for
+    `create_agent(inherit_context=...)` when the caller doesn't
+    explicitly set it.
+
+    Reads `STRIX_INHERIT_CONTEXT_DEFAULT` env. Default is **False**
+    (the Phase 0.B flip — the prior default `True` was responsible
+    for the per-spawn 700K-context dump that drove incident #147).
+
+    Set `STRIX_INHERIT_CONTEXT_DEFAULT=true` to restore the legacy
+    behaviour as a per-run escape hatch during the §8.5 migration.
+    Removed in the release after Phase 8 default-flip per the
+    deprecation timeline in `single-agent.md §7`.
+    """
+    import os
+
+    raw = (os.environ.get("STRIX_INHERIT_CONTEXT_DEFAULT") or "").strip().lower()
+    return raw in ("true", "1", "yes", "on")
+
+
+def _resolve_inherit_context(
+    *,
+    requested: bool | None,
+    profile: Any,
+) -> bool:
+    """Roadmap §8.5 Phase 0.B resolution order:
+
+      1. Caller passed True / False explicitly → use as-is.
+      2. Caller passed None AND `profile` is a registered specialist
+         profile → use `profile.inherit_context_default`.
+      3. Otherwise → `STRIX_INHERIT_CONTEXT_DEFAULT` env-var
+         (defaults to False per Phase 0.B).
+
+    Pure function — testable without spawning a real agent thread.
+    """
+    if requested is not None:
+        return bool(requested)
+    if profile is not None and hasattr(profile, "inherit_context_default"):
+        return bool(profile.inherit_context_default)
+    return _resolve_default_inherit_context()
+
+
 @register_tool(sandbox_execution=False)
 def create_agent(  # noqa: PLR0913
     agent_state: Any,
     task: str,
     name: str,
-    inherit_context: bool = True,
+    inherit_context: bool | None = None,
     skills: str | None = None,
     category: str | None = None,
     budget: dict[str, Any] | None = None,
@@ -419,19 +461,15 @@ def create_agent(  # noqa: PLR0913
                 budget = merged
             if profile.scope_addendum and profile.scope_addendum not in task:
                 task = f"{profile.scope_addendum.strip()}\n\n{task}"
-            # `inherit_context_default` is a hint, not a hard override —
-            # caller-supplied value wins. If caller passed the
-            # signature default (True) AND profile says False, we take
-            # the profile's signal. We can't distinguish "caller
-            # explicitly passed True" from "caller used the default"
-            # at this layer, so the profile's False value is
-            # respected when the caller didn't explicitly set
-            # inherit_context to True via kwargs. To keep the
-            # contract simple here we ONLY reduce-not-expand: we
-            # set `inherit_context = False` when the profile says
-            # False AND `inherit_context` is True (the default).
-            if inherit_context is True and profile.inherit_context_default is False:
-                inherit_context = False
+
+        # Roadmap §8.5 Phase 0.B — resolve via the testable helper.
+        # Default flipped from True → False; the per-spawn 700K-
+        # context dump that drove incident #147 only fires when the
+        # caller explicitly passes `inherit_context=True` or sets
+        # `STRIX_INHERIT_CONTEXT_DEFAULT=true` as an escape hatch.
+        inherit_context = _resolve_inherit_context(
+            requested=inherit_context, profile=profile,
+        )
 
         from strix.skills import parse_skill_list, validate_requested_skills
 
