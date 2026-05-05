@@ -106,11 +106,30 @@ def _build_per_finding_trajectory(
 ) -> dict[str, Any] | None:
     """Build one trajectory record for one finding.
 
-    Strategy: walk events backwards from the most recent
-    `finding.created` event with a matching fingerprint, collecting
-    upstream events that share the same `actor.agent_id`. Stop
-    when we hit `agent.created` for that agent (or 200 events,
-    whichever first).
+    Strategy (roadmap §8.5 Phase 7 re-anchoring):
+
+      1. Walk events backwards from the most recent `finding.created`
+         event matching this finding's fingerprint.
+      2. Collect upstream events sharing the same `actor.agent_id`
+         (the synthetic specialist agent under §8.5 Phase 3+, or the
+         legacy spawned-sub-agent under parent-spawns-N).
+      3. Stop at the FIRST of:
+           a. `agent.created` for the same agent_id (start of this
+              specialist's invocation; legacy spawn boundary).
+           b. `agent.completed` event of a DIFFERENT agent_id
+              (sibling specialist boundary — Phase 3+ scoping rule).
+              This keeps the trajectory tight to the specialist that
+              emitted, rather than over-collecting events from
+              earlier sibling invocations sharing the lead's outer
+              context.
+           c. The 200-event walk-back cap.
+
+      4. Walk FORWARDS from `finding.created` to pick up any
+         `finding.updated` (#157 Phase 5) events for the same
+         fingerprint/report_id. Cap at 50 events forward. The
+         labeler grades the full lifecycle: emit + later
+         promote/refute + counter_proof attachment all live in the
+         trajectory.
     """
     fingerprint = finding.get("fingerprint")
     finding_id = finding.get("id")
@@ -153,13 +172,12 @@ def _build_per_finding_trajectory(
             "time_to_emit_seconds": None,
             "tool_calls_in_trajectory": 0,
             "dismissed_alternatives": [],
+            "update_event_count": 0,
             "exploration_breadth": {"unique_endpoints": 0, "unique_tools": 0},
         }
 
-    # Walk backwards to collect upstream events for this agent.
-    # Stop bound is `-1` (range stop is exclusive) so we always
-    # visit index 0; otherwise we'd miss agent.created when it
-    # lives at the very start of the events log.
+    # Walk backwards. Phase 7 re-anchoring: also stop on agent.completed
+    # of a DIFFERENT agent_id (sibling specialist boundary).
     related_events: list[dict[str, Any]] = []
     agent_started_idx: int | None = None
     max_walk = 200
@@ -168,16 +186,50 @@ def _build_per_finding_trajectory(
         ev = events[j]
         actor = ev.get("actor") or {}
         actor_agent_id = actor.get("agent_id")
+        et = ev.get("event_type")
+
+        # Phase 7 sibling-boundary stop: under §8.5 Phase 3+ a sibling
+        # specialist-tool may have emitted agent.completed earlier in
+        # the stream (under the lead-agent loop). Walking back through
+        # the sibling's events would over-collect; stop at the
+        # sibling boundary.
+        if (
+            et == "agent.completed"
+            and finding_agent_id is not None
+            and actor_agent_id is not None
+            and actor_agent_id != finding_agent_id
+        ):
+            break
+
         if (
             finding_agent_id is None
             or actor_agent_id == finding_agent_id
         ):
             related_events.append(ev)
-            if ev.get("event_type") == "agent.created":
+            if et == "agent.created":
                 agent_started_idx = j
                 break
 
     related_events.reverse()  # restore chronological order
+
+    # Phase 7 forward-walk: collect post-finding `finding.updated`
+    # events (#157 Phase 5) so the labeler sees the full lifecycle
+    # (emit + promote/refute + counter_proof attach).
+    update_events: list[dict[str, Any]] = []
+    max_forward_walk = 50
+    forward_stop = min(len(events), finding_event_idx + 1 + max_forward_walk)
+    for k in range(finding_event_idx + 1, forward_stop):
+        ev = events[k]
+        if ev.get("event_type") not in (
+            "finding.updated", "finding.auto_dismissed", "finding.dismissed",
+        ):
+            continue
+        payload = ev.get("payload") or {}
+        if (
+            payload.get("fingerprint") == fingerprint
+            or payload.get("report_id") == finding_id
+        ):
+            update_events.append(ev)
 
     # Compact event list — only the metadata the labeler / RLHF
     # pipeline actually grades.
@@ -225,6 +277,29 @@ def _build_per_finding_trajectory(
 
         events_compact.append(compact)
 
+    # Phase 7 forward-walk: append post-finding lifecycle events
+    # (finding.updated / finding.auto_dismissed / finding.dismissed)
+    # so the trajectory captures the full mutation history. Compact
+    # form mirrors the upstream events; payload fields surface the
+    # delta (fields_changed / update_reason / dismissal_reason).
+    for ev in update_events:
+        et = ev.get("event_type")
+        payload = ev.get("payload") or {}
+        compact_update: dict[str, Any] = {
+            "type": et,
+            "timestamp": ev.get("timestamp"),
+        }
+        if et == "finding.updated":
+            compact_update["fields_changed"] = payload.get("fields_changed") or []
+            compact_update["update_reason"] = payload.get("update_reason")
+        elif et == "finding.auto_dismissed":
+            compact_update["auto_dismissal_reason"] = payload.get(
+                "auto_dismissal_reason",
+            )
+        elif et == "finding.dismissed":
+            compact_update["dismissal_reason"] = payload.get("dismissal_reason")
+        events_compact.append(compact_update)
+
     # Iterations & timing.
     iterations = sum(
         1 for ev in related_events
@@ -251,6 +326,7 @@ def _build_per_finding_trajectory(
         "time_to_emit_seconds": time_to_emit,
         "tool_calls_in_trajectory": tool_calls_count,
         "dismissed_alternatives": dismissed,
+        "update_event_count": len(update_events),
         "exploration_breadth": {
             "unique_endpoints": len(unique_endpoints),
             "unique_tools": len(unique_tools),
