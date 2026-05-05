@@ -574,12 +574,40 @@ class LLM:
         return result
 
     def _add_cache_control(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Delegate cache marker placement to the §8.5 Phase 2
+        `CacheManager` so stats track centrally. Behaviour preserved:
+        same `cache_control: {type: ephemeral}` marker on the system
+        message; `supports_prompt_caching(canonical_model)` gate
+        unchanged."""
         if not messages or not supports_prompt_caching(self.config.canonical_model):
             return messages
+        if messages[0].get("role") != "system":
+            return messages
 
-        result = list(messages)
+        try:
+            from strix.llm.cache_manager import get_global_cache_manager
 
-        if result[0].get("role") == "system":
+            content = messages[0].get("content", "")
+            content_text = (
+                content if isinstance(content, str)
+                else " ".join(
+                    item.get("text", "") for item in content
+                    if isinstance(item, dict) and item.get("type") == "text"
+                )
+            )
+            if not content_text:
+                return messages
+
+            mgr = get_global_cache_manager()
+            handle = mgr.register_cached_prompt(
+                content=content_text,
+                model=self.config.model_name or self.config.canonical_model or "",
+            )
+            return mgr.apply_to_messages(messages, handles=[handle])
+        except Exception:  # noqa: BLE001
+            logger.debug("CacheManager delegation failed", exc_info=True)
+            # Fallback: legacy direct marker placement.
+            result = list(messages)
             content = result[0]["content"]
             result[0] = {
                 **result[0],
@@ -589,4 +617,4 @@ class LLM:
                 if isinstance(content, str)
                 else content,
             }
-        return result
+            return result
