@@ -130,11 +130,17 @@ class LeadTeam:
         category: str | None = None,
         skills: str | None = None,
         budget: dict[str, Any] | None = None,
-        inherit_context: bool = True,
+        inherit_context: bool | None = None,
     ) -> _SpawnRecord:
         """Spawn one specialist via `create_agent`. Records the
         outcome on the team. Returns the SpawnRecord (also
-        appended to `self._spawns`)."""
+        appended to `self._spawns`).
+
+        Roadmap §8.5 Phase 0.B: `inherit_context` default flipped
+        from `True` to `None` (which delegates to `create_agent`'s
+        resolver — profile default → `STRIX_INHERIT_CONTEXT_DEFAULT`
+        env → False). Existing call sites that pass `True` / `False`
+        explicitly are unaffected."""
         try:
             from strix.tools.agents_graph.agents_graph_actions import create_agent
 
@@ -187,7 +193,7 @@ class LeadTeam:
                     category=spec.get("category"),
                     skills=spec.get("skills"),
                     budget=spec.get("budget"),
-                    inherit_context=spec.get("inherit_context", True),
+                    inherit_context=spec.get("inherit_context"),  # §8.5 Phase 0.B — None defers to create_agent resolver
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning("LeadTeam.spawn_many entry failed: %s", e)
