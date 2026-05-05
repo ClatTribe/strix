@@ -7,5 +7,10 @@ review-then-emit (B.10) can compose: emit early at
 attach PoC after follow-up evidence.
 """
 
+# `__all__` empty — same rationale as `strix/tools/specialist/__init__.py`:
+# prevents `from .findings import *` from propagating submodule names
+# that could shadow other top-level `strix.tools.*` modules.
+__all__: list[str] = []
+
 # Import side-effects register tools.
 from strix.tools.findings import update_finding as _update_finding  # noqa: F401
