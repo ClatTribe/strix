@@ -28,6 +28,7 @@ from .registry import (
 )
 from .reporting import *  # noqa: F403
 from .self_audit import *  # noqa: F403
+from .specialist import *  # noqa: F403  # roadmap §8.5 Phase 1
 from .terminal import *  # noqa: F403
 from .traffic_ingest import *  # noqa: F403
 from .thinking import *  # noqa: F403
