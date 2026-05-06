@@ -29,6 +29,10 @@ from textual.widgets import Button, Label, Static, TextArea, Tree
 from textual.widgets.tree import TreeNode
 
 from strix.agents.StrixAgent import StrixAgent
+from strix.agents.lead_agent import (
+    LeadAgent,
+    is_single_lead_architecture_enabled,
+)
 from strix.interface.streaming_parser import parse_streaming_content
 from strix.interface.tool_components.agent_message_renderer import AgentMessageRenderer
 from strix.interface.tool_components.registry import get_tool_renderer
@@ -1504,7 +1508,14 @@ class StrixTUIApp(App):  # type: ignore[misc]
                 asyncio.set_event_loop(loop)
 
                 try:
-                    agent = StrixAgent(self.agent_config)
+                    # Roadmap §8.5 Phase 3 — single-lead architecture
+                    # selection via STRIX_AGENT_ARCHITECTURE env var.
+                    if is_single_lead_architecture_enabled():
+                        agent_config = dict(self.agent_config)
+                        agent_config["scan_config"] = self.scan_config
+                        agent = LeadAgent(agent_config)
+                    else:
+                        agent = StrixAgent(self.agent_config)
 
                     if not self._scan_stop_event.is_set():
                         loop.run_until_complete(agent.execute_scan(self.scan_config))

@@ -13,4 +13,5 @@ attach PoC after follow-up evidence.
 __all__: list[str] = []
 
 # Import side-effects register tools.
+from strix.tools.findings import check_budget as _check_budget  # noqa: F401
 from strix.tools.findings import update_finding as _update_finding  # noqa: F401

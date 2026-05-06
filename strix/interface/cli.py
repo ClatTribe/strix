@@ -11,6 +11,10 @@ from rich.panel import Panel
 from rich.text import Text
 
 from strix.agents.StrixAgent import StrixAgent
+from strix.agents.lead_agent import (
+    LeadAgent,
+    is_single_lead_architecture_enabled,
+)
 from strix.llm.config import LLMConfig
 from strix.telemetry.tracer import Tracer, set_global_tracer
 
@@ -165,7 +169,17 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
             update_thread.start()
 
             try:
-                agent = StrixAgent(agent_config)
+                # Roadmap §8.5 Phase 3 — single-lead architecture
+                # selection via STRIX_AGENT_ARCHITECTURE env var.
+                # Default `legacy` keeps the existing StrixAgent
+                # path until Phase 8 acceptance gate clears.
+                if is_single_lead_architecture_enabled():
+                    # Pass scan_config so LeadAgent can filter the
+                    # tool catalog by target_type at init time.
+                    agent_config["scan_config"] = scan_config
+                    agent = LeadAgent(agent_config)
+                else:
+                    agent = StrixAgent(agent_config)
                 result = await agent.execute_scan(scan_config)
 
                 if isinstance(result, dict) and not result.get("success", True):
