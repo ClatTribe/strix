@@ -131,12 +131,29 @@ class LeadAgent(StrixAgent):
     """
 
     def __init__(self, config: dict[str, Any]):
-        # Force category=lead on the AgentState before BaseAgent.__init__
-        # runs (so the synthetic agent.created event carries the right
-        # category).
+        # Roadmap §8.5 — force category="lead" BEFORE super().__init__
+        # so the agent.created event (emitted by BaseAgent's
+        # tracer.log_agent_creation call) carries the right category.
+        # Two paths:
+        #   1. Caller passed `state` in config → mutate in place.
+        #   2. Caller did NOT (the default cli.py / tui.py path) →
+        #      pre-build an AgentState with category="lead" and
+        #      inject so BaseAgent's `config.get("state")` finds it
+        #      instead of constructing a default Root-Agent state.
         state = config.get("state")
         if state is not None and hasattr(state, "category"):
             state.category = "lead"
+        else:
+            # Mirror BaseAgent's default state construction with
+            # category="lead" pre-set.
+            from strix.agents.state import AgentState
+
+            state = AgentState(
+                agent_name="Root Agent",  # preserved for back-compat
+                category="lead",
+                max_iterations=int(config.get("max_iterations", self.max_iterations)),
+            )
+            config["state"] = state
 
         # Capture target_types from scan_config when available so the
         # tool catalog is filtered correctly. The actual filtering
