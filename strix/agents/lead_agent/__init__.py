@@ -11,9 +11,18 @@ from strix.agents.lead_agent.lead_agent import (
     LeadAgent,
     is_single_lead_architecture_enabled,
 )
+from strix.agents.lead_agent.watchdog import (
+    WatchdogState,
+    emit_watchdog_terminated,
+)
+# Phase 6 — registers `reflect` + `list_reflections` tools as side
+# effects of import.
+from strix.agents.lead_agent import reflection as _reflection  # noqa: F401
 
 
 __all__ = [
     "LeadAgent",
+    "WatchdogState",
+    "emit_watchdog_terminated",
     "is_single_lead_architecture_enabled",
 ]
