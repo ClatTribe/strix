@@ -24,4 +24,5 @@ specification.
 __all__: list[str] = []
 
 # Import side-effects register tools.
+from strix.tools.specialist import async_dispatch as _async_dispatch  # noqa: F401
 from strix.tools.specialist import scan_misconfig as _scan_misconfig  # noqa: F401
