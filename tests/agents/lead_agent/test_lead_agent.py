@@ -196,3 +196,33 @@ def test_lead_agent_inherits_execute_scan_method() -> None:
     agent = LeadAgent({"state": state})
     assert hasattr(agent, "execute_scan")
     assert callable(agent.execute_scan)
+
+
+# ---------------------------------------------------------------------------
+# Real-CLI flow: config has NO `state` key, BaseAgent builds it
+# ---------------------------------------------------------------------------
+
+
+def test_lead_agent_forces_category_when_state_built_by_super() -> None:
+    """Regression test for the bug surfaced by the demo.testfire.net
+    benchmark: cli.py builds `agent_config = {llm_config, max_iterations}`
+    WITHOUT a pre-built state. BaseAgent.__init__ then constructs
+    `self.state`. The pre-super category-forcing in LeadAgent only
+    fires when state is in config; so under the real CLI flow the
+    category leaked through as None and `agent.created` events
+    showed `category=None` instead of `category="lead"`.
+
+    Fix: post-super category-forcing on `self.state.category`
+    regardless of how state was constructed."""
+    from strix.llm.config import LLMConfig
+
+    config_without_state = {
+        "llm_config": LLMConfig(),
+        "max_iterations": 10,
+    }
+    agent = LeadAgent(config_without_state)
+    assert agent.state is not None
+    assert agent.state.category == "lead", (
+        f"category leaked through as {agent.state.category!r} — the "
+        f"category-forcing path is bypassed when config has no `state`"
+    )

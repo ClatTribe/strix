@@ -177,6 +177,31 @@ class LeadAgent(StrixAgent):
         self.is_lead_agent = True
         self.target_types = list(target_types)
 
+        # Roadmap §8.5 — force category="lead" AFTER super().__init__
+        # too. The pre-super assignment only fires when caller-supplied
+        # state was present in config; the default cli.py / tui.py
+        # path does NOT pre-build state (BaseAgent constructs it).
+        # Without this post-super forcing, agent.created emits with
+        # category=None and the wrapper-side per-specialist
+        # filtering / synthetic-agent.created discrimination breaks.
+        try:
+            if hasattr(self, "state") and self.state is not None:
+                self.state.category = "lead"
+            # Re-emit agent metadata to the tracer so subsequent events
+            # carry the corrected category. Best-effort.
+            try:
+                from strix.telemetry.tracer import get_global_tracer
+
+                tracer = get_global_tracer()
+                if tracer is not None and hasattr(tracer, "agents"):
+                    aid = getattr(self.state, "agent_id", None)
+                    if aid and aid in tracer.agents:
+                        tracer.agents[aid]["category"] = "lead"
+            except Exception:  # noqa: BLE001
+                logger.debug("LeadAgent: tracer agent-category re-tag failed")
+        except Exception:  # noqa: BLE001
+            logger.debug("LeadAgent: post-super category force failed")
+
         # BaseAgent.__init__ created `self.llm` from llm_config. Push
         # the lead-architecture context onto the live LLM instance so
         # the directives reach the actual prompt-render path
