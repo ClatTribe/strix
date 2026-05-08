@@ -196,6 +196,96 @@ class LeadAgent(StrixAgent):
         except Exception:  # noqa: BLE001
             logger.debug("LeadAgent: could not augment self.llm._system_prompt_context")
 
+        # Roadmap §8.5 Phase 6 — watchdog state for the iteration
+        # hook. Tracks turns since last progress; force-exits the
+        # loop when too many idle turns pass. Default
+        # `max_idle_turns=8` — 3 more than single-agent.md §2.6's
+        # default of 5 to give early scan iterations (recon /
+        # surface mapping) some slack before declaring stuck.
+        try:
+            from strix.agents.lead_agent.watchdog import WatchdogState
+
+            self._watchdog = WatchdogState(max_idle_turns=8)
+        except Exception:  # noqa: BLE001
+            self._watchdog = None
+            logger.debug("LeadAgent: watchdog init failed")
+        # Snapshot for progress detection in `_on_iteration_tick`.
+        self._last_finding_count = 0
+        self._last_completed_tool_count = 0
+        self._watchdog_terminated_emitted = False
+
+    # ------------------------------------------------------------------
+    # Per-iteration hook (roadmap §8.5 Phase 6)
+    # ------------------------------------------------------------------
+
+    def _on_iteration_tick(self) -> bool:
+        """Tick the watchdog + detect progress between iterations.
+
+        Progress signals (any one resets the idle counter):
+          * `len(tracer.vulnerability_reports)` grew since last tick
+            → finding emitted (eager-emit per §B.10).
+          * `completed_tool_executions` count grew → at least one
+            tool ran successfully (recon / probe / specialist call).
+
+        Returns True to force-exit the loop when watchdog signals
+        max-idle-turns reached (single-agent.md §2.6). The loop
+        wraps this in try/except so an override that raises is
+        ignored; force-exit is the only way to halt voluntarily.
+        """
+        wd = getattr(self, "_watchdog", None)
+        if wd is None:
+            return False
+        try:
+            wd.tick()
+
+            # Detect progress.
+            from strix.telemetry.tracer import get_global_tracer
+
+            tracer = get_global_tracer()
+            if tracer is not None:
+                cur_findings = len(getattr(tracer, "vulnerability_reports", []) or [])
+                if cur_findings > self._last_finding_count:
+                    wd.record_progress("finding")
+                    self._last_finding_count = cur_findings
+                # Tool-execution completed count from the tracer's
+                # in-memory counter.
+                cur_completed = sum(
+                    int(rec.get("status") == "completed")
+                    for rec in (getattr(tracer, "tool_executions", {}) or {}).values()
+                    if isinstance(rec, dict)
+                )
+                if cur_completed > self._last_completed_tool_count:
+                    wd.record_progress("endpoint")
+                    self._last_completed_tool_count = cur_completed
+
+            # Force-exit on idle threshold.
+            if wd.should_force_exit():
+                if not self._watchdog_terminated_emitted:
+                    try:
+                        from strix.agents.lead_agent.watchdog import (
+                            emit_watchdog_terminated,
+                        )
+
+                        emit_watchdog_terminated(
+                            reason_detail=(
+                                f"{wd.max_idle_turns} consecutive iterations "
+                                f"without progress (no new findings, no new "
+                                f"completed tool executions)"
+                            ),
+                        )
+                        self._watchdog_terminated_emitted = True
+                    except Exception:  # noqa: BLE001
+                        logger.debug("LeadAgent: watchdog emit failed")
+                logger.warning(
+                    "LeadAgent watchdog force-exit: %d idle iterations",
+                    wd.max_idle_turns,
+                )
+                return True
+        except Exception:  # noqa: BLE001
+            # Hook must never break the agent loop.
+            logger.debug("LeadAgent._on_iteration_tick failed", exc_info=True)
+        return False
+
     @staticmethod
     def _extract_target_types(config: dict[str, Any]) -> set[str]:
         """Extract target_type values from config. Defaults to the
