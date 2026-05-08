@@ -103,6 +103,13 @@ def test_lead_agent_system_prompt_context_carries_directives(base_config) -> Non
     assert "single-lead mode" in directives
     assert "no sub-agents" in directives
     assert "probe the live target" in directives
+    # Emission-discipline reinforcement (the no-emission failure mode
+    # showed real exploits described in prose without ever calling
+    # create_vulnerability_report). Pin the must-have phrases.
+    assert "EMIT FINDINGS EAGERLY" in directives
+    assert "create_vulnerability_report" in directives
+    assert "verification_status=pattern_match" in directives
+    assert "Prose without an emission means the finding is lost" in directives
 
 
 def test_lead_agent_carries_tool_catalog_allowlist(base_config) -> None:
