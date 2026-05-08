@@ -206,6 +206,24 @@ class BaseAgent(metaclass=AgentMeta):
             # Budget tracking must NEVER break the agent loop.
             pass
 
+    def _on_iteration_tick(self) -> bool:
+        """Roadmap §8.5 Phase 6 hook — fires once per agent_loop
+        iteration, AFTER `state.increment_iteration()` and BEFORE
+        the LLM call.
+
+        Default implementation is a no-op (returns False — keep
+        looping). The lead agent overrides this to tick its
+        watchdog + check compaction triggers.
+
+        Returns:
+            True to force the loop to stop gracefully (lead-agent
+            watchdog idle threshold reached). False to continue.
+
+        Best-effort throughout — the agent_loop wraps this in
+        try/except so an override that raises won't break the loop.
+        """
+        return False
+
     def _maybe_emit_heartbeat(self, tracer: Any | None) -> None:
         """Emit `run.heartbeat` at most once every 60 seconds with
         last-activity timestamps. Roadmap §4. Wrappers tail this
@@ -377,6 +395,20 @@ class BaseAgent(metaclass=AgentMeta):
                 continue
 
             self.state.increment_iteration()
+
+            # Roadmap §8.5 Phase 6 — per-iteration hook for the lead
+            # agent to tick its watchdog + check compaction triggers.
+            # Default implementation is a no-op (BaseAgent doesn't
+            # need watchdog semantics; LeadAgent overrides).
+            try:
+                if self._on_iteration_tick():
+                    # Hook signalled "force exit" (e.g., watchdog
+                    # idle threshold reached). Treat as graceful stop.
+                    self.state.request_stop()
+                    continue
+            except Exception:  # noqa: BLE001
+                # Iteration hook must never break the agent loop.
+                logger.debug("agent_loop._on_iteration_tick failed", exc_info=True)
 
             if (
                 self.state.is_approaching_max_iterations()
