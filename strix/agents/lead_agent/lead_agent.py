@@ -245,16 +245,43 @@ class LeadAgent(StrixAgent):
         except Exception:  # noqa: BLE001
             logger.debug("LeadAgent: post-super category force failed")
 
-        # BaseAgent.__init__ created `self.llm` from llm_config. Push
-        # the lead-architecture context onto the live LLM instance so
-        # the directives reach the actual prompt-render path
-        # regardless of whether llm_config carried the context.
+        # BaseAgent.__init__ created `self.llm` from llm_config. We
+        # need to do TWO things:
+        #
+        #   1. Re-point the LLM's template lookup at StrixAgent's
+        #      directory (`strix/agents/StrixAgent/system_prompt.jinja`).
+        #      The `AgentMeta` metaclass overrides `agent_name` to the
+        #      *class name*, so for `class LeadAgent(StrixAgent)` it
+        #      becomes `"LeadAgent"`. `LLM._load_system_prompt` then
+        #      hands `"LeadAgent"` to `get_strix_resource_path("agents",
+        #      ...)` which fails to find a template — and the bare
+        #      `except Exception` clause silently returns `""`. The
+        #      LLM then sends an empty system prompt to the provider:
+        #      gemini-2.5-pro receives only the user instruction, has
+        #      no scope/no tool catalog/no format directives, and
+        #      hallucinates the entire scan from training data using
+        #      `<tool_code>` Python syntax (which strix's parser
+        #      rejects). Symptom: first LLM request reports
+        #      `prompt_tokens=145` instead of ~80K.
+        #
+        #   2. Push the lead-architecture context onto the LLM and
+        #      RE-RENDER. `set_system_prompt_context` does both — it
+        #      assigns the new context AND calls
+        #      `_load_system_prompt(self.agent_name)` to refresh
+        #      `self.system_prompt`.
         try:
-            existing = dict(getattr(self.llm, "_system_prompt_context", {}) or {})
-            existing.update(system_prompt_context)
-            self.llm._system_prompt_context = existing
+            self.llm.agent_name = "StrixAgent"
+            merged_ctx = dict(getattr(self.llm, "_system_prompt_context", {}) or {})
+            merged_ctx.update(system_prompt_context)
+            self.llm.set_system_prompt_context(merged_ctx)
+            if not self.llm.system_prompt:
+                logger.warning(
+                    "LeadAgent: system_prompt empty after reload — "
+                    "template render likely failed; LLM will receive "
+                    "no scope/no format directives."
+                )
         except Exception:  # noqa: BLE001
-            logger.debug("LeadAgent: could not augment self.llm._system_prompt_context")
+            logger.debug("LeadAgent: could not refresh self.llm.system_prompt")
 
         # Roadmap §8.5 Phase 6 — watchdog state for the iteration
         # hook. Tracks turns since last progress; force-exits the

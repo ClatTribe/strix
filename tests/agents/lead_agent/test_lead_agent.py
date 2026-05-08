@@ -251,3 +251,70 @@ def test_lead_agent_forces_category_when_state_built_by_super() -> None:
         f"category leaked through as {agent.state.category!r} — the "
         f"category-forcing path is bypassed when config has no `state`"
     )
+
+
+# ---------------------------------------------------------------------------
+# System prompt — must be loaded (regression for empty-prompt bug)
+# ---------------------------------------------------------------------------
+
+
+def test_lead_agent_system_prompt_is_loaded(base_config) -> None:
+    """Regression test for the empty-system-prompt bug surfaced by the
+    second demo.testfire.net benchmark (run id `*_4fed`):
+
+    `BaseAgent.__init__` builds `LLM(self.llm_config, agent_name=self.agent_name)`,
+    which uses `agent_name` to locate the jinja template via
+    `get_strix_resource_path("agents", agent_name)`. The metaclass
+    `AgentMeta` overrides `agent_name` to the *class name* — so for
+    `class LeadAgent(StrixAgent)` it became `"LeadAgent"`, but the
+    template lives under `strix/agents/StrixAgent/`. The lookup
+    silently failed in `_load_system_prompt`'s bare-except clause →
+    `self.llm.system_prompt = ""`.
+
+    Empirical impact: the lead's first LLM request had `prompt_tokens=145`
+    instead of ~80K. Gemini-2.5-pro received only the user instruction,
+    fabricated a complete pentest from training data using `<tool_code>`
+    Python-syntax, hit zero real probes, and the watchdog terminated
+    the run after 8 idle iterations.
+
+    The fix: LeadAgent overrides `agent_name` resolution so the LLM
+    finds StrixAgent's template. This test pins that the rendered
+    prompt is large (template + tool catalog) AND contains the
+    lead-architecture markers."""
+    agent = LeadAgent(base_config)
+    sp = agent.llm.system_prompt
+    # Sanity: prompt is non-trivial (template + tool catalog combined
+    # is normally >50k chars; a regression to "" or "missing template"
+    # short-circuits this check).
+    assert len(sp) > 5000, (
+        f"system_prompt is only {len(sp)} chars — template lookup "
+        f"likely failed (agent_name resolution bug). Empty/short "
+        f"prompts cause LLMs to hallucinate the entire scan from "
+        f"training data."
+    )
+    # The lead-architecture block must render — that's how the model
+    # learns about <function=...> XML format reinforcement.
+    assert "SINGLE-LEAD ARCHITECTURE" in sp
+    assert "CRITICAL — TOOL CALL FORMAT" in sp
+    assert "<function=tool_name>" in sp
+    # The `EMIT FINDINGS EAGERLY` discipline (PR #167) must reach the
+    # rendered prompt, not just the context dict.
+    assert "EMIT FINDINGS EAGERLY" in sp
+    # The canonical-invocation block (PR #168) must reach the prompt
+    # so gemini stops inventing wrong param names.
+    assert "<parameter=cvss_breakdown>" in sp
+
+
+def test_lead_agent_system_prompt_loaded_under_real_cli_path() -> None:
+    """Same regression check, but for the cli.py path that doesn't
+    pre-build state. This mirrors the actual demo.testfire.net flow
+    where the bug originally surfaced."""
+    from strix.llm.config import LLMConfig
+
+    config_without_state = {
+        "llm_config": LLMConfig(),
+        "max_iterations": 10,
+    }
+    agent = LeadAgent(config_without_state)
+    assert len(agent.llm.system_prompt) > 5000
+    assert "SINGLE-LEAD ARCHITECTURE" in agent.llm.system_prompt
