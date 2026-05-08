@@ -110,6 +110,20 @@ def test_lead_agent_system_prompt_context_carries_directives(base_config) -> Non
     assert "create_vulnerability_report" in directives
     assert "verification_status=pattern_match" in directives
     assert "Prose without an emission means the finding is lost" in directives
+    # Canonical-invocation block (gemini-2.5-pro kept inventing wrong
+    # params — `url` / `severity` / `remediation` / `type` — until
+    # the schema was spelled out explicitly. Pin all 9 required
+    # param names here.)
+    for required_param in (
+        "title", "description", "impact", "target",
+        "technical_analysis", "poc_description", "poc_script_code",
+        "remediation_steps", "cvss_breakdown",
+    ):
+        assert f"<parameter={required_param}>" in directives, (
+            f"required param {required_param!r} missing from "
+            f"canonical-invocation block — agents will fail with "
+            f"TypeError on real calls"
+        )
 
 
 def test_lead_agent_carries_tool_catalog_allowlist(base_config) -> None:
