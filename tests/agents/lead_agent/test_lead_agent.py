@@ -97,8 +97,12 @@ def test_lead_agent_system_prompt_context_carries_directives(base_config) -> Non
     assert ctx.get("lead_architecture_active") is True
     assert "lead_architecture_directives" in ctx
     directives = ctx["lead_architecture_directives"]
-    assert "single-lead architecture" in directives
-    assert "Do NOT attempt to spawn sub-agents" in directives
+    # Pinned semantic content of the addendum — short single-paragraph
+    # form (the verbose 7-rule version was reverted because it caused
+    # prose-hallucination of findings, see the prompt-fix PR).
+    assert "single-lead mode" in directives
+    assert "no sub-agents" in directives
+    assert "probe the live target" in directives
 
 
 def test_lead_agent_carries_tool_catalog_allowlist(base_config) -> None:
