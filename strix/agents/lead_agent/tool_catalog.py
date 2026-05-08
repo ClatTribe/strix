@@ -50,8 +50,10 @@ _CORE_TOOLS: frozenset[str] = frozenset({
 # Per-target-type tool sets. Union with `_CORE_TOOLS` at lookup time.
 _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
     "web_application": frozenset({
-        # Specialist-tools
+        # Specialist-tools — phase 3b/3a
         "scan_misconfig",
+        "scan_xss",  # Phase 3b — deterministic reflected-XSS specialist
+        "scan_sqli",  # Phase 3b — deterministic SQLi specialist
         # Recon
         "fingerprint_tech_stack", "bfs_crawl",
         "well_known_harvest", "webapp_recon_pipeline",

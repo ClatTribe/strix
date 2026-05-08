@@ -26,3 +26,5 @@ __all__: list[str] = []
 # Import side-effects register tools.
 from strix.tools.specialist import async_dispatch as _async_dispatch  # noqa: F401
 from strix.tools.specialist import scan_misconfig as _scan_misconfig  # noqa: F401
+from strix.tools.specialist import scan_sqli as _scan_sqli  # noqa: F401  # Phase 3b
+from strix.tools.specialist import scan_xss as _scan_xss  # noqa: F401  # Phase 3b
