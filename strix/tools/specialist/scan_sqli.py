@@ -596,6 +596,14 @@ def scan_sqli(
                 f"(true_len={len(true_body)} vs false_len={len(false_body)})"
             )
 
+    # Roadmap §8.5 Phase 5 — record probe coverage in SecurityContext.
+    try:
+        from strix.agents.security_context import record_endpoint
+
+        record_endpoint(url, method=method, params=params, probed_for="sqli")
+    except Exception:  # noqa: BLE001
+        pass
+
     return SpecialistResult(
         status="ok",
         findings=drafts,

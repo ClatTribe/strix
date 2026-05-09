@@ -424,6 +424,56 @@ def scan_misconfig(
     findings.extend(_check_set_cookie(headers, endpoint=url))
     findings.extend(_check_version_disclosure(headers, endpoint=url))
 
+    # Roadmap §8.5 Phase 5 — populate SecurityContext with tech
+    # stack hints from headers, plus mark this endpoint as probed
+    # for misconfig. Best-effort.
+    try:
+        from strix.agents.security_context import (
+            record_endpoint,
+            update_tech_stack,
+        )
+
+        headers_lc = {k.lower(): v for k, v in headers.items()
+                      if isinstance(k, str)}
+        ts_kwargs: dict[str, Any] = {}
+        if "server" in headers_lc:
+            ts_kwargs["server"] = headers_lc["server"]
+        if "x-powered-by" in headers_lc:
+            ts_kwargs["language"] = headers_lc["x-powered-by"]
+        if "x-aspnet-version" in headers_lc:
+            ts_kwargs["framework"] = "ASP.NET " + headers_lc["x-aspnet-version"]
+        # Version disclosure flag if any server header has digits.
+        import re as _re
+        srv = headers_lc.get("server", "")
+        if isinstance(srv, str) and _re.search(r"\d+\.\d+", srv):
+            ts_kwargs["version_disclosed"] = True
+        if ts_kwargs:
+            ts_kwargs["raw_headers"] = {
+                k: v for k, v in headers.items()
+                if isinstance(k, str)
+                and k.lower() in {"server", "x-powered-by",
+                                   "x-aspnet-version", "via"}
+            }
+            update_tech_stack(**ts_kwargs)
+
+        record_endpoint(
+            url,
+            status=status,
+            response_headers={k: v for k, v in headers.items()
+                              if isinstance(k, str)
+                              and k.lower() in {
+                                  "server", "x-powered-by",
+                                  "content-security-policy",
+                                  "strict-transport-security",
+                                  "x-frame-options",
+                                  "x-content-type-options",
+                                  "set-cookie",
+                              }},
+            probed_for="misconfig",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     return SpecialistResult(
         status="ok",
         findings=findings,

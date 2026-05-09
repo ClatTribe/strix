@@ -346,6 +346,47 @@ def test_lead_agent_prompt_excludes_blocked_tools() -> None:
     assert "scan_sqli" in sp
 
 
+def test_lead_agent_prompt_includes_security_context_block() -> None:
+    """§8.5 Phase 5 regression: the lead's system prompt must always
+    include the SECURITY CONTEXT block — it's the cross-tool fact
+    ledger the model uses for chained reasoning. Even when the
+    context is empty, the section header + reasoning directives
+    must be present so the model knows the ledger exists."""
+    from strix.agents.security_context import (
+        record_endpoint,
+        reset_security_context,
+        set_target_url,
+        update_tech_stack,
+    )
+    from strix.llm.config import LLMConfig
+
+    reset_security_context()
+    set_target_url("http://example.com")
+    update_tech_stack(server="nginx/1.18", database="MySQL")
+    record_endpoint("/login", method="POST", probed_for="sqli")
+
+    agent = LeadAgent({
+        "llm_config": LLMConfig(),
+        "max_iterations": 10,
+        "scan_config": {"targets": [{"type": "web_application",
+                                      "details": {"target_url": "http://example.com"}}]},
+    })
+    sp = agent.llm.system_prompt
+    assert "SECURITY CONTEXT" in sp
+    # Notebook content must render.
+    assert "TARGET: http://example.com" in sp
+    assert "nginx/1.18" in sp
+    assert "MySQL" in sp
+    assert "informs SQLi payload selection" in sp
+    assert "/login" in sp
+    # Reasoning directives must be present.
+    assert "REASON LIKE A SECURITY ENGINEER" in sp
+    assert "Chain findings" in sp
+    assert "Chase partial signals" in sp
+    assert "Test with auth" in sp
+    reset_security_context()
+
+
 def test_lead_agent_prompt_size_reduced_by_filter() -> None:
     """Token-efficiency check: with the allowlist applied, the prompt
     is meaningfully smaller than the unfiltered registry would be.

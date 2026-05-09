@@ -459,6 +459,16 @@ def scan_xss(
                     f"canary {canary} echoed unescaped"
                 )
 
+    # Roadmap §8.5 Phase 5 — record this endpoint as probed for XSS
+    # in the SecurityContext so the lead doesn't reprobe and can
+    # see the coverage map.
+    try:
+        from strix.agents.security_context import record_endpoint
+
+        record_endpoint(url, method=method, params=params, probed_for="xss")
+    except Exception:  # noqa: BLE001
+        pass
+
     return SpecialistResult(
         status="ok",
         findings=drafts,
