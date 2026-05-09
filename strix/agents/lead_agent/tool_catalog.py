@@ -57,6 +57,11 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_xxe",  # Phase 6 — deterministic XXE specialist
         "scan_auth_flow",  # Phase 6 — default-creds + session capture
         "scan_cmd_injection",  # Phase 2.6 — in-band OS command injection (CWE-78)
+        "scan_secrets_in_response",  # Phase 2.5 — passive credential exposure (CWE-798/200)
+        "scan_nosql_injection",  # Phase 2.4 — MongoDB / Mongoose NoSQLi (CWE-943)
+        "scan_ssti",  # Phase 2.3 — server-side template injection (CWE-1336)
+        "scan_path_traversal",  # Phase 2.2 — CWE-22 file-traversal specialist
+        "scan_ssrf",  # Phase 2.1 — deterministic SSRF specialist (A10:2021)
         # Recon
         "fingerprint_tech_stack", "bfs_crawl",
         "well_known_harvest", "webapp_recon_pipeline",
