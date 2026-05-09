@@ -2,7 +2,7 @@ import inspect
 import logging
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from functools import wraps
 from inspect import signature
 from pathlib import Path
@@ -417,9 +417,37 @@ def should_execute_in_sandbox(tool_name: str) -> bool:
     return True
 
 
-def get_tools_prompt() -> str:
+def get_tools_prompt(allowlist: "Iterable[str] | None" = None) -> str:
+    """Render the tool catalog as XML schema sections for the system
+    prompt.
+
+    Args:
+        allowlist: optional iterable of tool names; when provided,
+            ONLY tools whose `name` is in the set are rendered. The
+            lead agent uses this so its prompt only includes the
+            tools it can actually call (per the §8.5 catalog filter
+            policy). Without this filter, the model sees ~130 tool
+            schemas (~80K tokens) including ones the lead is blocked
+            from calling — wasted context AND a temptation for the
+            model to call blocked tools that the dispatch guard
+            (#172) then refuses.
+
+            When None (default), all registered tools are rendered.
+            That preserves legacy parent-spawns-N behaviour for
+            sub-agents and any other code path that hasn't opted
+            into filtering.
+
+    Returns:
+        XML-formatted tool catalog grouped by module.
+    """
+    allowed: set[str] | None = None
+    if allowlist is not None:
+        allowed = {n for n in allowlist if isinstance(n, str)}
+
     tools_by_module: dict[str, list[dict[str, Any]]] = {}
     for tool in tools:
+        if allowed is not None and tool.get("name") not in allowed:
+            continue
         module = tool.get("module", "unknown")
         if module not in tools_by_module:
             tools_by_module[module] = []

@@ -318,3 +318,48 @@ def test_lead_agent_system_prompt_loaded_under_real_cli_path() -> None:
     agent = LeadAgent(config_without_state)
     assert len(agent.llm.system_prompt) > 5000
     assert "SINGLE-LEAD ARCHITECTURE" in agent.llm.system_prompt
+
+
+def test_lead_agent_prompt_excludes_blocked_tools() -> None:
+    """Companion to PR #172 (dispatch guard) and #173 (prompt filter):
+    the lead's rendered system prompt MUST NOT contain `create_agent`
+    or any other blocked tool's schema. If it does, the model is
+    tempted to call them — wasting a turn before the dispatch guard
+    refuses.
+
+    This test confirms the prompt-side filter actually fires when
+    `tool_catalog_allowlist` is in `system_prompt_context` (set by
+    LeadAgent.__init__)."""
+    from strix.llm.config import LLMConfig
+
+    agent = LeadAgent({"llm_config": LLMConfig(), "max_iterations": 10})
+    sp = agent.llm.system_prompt
+    assert sp, "system prompt must be non-empty"
+    # Hard requirement: no spawn-helper tool schemas.
+    assert "<tool name=\"create_agent\"" not in sp
+    assert "<tool name=\"spawn_webapp_specialist_team\"" not in sp
+    assert "<tool name=\"spawn_code_specialist_team\"" not in sp
+    assert "<tool name=\"wait_for_message\"" not in sp
+    # And the lead's ACTUAL allowed tools must be present.
+    assert "scan_misconfig" in sp
+    assert "scan_xss" in sp
+    assert "scan_sqli" in sp
+
+
+def test_lead_agent_prompt_size_reduced_by_filter() -> None:
+    """Token-efficiency check: with the allowlist applied, the prompt
+    is meaningfully smaller than the unfiltered registry would be.
+    Without baseline numbers in the test we just assert a plausible
+    upper bound — ~250K chars is the unfiltered size on this branch
+    (rough proxy for ~80K tokens). Filtered should be well under."""
+    from strix.llm.config import LLMConfig
+
+    agent = LeadAgent({"llm_config": LLMConfig(), "max_iterations": 10})
+    sp_filtered = agent.llm.system_prompt
+    # With ~30 tools instead of ~130, the prompt should be < 150K chars.
+    # Even with some slack for skill content + framework boilerplate.
+    assert len(sp_filtered) < 200_000, (
+        f"filtered prompt is {len(sp_filtered)} chars — filter may "
+        f"not have applied; check `system_prompt_context.tool_catalog_"
+        f"allowlist` is being threaded through to `get_tools_prompt`"
+    )
