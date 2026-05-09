@@ -30,6 +30,7 @@ from strix.tools.specialist import scan_sqli as _scan_sqli  # noqa: F401  # Phas
 from strix.tools.specialist import scan_xss as _scan_xss  # noqa: F401  # Phase 3b
 from strix.tools.specialist import scan_xxe as _scan_xxe  # noqa: F401  # Phase 6
 from strix.tools.specialist import scan_auth_flow as _scan_auth_flow  # noqa: F401  # Phase 6
+from strix.tools.specialist import scan_business_logic as _scan_business_logic  # noqa: F401  # Phase 5.6
 from strix.tools.specialist import scan_blind_ssrf as _scan_blind_ssrf  # noqa: F401  # Phase 4.5
 from strix.tools.specialist import scan_deserialization as _scan_deserialization  # noqa: F401  # Phase 4.4
 from strix.tools.specialist import scan_blind_cmd_injection as _scan_blind_cmd_injection  # noqa: F401  # Phase 4.3

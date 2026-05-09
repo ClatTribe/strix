@@ -60,6 +60,7 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_blind_cmd_injection",  # Phase 4.3 — OOB-DNS blind cmd injection (CWE-78)
         "scan_oob_xxe",  # Phase 4.2 — blind XXE via OOB-DNS (CWE-611)
         "scan_auth_flow",  # Phase 6 — default-creds + session capture
+        "scan_business_logic",  # Phase 5.6 — workflow / business-rule abuse (A04:2021)
         "scan_idor",  # Phase 4.1 — cross-session IDOR (CWE-639/862)
         "scan_multi_role_auth",  # Phase 3.1 — multi-role authz orchestrator (IDOR precondition)
         "scan_oauth",  # Phase 2.11 — OAuth 2.0 / OIDC misconfiguration (CWE-352/602/601/922)
@@ -79,6 +80,10 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "send_request", "browser_action", "extract_dom",
         # HAR / Burp ingestion (#141)
         "ingest_har_file", "ingest_burp_file",
+        # Replay-with-mutation orchestrator — Phase 5.5
+        "replay_mutation_on_endpoints",
+        "replay_mutation_from_har_file",
+        "replay_mutation_from_burp_file",
         # Web-app deterministic checks
         "http_security_headers_audit", "tls_audit",
         "csrf_check", "cors_deep_check", "session_entropy_check",
