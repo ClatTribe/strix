@@ -311,6 +311,33 @@ def scan_auth_flow(
                     category_hint="jwt",
                 )
 
+                # Roadmap §8.5 Phase 7 — auto-invoke jwt_audit on the
+                # captured token. Closes the `weak-jwt-handling`
+                # manifest gap without depending on the lead's prompt
+                # discipline. jwt_audit's static analyses (alg=none
+                # detection in header, weak HMAC dictionary attack,
+                # claims inspection) require no additional network
+                # access, just the token. Active probes (test_
+                # endpoint_url) use the same proxy_manager path that
+                # scan_auth_flow already verified works, so we can
+                # safely chain.
+                try:
+                    from strix.tools.jwt_audit.jwt_audit import jwt_audit as _jwt_audit_fn
+
+                    _jwt_audit_fn(
+                        token=jwt,
+                        test_endpoint_url=login_url,
+                        placement="auth_bearer",
+                        method="GET",
+                    )
+                    evidence.append(
+                        f"auto-invoked jwt_audit on captured JWT — "
+                        f"any alg=none / weak-HMAC / kid-traversal "
+                        f"findings will appear separately"
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("scan_auth_flow: jwt_audit chain failed: %s", e, exc_info=True)
+
             # Emit a finding for default-creds success.
             try:
                 from strix.telemetry.tracer import get_global_tracer

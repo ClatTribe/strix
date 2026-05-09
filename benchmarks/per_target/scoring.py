@@ -109,8 +109,20 @@ def _categories_match(a: str | None, b: str | None) -> bool:
     # Asymmetric overlap: a finding tagged "auth" is a candidate match
     # for "jwt" expectations (and vice-versa) — narrow enough to be
     # safe given the manifest's discrete vulnerability classes.
-    auth_jwt = {"auth", "jwt", "authentication"}
+    auth_jwt = {"auth", "jwt", "jwt_misconfiguration", "authentication",
+                "weak_authentication"}
     if canonical_a in auth_jwt and canonical_b in auth_jwt:
+        return True
+    # IDOR / authz / data-exposure findings often emit with a broader
+    # info_disclosure / data_exposure category — count them when title-id
+    # keyword overlap (handled in _location_match) is strong enough.
+    # This is one-way: info_disclosure is a superset; only match when the
+    # expected category is one of the narrower access-control classes.
+    access_control = {"idor", "authz", "broken_access_control"}
+    info_disclosure_set = {"info_disclosure", "data_exposure",
+                           "sensitive_data_exposure"}
+    if (canonical_a in info_disclosure_set and canonical_b in access_control) \
+       or (canonical_b in info_disclosure_set and canonical_a in access_control):
         return True
     return False
 
