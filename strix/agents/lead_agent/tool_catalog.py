@@ -60,6 +60,7 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_blind_cmd_injection",  # Phase 4.3 — OOB-DNS blind cmd injection (CWE-78)
         "scan_oob_xxe",  # Phase 4.2 — blind XXE via OOB-DNS (CWE-611)
         "scan_auth_flow",  # Phase 6 — default-creds + session capture
+        "scan_business_logic",  # Phase 5.6 — workflow / business-rule abuse (A04:2021)
         "scan_idor",  # Phase 4.1 — cross-session IDOR (CWE-639/862)
         "scan_multi_role_auth",  # Phase 3.1 — multi-role authz orchestrator (IDOR precondition)
         "scan_oauth",  # Phase 2.11 — OAuth 2.0 / OIDC misconfiguration (CWE-352/602/601/922)
