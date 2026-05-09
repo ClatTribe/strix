@@ -80,6 +80,16 @@ class LLM:
         # Best-effort; never blocks the LLM call.
         self._last_token_breakdown: dict[str, int] | None = None
 
+        # Phase 1.1 — provider failover state. Track the last N
+        # request outcomes (success / retry-attempted / hard-fail).
+        # When the retry rate exceeds the threshold over the window,
+        # swap to the configured failover model. Self-healing: a
+        # subsequent window with low retry rate flips back.
+        self._request_history: list[tuple[float, str]] = []  # (ts, "ok"|"retry"|"fail")
+        self._failover_active = False
+        self._original_model = config.litellm_model
+        self._failover_model = self._resolve_failover_model()
+
         reasoning = Config.get("strix_reasoning_effort")
         if reasoning:
             self._reasoning_effort = reasoning
@@ -250,6 +260,9 @@ class LLM:
                     exception=e,
                 )
 
+                # Phase 1.1 — track outcome for failover decision.
+                self._record_request_outcome("retry")
+
                 await asyncio.sleep(wait)
 
     def _emit_retry_attempted_event(
@@ -350,6 +363,8 @@ class LLM:
         if chunks:
             full_response = stream_chunk_builder(chunks)
             self._update_usage_stats(full_response)
+            # Phase 1.1 — track outcome for failover decision.
+            self._record_request_outcome("ok")
 
         # Roadmap §8.5 Phase 4b — native tool calling. When enabled,
         # extract tool invocations from the API's structured
@@ -478,6 +493,116 @@ class LLM:
                 logger.debug("native tool schema construction failed", exc_info=True)
 
         return args
+
+    def _resolve_failover_model(self) -> str | None:
+        """Phase 1.1 — failover model selection.
+
+        Priority:
+          1. `STRIX_LLM_FAILOVER` env var (explicit override).
+          2. Built-in defaults: gemini → claude-sonnet-4.5; claude
+             → gpt-4o; openai → claude-sonnet-4.5.
+          3. None — failover disabled.
+        """
+        explicit = os.environ.get("STRIX_LLM_FAILOVER", "").strip()
+        if explicit:
+            return explicit
+        primary = (self.config.litellm_model or "").lower()
+        if "gemini" in primary or "vertex" in primary:
+            return "anthropic/claude-sonnet-4-5-20250929"
+        if "anthropic" in primary or "claude" in primary:
+            return "openai/gpt-4o"
+        if "openai" in primary or "gpt-" in primary:
+            return "anthropic/claude-sonnet-4-5-20250929"
+        return None
+
+    def _record_request_outcome(self, outcome: str) -> None:
+        """Append an outcome to the rolling window. Called from the
+        retry loop and after successful completions."""
+        import time as _time
+        now = _time.time()
+        self._request_history.append((now, outcome))
+        # Trim entries older than 5 minutes.
+        cutoff = now - 300
+        self._request_history = [
+            (t, o) for (t, o) in self._request_history if t >= cutoff
+        ]
+        self._maybe_failover()
+
+    def _maybe_failover(self) -> None:
+        """Phase 1.1 — when retry rate over the trailing 5-min
+        window exceeds 50% AND we have at least 6 outcomes, swap to
+        the failover model. Conversely if the rate drops below 25%
+        AND failover is active, swap back.
+        """
+        if not self._failover_model:
+            return
+        if len(self._request_history) < 6:
+            return
+
+        retries = sum(1 for _, o in self._request_history if o == "retry")
+        total = len(self._request_history)
+        retry_rate = retries / total
+
+        if not self._failover_active and retry_rate > 0.5:
+            old_model = self.config.litellm_model
+            self.config.litellm_model = self._failover_model
+            self._failover_active = True
+            logger.warning(
+                "LLM provider failover: retry_rate=%.2f exceeds 0.5 over "
+                "trailing window (%d outcomes). Swapping %s → %s",
+                retry_rate, total, old_model, self._failover_model,
+            )
+            self._emit_failover_event(
+                from_model=old_model,
+                to_model=self._failover_model,
+                retry_rate=retry_rate,
+            )
+            # Reset history so next window measures the new provider.
+            self._request_history = []
+        elif self._failover_active and retry_rate < 0.25 and total >= 10:
+            old_model = self.config.litellm_model
+            self.config.litellm_model = self._original_model
+            self._failover_active = False
+            logger.info(
+                "LLM provider failover: retry_rate dropped to %.2f. "
+                "Swapping back %s → %s",
+                retry_rate, old_model, self._original_model,
+            )
+            self._emit_failover_event(
+                from_model=old_model,
+                to_model=self._original_model,
+                retry_rate=retry_rate,
+            )
+            self._request_history = []
+
+    def _emit_failover_event(
+        self, *, from_model: str, to_model: str, retry_rate: float,
+    ) -> None:
+        """Emit a `llm.provider_failed_over` event for wrapper
+        visibility. Best-effort."""
+        try:
+            from strix.telemetry.tracer import get_global_tracer
+
+            tracer = get_global_tracer()
+            if tracer is None:
+                return
+            tracer._emit_event(  # noqa: SLF001
+                "llm.provider_failed_over",
+                actor={
+                    "agent_id": getattr(self, "agent_id", None),
+                    "agent_name": self.agent_name,
+                },
+                payload={
+                    "from_model": from_model,
+                    "to_model": to_model,
+                    "retry_rate": round(float(retry_rate), 2),
+                    "window_seconds": 300,
+                },
+                status="failed_over",
+                source="strix.llm",
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def _native_tool_calls_enabled(self) -> bool:
         """Return True when `STRIX_TOOL_CALL_FORMAT=native` is set
