@@ -298,6 +298,26 @@ def test_render_includes_path_param_sqli_recommendation() -> None:
     assert "{id}" in out
 
 
+def test_render_recommends_scan_auth_flow_for_login_endpoint() -> None:
+    """The login endpoint is the entry point to most auth-gated bugs.
+    The auth-flow recommendation should fire when probed_for=auth is
+    not yet set."""
+    set_target_url("http://x")
+    record_endpoint("/rest/user/login", method="POST", params=["email", "password"])
+    out = render_for_prompt()
+    assert "scan_auth_flow on /rest/user/login" in out
+    assert "default creds" in out
+    assert "CWE-521" in out
+
+
+def test_render_recommends_scan_xxe_for_xml_endpoints() -> None:
+    """B2B/SOAP-shaped paths get XXE recommendation."""
+    set_target_url("http://x")
+    record_endpoint("/b2b/v2/orders", method="POST")
+    out = render_for_prompt()
+    assert "scan_xxe on /b2b/v2/orders" in out
+
+
 def test_render_excludes_recommendations_for_already_probed() -> None:
     """If the endpoint has been probed for that category, don't re-recommend."""
     set_target_url("http://x")

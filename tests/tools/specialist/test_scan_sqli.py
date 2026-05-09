@@ -392,6 +392,60 @@ def test_params_inferred_from_path_placeholder_when_omitted(monkeypatch) -> None
     assert out["status"] == "ok"
 
 
+def test_boolean_blind_detects_via_strong_signal_when_lengths_similar(monkeypatch) -> None:
+    """Phase 6 enhancement: when both true and false responses have
+    similar lengths but one shows success markers (token, success:true)
+    and the other shows error markers (invalid, error), the strong-
+    signal heuristic fires.
+
+    This is the Juice Shop login case: bool-false returns 401
+    `{error: 'Invalid email'}`; bool-true returns 200 `{token: ...}`.
+    Both are JSON of similar length, defeats pure length-delta
+    comparison."""
+    def fake_resp(method, url, headers, body, timeout):
+        v = _qs(url, "id")
+        if v == "' OR '1'='1":
+            # Success branch — short JSON with token
+            return {
+                "status_code": 200,
+                "body": '{"success":true,"token":"abc123","userId":1}',
+            }
+        if v == "' OR '1'='2":
+            # Failure branch — similar-length JSON with error
+            return {
+                "status_code": 401,
+                "body": '{"success":false,"error":"Invalid credentials"}',
+            }
+        # baseline + error_trigger fall through to failure shape
+        return {
+            "status_code": 401,
+            "body": '{"success":false,"error":"Invalid credentials"}',
+        }
+
+    _patch_proxy(monkeypatch, fake_resp)
+    out = scan_sqli(url="http://example.com/login?id=test", params=["id"])
+    # Heuristic should fire even though body lengths are similar
+    # — the success-vs-error markers + status class differ.
+    assert len(out["findings"]) == 1
+    f = out["findings"][0]
+    assert f["category"] == "sqli"
+
+
+def test_boolean_blind_status_class_change_alone_triggers(monkeypatch) -> None:
+    """Even with identical body content, a 200 → 401 status class
+    change between true/false branches is a strong signal."""
+    def fake_resp(method, url, headers, body, timeout):
+        v = _qs(url, "id")
+        if v == "' OR '1'='1":
+            return {"status_code": 200, "body": "OK"}
+        # Both baseline and false → 401
+        return {"status_code": 401, "body": "OK"}
+
+    _patch_proxy(monkeypatch, fake_resp)
+    out = scan_sqli(url="http://example.com/x?id=test", params=["id"])
+    assert len(out["findings"]) == 1
+
+
 def test_accepts_param_singular(monkeypatch) -> None:
     """The lead empirically calls scan_sqli with `param="email"`
     (singular) instead of `params=["email"]`. This must NOT TypeError."""
