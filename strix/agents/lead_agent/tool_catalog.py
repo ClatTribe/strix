@@ -56,6 +56,7 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_sqli",  # Phase 3b — deterministic SQLi specialist
         "scan_xxe",  # Phase 6 — deterministic XXE specialist
         "scan_auth_flow",  # Phase 6 — default-creds + session capture
+        "scan_path_traversal",  # Phase 2.2 — CWE-22 file-traversal specialist
         "scan_ssrf",  # Phase 2.1 — deterministic SSRF specialist (A10:2021)
         # Recon
         "fingerprint_tech_stack", "bfs_crawl",
