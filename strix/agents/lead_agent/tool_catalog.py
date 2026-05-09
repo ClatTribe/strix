@@ -55,6 +55,7 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_xss",  # Phase 3b — deterministic reflected-XSS specialist
         "scan_sqli",  # Phase 3b — deterministic SQLi specialist
         "scan_xxe",  # Phase 6 — deterministic XXE specialist
+        "scan_deserialization",  # Phase 4.4 — stack-aware deserialization (CWE-502 / A08:2021)
         "scan_auth_flow",  # Phase 6 — default-creds + session capture
         # Recon
         "fingerprint_tech_stack", "bfs_crawl",
