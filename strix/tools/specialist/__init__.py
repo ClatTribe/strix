@@ -28,3 +28,5 @@ from strix.tools.specialist import async_dispatch as _async_dispatch  # noqa: F4
 from strix.tools.specialist import scan_misconfig as _scan_misconfig  # noqa: F401
 from strix.tools.specialist import scan_sqli as _scan_sqli  # noqa: F401  # Phase 3b
 from strix.tools.specialist import scan_xss as _scan_xss  # noqa: F401  # Phase 3b
+from strix.tools.specialist import scan_xxe as _scan_xxe  # noqa: F401  # Phase 6
+from strix.tools.specialist import scan_auth_flow as _scan_auth_flow  # noqa: F401  # Phase 6

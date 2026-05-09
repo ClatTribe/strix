@@ -453,8 +453,17 @@ def _specialist_recommendations(endpoints: list[Any]) -> list[str]:
         params = list(ep.params_seen) if hasattr(ep, "params_seen") else []
         probed = set(getattr(ep, "probed_for", []) or [])
 
-        # Login endpoints — SQLi via POST body
+        # Login endpoints — auth-flow + SQLi via POST body
         if any(p in path for p in ("/login", "/signin", "/auth")) and "POST" in (ep.methods_seen or []):
+            if "auth" not in probed:
+                key = f"scan_auth_flow:{ep.path}"
+                if key not in seen:
+                    seen.add(key)
+                    recs.append(
+                        f"scan_auth_flow on {ep.path} (login_url='{ep.path}', "
+                        f"try_register=True) — tries default creds, captures session, "
+                        f"auto-emits CWE-521 + writes JWT/cookies to AuthState"
+                    )
             if "sqli" not in probed:
                 key = f"scan_sqli:{ep.path}"
                 if key not in seen:
@@ -504,6 +513,18 @@ def _specialist_recommendations(endpoints: list[Any]) -> list[str]:
             if key not in seen:
                 seen.add(key)
                 recs.append(f"jwt_audit on any token captured from {ep.path} — alg=none / weak HMAC / kid manipulation")
+
+        # XXE-prone endpoints — XML/SOAP-shaped paths
+        if any(p in path for p in ("/b2b", "/soap", "/xml", "/v2/orders",
+                                    "/wsdl", "/services/")):
+            if "xxe" not in probed:
+                key = f"scan_xxe:{ep.path}"
+                if key not in seen:
+                    seen.add(key)
+                    recs.append(
+                        f"scan_xxe on {ep.path} — POSTs DOCTYPE-entity payloads, "
+                        f"auto-emits on file disclosure / cloud-metadata SSRF"
+                    )
 
     return recs
 

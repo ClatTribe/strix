@@ -104,6 +104,21 @@ _PROBE_PAYLOADS: dict[str, str] = {
 }
 
 
+# Roadmap §8.5 Phase 6 — NoSQL operator payloads. When the probed
+# endpoint is JSON-body-shaped (i.e. `body_template` is a dict), the
+# scanner ALSO sends NoSQL operator injections. MongoDB / similar
+# databases parse these operators and evaluate them server-side —
+# `{"$gt":""}` always returns true, `{"$ne":null}` matches any
+# non-null, etc. Detection: same boolean-blind heuristic; the
+# operator-substituted body acts as the "true" branch.
+_NOSQL_PAYLOADS: dict[str, Any] = {
+    "nosql_gt_empty": {"$gt": ""},          # always-true (MongoDB)
+    "nosql_ne_null": {"$ne": None},          # always-true; CouchDB-compat
+    "nosql_regex_any": {"$regex": ".*"},     # always-match
+    "nosql_where_sleep": {"$where": "sleep(1)"},  # time-based; not used in heuristic
+}
+
+
 def _build_url_with_param(
     url: str, *, param_name: str, value: str,
     other_params: dict[str, str] | None = None,
@@ -158,8 +173,15 @@ def _strip_dynamic_noise(body: str) -> str:
 
 def _bodies_meaningfully_differ(a: str, b: str) -> bool:
     """True when two normalised bodies differ by more than 5% of
-    their length (loose threshold — meant to catch true/false
-    branching, not minor template variation)."""
+    their length OR by a meaningful content delta (loose threshold
+    — meant to catch true/false branching, not minor template
+    variation).
+
+    Roadmap §8.5 Phase 6 — also fires when the two responses come
+    from genuinely different code paths (e.g. {"success":true,
+    "token":"..."} vs {"success":false,"error":"invalid"}). Length
+    might be similar but the JSON shape differs entirely.
+    """
     a = _strip_dynamic_noise(a)
     b = _strip_dynamic_noise(b)
     if not a and not b:
@@ -176,7 +198,55 @@ def _bodies_meaningfully_differ(a: str, b: str) -> bool:
         return True
     # Length similar but content might still differ. Hash-fingerprint
     # the first 4KB and compare.
-    return a[:4000] != b[:4000]
+    if a[:4000] != b[:4000]:
+        return True
+    # Last resort — same fingerprint up to 4KB.
+    return False
+
+
+def _strong_response_signal_differs(
+    body_a: str, status_a: int | None,
+    body_b: str, status_b: int | None,
+) -> bool:
+    """Strong differentiation signal — handles cases where login
+    endpoints return same-shape bodies for different SUCCESS states
+    (e.g. 200 with {token: ...} vs 401 with {error: ...}). Length
+    might be similar but the success/failure flag differs.
+
+    The boolean-blind comparator before Phase 6 missed this because
+    both branches had similar length/error structure. New signal:
+    look for SUCCESS-vs-FAILURE markers AND status-code class change.
+    """
+    # Status-class differential is the strongest signal.
+    if isinstance(status_a, int) and isinstance(status_b, int):
+        # 2xx vs non-2xx is a clean differentiator.
+        if (200 <= status_a < 300) != (200 <= status_b < 300):
+            return True
+
+    if not isinstance(body_a, str) or not isinstance(body_b, str):
+        return False
+    a_lc = body_a.lower()
+    b_lc = body_b.lower()
+
+    # Success markers in one but not the other.
+    success_markers = ('"token"', '"accesstoken"', '"jwt"', '"sessionid"',
+                       '"id_token"', '"success":true', '"authenticated":true')
+    error_markers = ("invalid", "incorrect", "unauthorized", "forbidden",
+                     "denied", '"error"', '"success":false')
+
+    a_has_success = any(m in a_lc for m in success_markers)
+    b_has_success = any(m in b_lc for m in success_markers)
+    a_has_error = any(m in a_lc for m in error_markers)
+    b_has_error = any(m in b_lc for m in error_markers)
+
+    # If one branch shows success markers and the other shows error
+    # markers, the responses come from different code paths — strong
+    # differentiation.
+    if a_has_success != b_has_success:
+        return True
+    if a_has_error != b_has_error:
+        return True
+    return False
 
 
 def _emit_finding(
@@ -549,9 +619,18 @@ def scan_sqli(
         false_status = false_resp.get("status_code")
 
         # Confirm: true ≠ false AND baseline ≈ false (or status matches).
+        # Phase 6 — also accept the strong signal (success vs error
+        # markers, status class change). The boolean-blind heuristic
+        # was missing logins that returned same-length 401-shape
+        # responses for both true/false branches when the SQLi failed,
+        # while a successful boolean-true returned 200+JWT.
         true_vs_false_differs = (
             true_status != false_status
             or _bodies_meaningfully_differ(true_body, false_body)
+            or _strong_response_signal_differs(
+                true_body, true_status,
+                false_body, false_status,
+            )
         )
         baseline_vs_false_similar = (
             baseline_status == false_status
