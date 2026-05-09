@@ -390,28 +390,65 @@ async def process_tool_invocations(
     conversation_history: list[dict[str, Any]],
     agent_state: Any | None = None,
 ) -> bool:
-    observation_parts: list[str] = []
+    """Execute a batch of tool invocations and append results to the
+    conversation history.
+
+    Phase 1.7 — execute the batch concurrently when:
+      * `len(tool_invocations) > 1` (no benefit for single calls), AND
+      * `STRIX_PARALLEL_TOOL_DISPATCH != "0"` (env-flag escape hatch)
+    Each invocation goes through `_execute_single_tool` which is
+    async-safe (the inner `execute_tool_invocation` either awaits a
+    sandbox HTTP call or runs the synchronous tool body in-process).
+    The SecurityContext singleton is thread-safe via its internal
+    `_lock`.
+
+    Order preservation: results are emitted into `observation_parts`
+    in the same index order as `tool_invocations` so the conversation
+    history reads naturally even when the underlying execution
+    interleaved.
+    """
+    observation_parts: list[str | None] = [None] * len(tool_invocations)
     all_images: list[dict[str, Any]] = []
     should_agent_finish = False
 
     tracer, agent_id = _get_tracer_and_agent_id(agent_state)
 
-    for tool_inv in tool_invocations:
-        observation_xml, images, tool_should_finish = await _execute_single_tool(
-            tool_inv, agent_state, tracer, agent_id
-        )
-        observation_parts.append(observation_xml)
-        all_images.extend(images)
+    parallel_disabled = os.environ.get("STRIX_PARALLEL_TOOL_DISPATCH", "1").strip() == "0"
 
-        if tool_should_finish:
-            should_agent_finish = True
+    if len(tool_invocations) > 1 and not parallel_disabled:
+        import asyncio as _asyncio
+
+        async def _run_one(idx: int, inv: dict[str, Any]) -> tuple[int, str, list[dict], bool]:
+            obs, imgs, finish = await _execute_single_tool(
+                inv, agent_state, tracer, agent_id
+            )
+            return idx, obs, imgs, finish
+
+        tasks = [_run_one(i, inv) for i, inv in enumerate(tool_invocations)]
+        results = await _asyncio.gather(*tasks, return_exceptions=False)
+        for idx, obs, imgs, finish in results:
+            observation_parts[idx] = obs
+            all_images.extend(imgs)
+            if finish:
+                should_agent_finish = True
+    else:
+        for i, tool_inv in enumerate(tool_invocations):
+            observation_xml, images, tool_should_finish = await _execute_single_tool(
+                tool_inv, agent_state, tracer, agent_id
+            )
+            observation_parts[i] = observation_xml
+            all_images.extend(images)
+            if tool_should_finish:
+                should_agent_finish = True
+
+    obs_strs = [o for o in observation_parts if o is not None]
 
     if all_images:
-        content = [{"type": "text", "text": "Tool Results:\n\n" + "\n\n".join(observation_parts)}]
+        content = [{"type": "text", "text": "Tool Results:\n\n" + "\n\n".join(obs_strs)}]
         content.extend(all_images)
         conversation_history.append({"role": "user", "content": content})
     else:
-        observation_content = "Tool Results:\n\n" + "\n\n".join(observation_parts)
+        observation_content = "Tool Results:\n\n" + "\n\n".join(obs_strs)
         conversation_history.append({"role": "user", "content": observation_content})
 
     return should_agent_finish
