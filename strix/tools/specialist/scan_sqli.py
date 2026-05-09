@@ -827,6 +827,31 @@ def scan_sqli(
     except Exception:  # noqa: BLE001
         pass
 
+    # Phase 1.6 — decision provenance log. Record the specialist
+    # invocation summary so post-hoc analysis can reconstruct what
+    # we tried + what landed.
+    try:
+        from strix.agents.decision_log import record_decision
+
+        record_decision(
+            kind="specialist_invocation",
+            target=url,
+            actor={"tool_name": "scan_sqli"},
+            input={
+                "method": method,
+                "params": list(params) if params else [],
+                "body_template_present": body_template is not None,
+                "probes_sent": probe_count,
+            },
+            output={
+                "findings_emitted": emitted_count,
+                "drafts": len(drafts),
+                "evidence_count": len(evidence),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     return SpecialistResult(
         status="ok",
         findings=drafts,
