@@ -105,8 +105,30 @@ class LLM:
             skill_content = load_skills(skills_to_load)
             env.globals["get_skill"] = lambda name: skill_content.get(name, "")
 
+            # Roadmap §8.5 — when the lead's `tool_catalog_allowlist`
+            # is in `system_prompt_context`, bind `get_tools_prompt`
+            # to a partial that filters by that allowlist. The
+            # template's `{{ get_tools_prompt() }}` call then renders
+            # only the lead's allowed tools (~30-50 of ~130) instead
+            # of the full registry. Saves ~50K prompt tokens per call
+            # AND removes blocked tools (`create_agent`, etc.) from
+            # the model's choice space — pairs with the dispatch
+            # guard in #172 for defense in depth.
+            #
+            # When the allowlist is absent (sub-agents, legacy mode,
+            # tests), `get_tools_prompt` runs unfiltered — same as
+            # before this PR.
+            allowlist = self._system_prompt_context.get("tool_catalog_allowlist")
+            if allowlist:
+                _tp = get_tools_prompt
+                def _get_tools_prompt_filtered() -> str:
+                    return _tp(allowlist=allowlist)
+                tool_prompt_fn: Any = _get_tools_prompt_filtered
+            else:
+                tool_prompt_fn = get_tools_prompt
+
             result = env.get_template("system_prompt.jinja").render(
-                get_tools_prompt=get_tools_prompt,
+                get_tools_prompt=tool_prompt_fn,
                 loaded_skill_names=list(skill_content.keys()),
                 interactive=self.config.interactive,
                 system_prompt_context=self._system_prompt_context,
