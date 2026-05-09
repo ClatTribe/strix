@@ -338,6 +338,15 @@ def render_for_prompt(*, max_endpoints: int = 30, max_signals: int = 20) -> str:
     The shape is deliberately verbose-with-structure (not pure JSON)
     so the model parses it as factual context, not as data to
     transform. Caps prevent unbounded prompt growth on long scans.
+
+    Also surfaces SPECIALIST RECOMMENDATIONS — concrete next-call
+    suggestions for unprobed endpoints. The post-#178 benchmark
+    showed the lead happily exploring with `send_request` /
+    `browser_action` while never invoking the deterministic
+    specialists. Surfacing the specialist hint inline in the
+    notebook gives the model a clear handoff: it sees an unprobed
+    endpoint AND the exact specialist that would auto-emit a
+    finding for it.
     """
     ctx = get_security_context()
     parts: list[str] = []
@@ -402,12 +411,101 @@ def render_for_prompt(*, max_endpoints: int = 30, max_signals: int = 20) -> str:
                 ps_lines.append(f"    → next: {s.next_probe}")
         parts.append("\n".join(ps_lines))
 
+    # Specialist recommendations — concrete next-call hints for
+    # unprobed endpoints. Drives the lead toward auto-emit specialists
+    # rather than manual send_request loops.
+    recs = _specialist_recommendations(eps if 'eps' in dir() else [])
+    if recs:
+        rec_lines = ["SPECIALIST RECOMMENDATIONS — invoke these for fast deterministic findings:"]
+        for r in recs[:6]:
+            rec_lines.append(f"  → {r}")
+        parts.append("\n".join(rec_lines))
+
     if not parts[1:]:
         # Only target URL — return a minimal stub so the section
         # isn't empty (helps the model see "ledger exists, populate it")
         return parts[0] + "\n(SecurityContext is empty — populate it as you probe.)"
 
     return "\n\n".join(parts)
+
+
+def _specialist_recommendations(endpoints: list[Any]) -> list[str]:
+    """Generate concrete specialist-invocation suggestions based on
+    discovered endpoints. The lead sees these in its prompt every
+    turn — much more actionable than a generic 'use specialists'
+    directive.
+
+    Heuristics:
+      * `/login` or `/signin` (POST) without sqli-probed → scan_sqli
+      * `/search` or `/query` with `q=` param → scan_xss + scan_sqli
+      * `/redirect`, `/return`, `/next` with `to=`/`url=` → open_redirect_check
+      * `/api/*/{N}` (numeric path segment) → scan_sqli with path-param
+      * `/whoami`, `/me`, `/profile` returning JSON → jwt_audit hint
+      * Any endpoint with a Server header showing version → cve_lookup hint
+    """
+    recs: list[str] = []
+    seen: set[str] = set()
+
+    for ep in endpoints:
+        if not hasattr(ep, "path"):
+            continue
+        path = ep.path.lower()
+        params = list(ep.params_seen) if hasattr(ep, "params_seen") else []
+        probed = set(getattr(ep, "probed_for", []) or [])
+
+        # Login endpoints — SQLi via POST body
+        if any(p in path for p in ("/login", "/signin", "/auth")) and "POST" in (ep.methods_seen or []):
+            if "sqli" not in probed:
+                key = f"scan_sqli:{ep.path}"
+                if key not in seen:
+                    seen.add(key)
+                    recs.append(
+                        f"scan_sqli on {ep.path} (POST/JSON: method='POST', "
+                        f"body_template={{'email':'x','password':'x'}}, "
+                        f"params=['email']) — auto-emits if vulnerable"
+                    )
+        # Search/query endpoints with q= param — XSS + SQLi
+        if (any(p in path for p in ("/search", "/query", "/find")) or "q" in params or "query" in params):
+            if "xss" not in probed:
+                key = f"scan_xss:{ep.path}"
+                if key not in seen:
+                    seen.add(key)
+                    qparam = "q" if "q" in params else ("query" if "query" in params else "q")
+                    recs.append(f"scan_xss on {ep.path} (params=['{qparam}']) — auto-emits reflected XSS")
+            if "sqli" not in probed:
+                key = f"scan_sqli:{ep.path}"
+                if key not in seen:
+                    seen.add(key)
+                    qparam = "q" if "q" in params else ("query" if "query" in params else "q")
+                    recs.append(f"scan_sqli on {ep.path} (params=['{qparam}']) — auto-emits SQLi")
+        # Redirect endpoints
+        if any(p in path for p in ("/redirect", "/return", "/goto", "/forward")) or any(
+                p in params for p in ("to", "url", "next", "redirect", "return", "dest")):
+            if "open_redirect" not in probed:
+                key = f"open_redirect:{ep.path}"
+                if key not in seen:
+                    seen.add(key)
+                    recs.append(f"open_redirect_check on {ep.path} — auto-emits if redirect-shaped param accepts external URLs")
+        # Path-param numeric IDs — IDOR/SQLi candidate
+        import re as _re
+        if _re.search(r"/\d+(/|$|\?)", path):
+            if "sqli" not in probed:
+                key = f"scan_sqli_path:{ep.path}"
+                if key not in seen:
+                    seen.add(key)
+                    # Convert /api/Baskets/123 → /api/Baskets/{id}
+                    template = _re.sub(r"/\d+(/|$|\?)", r"/{id}\1", path)
+                    recs.append(
+                        f"scan_sqli on {template} (path-param: method='GET', params=['id']) — auto-emits SQLi via path"
+                    )
+        # JWT-relevant endpoints
+        if any(p in path for p in ("/whoami", "/me", "/profile", "/user")) and "GET" in (ep.methods_seen or []):
+            key = f"jwt:{ep.path}"
+            if key not in seen:
+                seen.add(key)
+                recs.append(f"jwt_audit on any token captured from {ep.path} — alg=none / weak HMAC / kid manipulation")
+
+    return recs
 
 
 # ---------------------------------------------------------------------------
