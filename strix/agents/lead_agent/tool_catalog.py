@@ -55,6 +55,7 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_xss",  # Phase 3b — deterministic reflected-XSS specialist
         "scan_sqli",  # Phase 3b — deterministic SQLi specialist
         "scan_xxe",  # Phase 6 — deterministic XXE specialist
+        "scan_deserialization",  # Phase 4.4 — stack-aware deserialization (CWE-502 / A08:2021)
         "scan_blind_cmd_injection",  # Phase 4.3 — OOB-DNS blind cmd injection (CWE-78)
         "scan_oob_xxe",  # Phase 4.2 — blind XXE via OOB-DNS (CWE-611)
         "scan_auth_flow",  # Phase 6 — default-creds + session capture
