@@ -127,11 +127,31 @@ class LLM:
             else:
                 tool_prompt_fn = get_tools_prompt
 
+            # Roadmap §8.5 Phase 5 — refresh the SecurityContext
+            # snapshot into system_prompt_context every render so
+            # the lead always sees up-to-date facts (tech stack,
+            # endpoints, auth states, partial signals). Best-effort:
+            # any failure leaves the context block out of the prompt
+            # rather than crashing the LLM init path.
+            #
+            # Critical for cross-tool reasoning. Without this the
+            # lead forgets what `scan_misconfig` fingerprinted by
+            # turn 30 and reprobes redundantly. With it, the model
+            # sees its own notebook on every turn and can correlate
+            # across the full scan timeline.
+            render_ctx = dict(self._system_prompt_context)
+            try:
+                from strix.agents.security_context import render_for_prompt as _sc_render
+
+                render_ctx["security_context_snapshot"] = _sc_render()
+            except Exception:  # noqa: BLE001
+                pass
+
             result = env.get_template("system_prompt.jinja").render(
                 get_tools_prompt=tool_prompt_fn,
                 loaded_skill_names=list(skill_content.keys()),
                 interactive=self.config.interactive,
-                system_prompt_context=self._system_prompt_context,
+                system_prompt_context=render_ctx,
                 **skill_content,
             )
             return str(result)
@@ -330,6 +350,23 @@ class LLM:
         )
 
     def _prepare_messages(self, conversation_history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # Roadmap §8.5 Phase 5 — re-render the system prompt before
+        # every call so the SecurityContext snapshot reflects the
+        # latest tool-recorded facts. The render is cheap (jinja +
+        # in-memory dict to text) and gives the lead a live view of
+        # tech stack / endpoints / auth states / partial signals on
+        # every turn. Without this, the SecurityContext only fires
+        # at LLM-init time and stays stale through the scan.
+        #
+        # Best-effort: a render failure falls back to the cached
+        # `self.system_prompt` from init.
+        try:
+            refreshed = self._load_system_prompt(self.agent_name)
+            if refreshed:
+                self.system_prompt = refreshed
+        except Exception:  # noqa: BLE001
+            pass
+
         messages = [{"role": "system", "content": self.system_prompt}]
 
         if self.agent_name:
