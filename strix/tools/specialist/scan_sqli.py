@@ -554,6 +554,27 @@ def scan_sqli(
             except Exception:  # noqa: BLE001
                 pass  # leave as raw string — let build_request handle it
 
+    # Roadmap §8.5 Phase 7 — auto-include captured auth from
+    # SecurityContext when extra_headers don't already have one.
+    # Many SQL-injectable endpoints sit behind auth (admin search,
+    # /api/admin/users, etc.). Without auth, scan_sqli gets 401 on
+    # every probe. With this, scan_sqli automatically uses the JWT
+    # / cookies that scan_auth_flow already captured.
+    extra_headers = dict(extra_headers or {})
+    if "Authorization" not in extra_headers and "authorization" not in {h.lower() for h in extra_headers}:
+        try:
+            from strix.agents.security_context import list_auth_states
+
+            for state in list_auth_states():
+                if state.bearer:
+                    extra_headers["Authorization"] = f"Bearer {state.bearer}"
+                    break
+                if state.cookies:
+                    extra_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in state.cookies.items())
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+
     parsed = urlparse(url)
     if not params:
         # Three fallbacks for inferring params:
