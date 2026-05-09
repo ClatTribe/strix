@@ -30,6 +30,7 @@ from strix.tools.specialist import scan_sqli as _scan_sqli  # noqa: F401  # Phas
 from strix.tools.specialist import scan_xss as _scan_xss  # noqa: F401  # Phase 3b
 from strix.tools.specialist import scan_xxe as _scan_xxe  # noqa: F401  # Phase 6
 from strix.tools.specialist import scan_auth_flow as _scan_auth_flow  # noqa: F401  # Phase 6
+from strix.tools.specialist import scan_oauth as _scan_oauth  # noqa: F401  # Phase 2.11
 from strix.tools.specialist import scan_request_smuggling_active as _scan_request_smuggling_active  # noqa: F401  # Phase 2.10
 from strix.tools.specialist import scan_subdomain_takeover_active as _scan_subdomain_takeover_active  # noqa: F401  # Phase 2.9
 from strix.tools.specialist import scan_ldap_injection as _scan_ldap_injection  # noqa: F401  # Phase 2.8
