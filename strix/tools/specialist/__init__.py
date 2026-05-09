@@ -30,3 +30,4 @@ from strix.tools.specialist import scan_sqli as _scan_sqli  # noqa: F401  # Phas
 from strix.tools.specialist import scan_xss as _scan_xss  # noqa: F401  # Phase 3b
 from strix.tools.specialist import scan_xxe as _scan_xxe  # noqa: F401  # Phase 6
 from strix.tools.specialist import scan_auth_flow as _scan_auth_flow  # noqa: F401  # Phase 6
+from strix.tools.specialist import scan_multi_role_auth as _scan_multi_role_auth  # noqa: F401  # Phase 3.1
