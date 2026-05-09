@@ -262,6 +262,53 @@ def test_render_includes_auth_states_with_jwt_hint() -> None:
     assert "Run jwt_audit on it" in out
 
 
+def test_render_includes_specialist_recommendations_for_login() -> None:
+    """A login-shaped POST endpoint should produce a scan_sqli recommendation."""
+    set_target_url("http://x")
+    record_endpoint("/login", method="POST", status=200, params=["email"])
+    out = render_for_prompt()
+    assert "SPECIALIST RECOMMENDATIONS" in out
+    assert "scan_sqli on /login" in out
+    assert "POST" in out
+    assert "auto-emits" in out
+
+
+def test_render_includes_specialist_recommendations_for_search() -> None:
+    """A search endpoint with q param → scan_xss + scan_sqli recs."""
+    set_target_url("http://x")
+    record_endpoint("/search", method="GET", status=200, params=["q"])
+    out = render_for_prompt()
+    assert "scan_xss on /search" in out
+    assert "scan_sqli on /search" in out
+
+
+def test_render_includes_open_redirect_recommendation() -> None:
+    set_target_url("http://x")
+    record_endpoint("/redirect", method="GET", params=["to"])
+    out = render_for_prompt()
+    assert "open_redirect_check on /redirect" in out
+
+
+def test_render_includes_path_param_sqli_recommendation() -> None:
+    """Numeric path segments suggest IDOR/SQLi via path param."""
+    set_target_url("http://x")
+    record_endpoint("/api/Baskets/123", method="GET")
+    out = render_for_prompt()
+    assert "scan_sqli on" in out
+    assert "{id}" in out
+
+
+def test_render_excludes_recommendations_for_already_probed() -> None:
+    """If the endpoint has been probed for that category, don't re-recommend."""
+    set_target_url("http://x")
+    record_endpoint("/search", method="GET", params=["q"], probed_for="xss")
+    record_endpoint("/search", probed_for="sqli")
+    out = render_for_prompt()
+    # Both already covered; no scan_xss/scan_sqli rec for /search.
+    assert "scan_xss on /search" not in out
+    assert "scan_sqli on /search" not in out
+
+
 def test_render_includes_partial_signals() -> None:
     set_target_url("http://x")
     record_partial_signal(
