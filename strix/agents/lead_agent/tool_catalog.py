@@ -55,6 +55,7 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_xss",  # Phase 3b — deterministic reflected-XSS specialist
         "scan_sqli",  # Phase 3b — deterministic SQLi specialist
         "scan_xxe",  # Phase 6 — deterministic XXE specialist
+        "scan_oob_xxe",  # Phase 4.2 — blind XXE via OOB-DNS (CWE-611)
         "scan_auth_flow",  # Phase 6 — default-creds + session capture
         "scan_idor",  # Phase 4.1 — cross-session IDOR (CWE-639/862)
         "scan_multi_role_auth",  # Phase 3.1 — multi-role authz orchestrator (IDOR precondition)
