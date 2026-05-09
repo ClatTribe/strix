@@ -194,7 +194,7 @@ def _is_login_success(status: int | None, body: str) -> bool:
     category="auth-flow-specialist",
     llm=False,
     default_budget={"cost_usd": 0.0, "max_wall_seconds": 60},
-    sandbox_execution=False,
+    sandbox_execution=True,  # Phase 6 — needs sandbox network for host.docker.internal
     provenance="framework",
     mitre_techniques=["T1110.001"],  # Brute-Force: Password Guessing
 )
