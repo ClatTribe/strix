@@ -56,7 +56,21 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_sqli",  # Phase 3b — deterministic SQLi specialist
         "scan_xxe",  # Phase 6 — deterministic XXE specialist
         "scan_deserialization",  # Phase 4.4 — stack-aware deserialization (CWE-502 / A08:2021)
+        "scan_blind_cmd_injection",  # Phase 4.3 — OOB-DNS blind cmd injection (CWE-78)
+        "scan_oob_xxe",  # Phase 4.2 — blind XXE via OOB-DNS (CWE-611)
         "scan_auth_flow",  # Phase 6 — default-creds + session capture
+        "scan_idor",  # Phase 4.1 — cross-session IDOR (CWE-639/862)
+        "scan_multi_role_auth",  # Phase 3.1 — multi-role authz orchestrator (IDOR precondition)
+        "scan_oauth",  # Phase 2.11 — OAuth 2.0 / OIDC misconfiguration (CWE-352/602/601/922)
+        "scan_request_smuggling_active",  # Phase 2.10 — timing-based smuggle confirmation (CWE-444)
+        "scan_ldap_injection",  # Phase 2.8 — LDAP filter injection (CWE-90)
+        "scan_xpath_injection",  # Phase 2.7 — XPath injection (CWE-643)
+        "scan_cmd_injection",  # Phase 2.6 — in-band OS command injection (CWE-78)
+        "scan_secrets_in_response",  # Phase 2.5 — passive credential exposure (CWE-798/200)
+        "scan_nosql_injection",  # Phase 2.4 — MongoDB / Mongoose NoSQLi (CWE-943)
+        "scan_ssti",  # Phase 2.3 — server-side template injection (CWE-1336)
+        "scan_path_traversal",  # Phase 2.2 — CWE-22 file-traversal specialist
+        "scan_ssrf",  # Phase 2.1 — deterministic SSRF specialist (A10:2021)
         # Recon
         "fingerprint_tech_stack", "bfs_crawl",
         "well_known_harvest", "webapp_recon_pipeline",
@@ -97,6 +111,7 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "passive_dns_history", "org_fingerprint", "discover_cloud_assets",
         "subdomain_takeover_check", "reverse_ip", "mail_recon",
         "saas_leaks", "well_known_harvest",
+        "scan_subdomain_takeover_active",  # Phase 2.9 — active CNAME takeover (CWE-1390)
         # HTTP primitives for spotting web-app on domain targets
         "send_request",
         # Threat-intel
