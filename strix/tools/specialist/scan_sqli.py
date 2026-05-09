@@ -324,36 +324,100 @@ def scan_sqli(
     params: list[str] | None = None,
     other_params: dict[str, str] | None = None,
     extra_headers: dict[str, str] | None = None,
+    method: str = "GET",
+    body_template: dict[str, Any] | str | None = None,
+    body_format: str = "auto",
 ) -> SpecialistResult:
     """Deterministic SQL-injection scanner.
 
     Args:
-        url: target URL.
+        url: target URL. May contain `{param}` placeholders for
+            path-param substitution (e.g.
+            `http://x/api/Baskets/{id}`).
         params: list of param names to probe; falls back to URL
             query-string keys when None.
         other_params: baseline values for OTHER params on the URL.
         extra_headers: optional headers to forward (e.g. auth).
+        method: HTTP method. Default `GET` (Phase 3b behaviour).
+            Modern APIs use `POST`/`PUT`/`PATCH` with a body — supply
+            `body_template` along with the method to probe those.
+        body_template: optional body for non-GET methods.
+            * `dict` → JSON-encoded by default (`body_format="auto"`
+              infers JSON), or form-encoded with `body_format="form"`.
+              The named param's value is replaced with each probe
+              payload.
+            * `str` → raw body with `{param}` placeholder for
+              substitution.
+            * `None` (default) → param is substituted into the URL
+              query string (Phase 3b behaviour).
+        body_format: `"json"` / `"form"` / `"auto"`. Inferred when
+            `"auto"` and `body_template` is a dict (→ JSON).
 
     Auto-emits one `add_vulnerability_report` per (param × detection)
     via the global tracer. Returns a `SpecialistResult` with mirror
     drafts so the lead agent can see what was detected; canonical
     findings live in `vulnerabilities.json`.
+
+    Examples:
+        # Phase 3b — GET with query string.
+        scan_sqli(url="http://x/search?q=test", params=["q"])
+
+        # Phase 3c — POST + JSON body (Juice Shop login).
+        scan_sqli(
+            url="http://x/rest/user/login",
+            method="POST",
+            params=["email"],
+            body_template={"email": "x@example.com", "password": "x"},
+        )
+
+        # Phase 3c — path param.
+        scan_sqli(
+            url="http://x/api/Baskets/{id}",
+            method="GET",
+            params=["id"],
+        )
+
+        # Phase 3c — POST + form body.
+        scan_sqli(
+            url="http://x/login.php",
+            method="POST",
+            params=["username"],
+            body_template={"username": "admin", "password": "x"},
+            body_format="form",
+        )
     """
     if not isinstance(url, str) or not url.strip():
         return SpecialistResult(status="error", error="url required")
     url = url.strip()
 
+    from strix.tools.specialist._request_builders import (
+        build_request,
+        is_path_param_url,
+    )
+
     parsed = urlparse(url)
     if not params:
-        existing = parse_qs(parsed.query, keep_blank_values=True)
-        params = list(existing.keys())
+        # Three fallbacks for inferring params:
+        #   1. URL query string keys (existing).
+        #   2. body_template dict keys (new — Phase 3c).
+        #   3. {placeholder} markers in URL path (new — path params).
+        if parsed.query:
+            params = list(parse_qs(parsed.query, keep_blank_values=True).keys())
+        elif isinstance(body_template, dict):
+            params = list(body_template.keys())
+        else:
+            # Look for {name} placeholders in URL path.
+            import re as _re
+            params = _re.findall(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", url)
     if not params:
         return SpecialistResult(
             status="partial",
-            error="no params supplied and URL has no query string",
+            error="no params supplied and could not infer from URL/body",
             evidence=[
                 f"scan_sqli invoked on {url!r} with no params; "
-                "supply `params=[...]` or include a query string."
+                "supply `params=[...]`, include a query string, "
+                "supply a `body_template` dict, or use `{name}` "
+                "placeholders in the URL path."
             ],
         )
 
@@ -376,14 +440,16 @@ def scan_sqli(
     def _probe(probe_value: str, label: str) -> dict[str, Any] | None:
         nonlocal probe_count
         try:
-            probe_url = _build_url_with_param(
-                url, param_name=param, value=probe_value,
-                other_params=other_params,
+            req_method, req_url, req_headers, req_body = build_request(
+                url=url, method=method,
+                param_name=param, payload=probe_value,
+                body_template=body_template, body_format=body_format,
+                other_params=other_params, extra_headers=extra_headers,
             )
             resp = pm.send_simple_request(
-                "GET", probe_url,
-                headers=dict(extra_headers or {}),
-                body="",
+                req_method, req_url,
+                headers=req_headers,
+                body=req_body,
                 timeout=15,
             )
             probe_count += 1

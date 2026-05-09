@@ -253,6 +253,168 @@ def test_scan_sqli_in_lead_web_application_catalog() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 3c — protocol-aware probing (POST + JSON body, path params)
+# ---------------------------------------------------------------------------
+
+
+def test_post_json_body_sqli_detection(monkeypatch) -> None:
+    """The headline Phase 3c case: probe a POST + JSON endpoint.
+    Mirrors the Juice Shop login shape that Phase 3b couldn't reach."""
+    captured: list[dict[str, Any]] = []
+
+    def fake_resp(method, url, headers, body, timeout):
+        # Capture the actual request shape.
+        captured.append({
+            "method": method, "url": url,
+            "headers": dict(headers), "body": body,
+        })
+        # If the email field contains a `'`, return a MySQL error.
+        # (Realistic shape for an unsafely-built JSON-API SQL query.)
+        if "'" in body:
+            return {
+                "status_code": 500,
+                "body": (
+                    "{\"error\":\"You have an error in your SQL "
+                    "syntax; check the manual that corresponds to your "
+                    "MySQL server version\"}"
+                ),
+            }
+        return {"status_code": 200, "body": "{\"token\":\"...\"}"}
+
+    _patch_proxy(monkeypatch, fake_resp)
+    out = scan_sqli(
+        url="http://example.com/rest/user/login",
+        method="POST",
+        params=["email"],
+        body_template={"email": "x@example.com", "password": "x"},
+    )
+
+    assert out["status"] == "ok"
+    assert len(out["findings"]) == 1
+    f = out["findings"][0]
+    assert f["category"] == "sqli"
+    assert f["verification_status"] == "verified"
+
+    # Confirm the actual probes WERE POST + JSON.
+    assert all(req["method"] == "POST" for req in captured)
+    assert all(req["headers"].get("Content-Type") == "application/json"
+               for req in captured)
+    # Final probe body has the SQLi payload.
+    err_probes = [r for r in captured if "'" in r["body"]]
+    assert err_probes
+    import json as _json
+    parsed = _json.loads(err_probes[0]["body"])
+    assert "'" in parsed["email"]
+    assert parsed["password"] == "x"
+
+
+def test_post_form_body_sqli_detection(monkeypatch) -> None:
+    """Old-school PHP login forms: POST + form-urlencoded."""
+    captured: list[dict[str, Any]] = []
+
+    def fake_resp(method, url, headers, body, timeout):
+        captured.append({
+            "method": method, "url": url,
+            "headers": dict(headers), "body": body,
+        })
+        # form-urlencoded `'` is `%27`. Detection works on raw body.
+        if "%27" in body or "'" in body:
+            return {
+                "status_code": 500,
+                "body": "Microsoft SQL Server error: unclosed quotation mark",
+            }
+        return {"status_code": 200, "body": "Welcome"}
+
+    _patch_proxy(monkeypatch, fake_resp)
+    out = scan_sqli(
+        url="http://example.com/login.php",
+        method="POST",
+        params=["username"],
+        body_template={"username": "admin", "password": "x"},
+        body_format="form",
+    )
+
+    assert len(out["findings"]) == 1
+    assert all(req["headers"].get("Content-Type") ==
+               "application/x-www-form-urlencoded" for req in captured)
+
+
+def test_path_param_sqli_detection(monkeypatch) -> None:
+    """Path-based IDOR-adjacent SQLi: `/api/Baskets/{id}` style."""
+    captured: list[dict[str, Any]] = []
+
+    def fake_resp(method, url, headers, body, timeout):
+        captured.append({"method": method, "url": url})
+        if "'" in url or "%27" in url:
+            return {
+                "status_code": 500,
+                "body": "ORA-00933: SQL command not properly ended",
+            }
+        return {"status_code": 200, "body": "[]"}
+
+    _patch_proxy(monkeypatch, fake_resp)
+    out = scan_sqli(
+        url="http://example.com/api/Baskets/{id}",
+        method="GET",
+        params=["id"],
+    )
+    assert len(out["findings"]) == 1
+    # All probes should have substituted SOMETHING into the path.
+    assert all("{id}" not in r["url"] for r in captured)
+
+
+def test_params_inferred_from_body_template_when_omitted(monkeypatch) -> None:
+    """Convenience: caller can pass body_template without params and
+    we infer the param names from the dict keys."""
+    def fake_resp(method, url, headers, body, timeout):
+        return {"status_code": 200, "body": "ok"}
+
+    _patch_proxy(monkeypatch, fake_resp)
+    out = scan_sqli(
+        url="http://example.com/api",
+        method="POST",
+        body_template={"username": "x", "email": "y@z.com"},
+    )
+    # Both keys probed → status ok (no findings, but didn't error).
+    assert out["status"] == "ok"
+
+
+def test_params_inferred_from_path_placeholder_when_omitted(monkeypatch) -> None:
+    """`{id}` in URL with no params arg → infer `id`."""
+    def fake_resp(method, url, headers, body, timeout):
+        return {"status_code": 200, "body": "ok"}
+
+    _patch_proxy(monkeypatch, fake_resp)
+    out = scan_sqli(
+        url="http://example.com/api/users/{id}",
+        method="GET",
+    )
+    assert out["status"] == "ok"
+
+
+def test_json_finding_target_is_endpoint_not_query_url(monkeypatch) -> None:
+    """For body-based detection the emitted finding's `target` must
+    be the original URL, not a URL-with-query (no query was used)."""
+    def fake_resp(method, url, headers, body, timeout):
+        if "'" in body:
+            return {"status_code": 500, "body": "you have an error in your sql syntax"}
+        return {"status_code": 200, "body": "ok"}
+
+    _patch_proxy(monkeypatch, fake_resp)
+    scan_sqli(
+        url="http://example.com/api/login",
+        method="POST",
+        params=["user"],
+        body_template={"user": "admin", "pass": "x"},
+    )
+    from strix.telemetry.tracer import get_global_tracer
+
+    f = get_global_tracer().get_existing_vulnerabilities()[0]
+    assert f["target"] == "http://example.com/api/login"
+    assert "?" not in f["target"]
+
+
+# ---------------------------------------------------------------------------
 # CVSS / severity
 # ---------------------------------------------------------------------------
 
