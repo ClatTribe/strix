@@ -259,3 +259,81 @@ def test_scan_xss_in_lead_web_application_catalog() -> None:
 
     catalog = get_lead_tool_catalog(target_types=["web_application"])
     assert "scan_xss" in catalog
+
+
+# ---------------------------------------------------------------------------
+# Phase 3c — protocol-aware probing (POST + JSON body, path params)
+# ---------------------------------------------------------------------------
+
+
+def test_post_json_body_xss_detection(monkeypatch) -> None:
+    """Reflected XSS via a JSON-body API that echoes the payload
+    back into an HTML response (e.g. an error page that renders the
+    input verbatim)."""
+    captured: list[dict[str, Any]] = []
+
+    def fake_resp(method, url, headers, body, timeout):
+        import json
+        captured.append({"method": method, "headers": dict(headers), "body": body})
+        try:
+            data = json.loads(body)
+            q = data.get("query", "")
+        except Exception:
+            q = ""
+        # Server reflects query back into HTML (unsanitized).
+        return {
+            "status_code": 200,
+            "body": f"<html><body>You searched for: {q}</body></html>",
+        }
+
+    _patch_proxy(monkeypatch, fake_resp)
+    out = scan_xss(
+        url="http://example.com/api/search",
+        method="POST",
+        params=["query"],
+        body_template={"query": "test", "limit": 10},
+    )
+
+    assert out["status"] == "ok"
+    assert len(out["findings"]) >= 1
+    # The probe was a POST with JSON content-type.
+    assert all(r["method"] == "POST" for r in captured)
+    assert all(r["headers"].get("Content-Type") == "application/json"
+               for r in captured)
+
+
+def test_path_param_xss_detection(monkeypatch) -> None:
+    """XSS via path parameter — e.g. `/users/{name}` reflecting
+    `name` into the response."""
+    def fake_resp(method, url, headers, body, timeout):
+        # Extract the last path segment as `name`.
+        from urllib.parse import urlparse, unquote
+        name = unquote(urlparse(url).path.rsplit("/", 1)[-1])
+        return {
+            "status_code": 200,
+            "body": f"<html>Hello, {name}</html>",
+        }
+
+    _patch_proxy(monkeypatch, fake_resp)
+    out = scan_xss(
+        url="http://example.com/users/{name}",
+        method="GET",
+        params=["name"],
+    )
+    assert out["status"] == "ok"
+    assert len(out["findings"]) >= 1
+
+
+def test_xss_params_inferred_from_body_template(monkeypatch) -> None:
+    def fake_resp(method, url, headers, body, timeout):
+        return {"status_code": 200, "body": "ok"}
+
+    _patch_proxy(monkeypatch, fake_resp)
+    out = scan_xss(
+        url="http://example.com/api",
+        method="POST",
+        body_template={"q": "test", "context": "user"},
+    )
+    # No findings (server doesn't reflect), but status=ok means
+    # both keys were probed without error.
+    assert out["status"] == "ok"

@@ -272,43 +272,76 @@ def scan_xss(
     params: list[str] | None = None,
     other_params: dict[str, str] | None = None,
     extra_headers: dict[str, str] | None = None,
+    method: str = "GET",
+    body_template: dict[str, Any] | str | None = None,
+    body_format: str = "auto",
 ) -> SpecialistResult:
     """Deterministic reflected-XSS scanner that probes given params,
     emits findings via the tracer, and returns a SpecialistResult.
 
     Args:
         url: target URL (e.g. `http://example.com/search.aspx`).
-            Existing query params are preserved.
-        params: list of query-param names to probe (e.g. `["q",
-            "search"]`). When None / empty, any params already in
-            the URL's query string are probed.
-        other_params: optional baseline values for OTHER params on
-            the URL (so probes don't fail because some required
-            param is missing).
+            Existing query params are preserved. May contain
+            `{param}` placeholders for path-param substitution.
+        params: list of param names to probe. When None / empty,
+            inferred from (1) URL query-string keys, (2)
+            `body_template` dict keys, (3) `{name}` placeholders
+            in the URL path.
+        other_params: optional baseline values for OTHER query params.
         extra_headers: optional headers to forward (e.g. auth).
+        method: HTTP method. Default `GET` (Phase 3b). Use
+            `POST`/`PUT` for body-based reflection probes.
+        body_template: optional body. dict → JSON or form (per
+            body_format); str → raw body with `{param}` placeholder.
+            None → query-string substitution (Phase 3b behaviour).
+        body_format: `"json"` / `"form"` / `"auto"`.
 
     Auto-emits one `add_vulnerability_report` per (param × payload)
-    pair where reflection is detected unescaped. Returns
-    `SpecialistResult.findings` populated as drafts (mirror copies)
-    so the lead agent can see what was emitted; the canonical
-    findings live in `vulnerabilities.json` already.
+    pair where reflection is detected unescaped.
+
+    Examples:
+        # Phase 3b — GET with query string.
+        scan_xss(url="http://x/search?q=test", params=["q"])
+
+        # Phase 3c — POST + JSON body (search API that reflects).
+        scan_xss(
+            url="http://x/api/search",
+            method="POST",
+            params=["query"],
+            body_template={"query": "test", "limit": 10},
+        )
+
+        # Phase 3c — path param.
+        scan_xss(
+            url="http://x/users/{name}",
+            method="GET",
+            params=["name"],
+        )
     """
     if not isinstance(url, str) or not url.strip():
         return SpecialistResult(status="error", error="url required")
     url = url.strip()
 
-    # If params not supplied, fall back to URL query-string keys.
+    from strix.tools.specialist._request_builders import build_request
+
     parsed = urlparse(url)
     if not params:
-        existing = parse_qs(parsed.query, keep_blank_values=True)
-        params = list(existing.keys())
+        if parsed.query:
+            params = list(parse_qs(parsed.query, keep_blank_values=True).keys())
+        elif isinstance(body_template, dict):
+            params = list(body_template.keys())
+        else:
+            import re as _re
+            params = _re.findall(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", url)
     if not params:
         return SpecialistResult(
             status="partial",
-            error="no params supplied and URL has no query string",
+            error="no params supplied and could not infer from URL/body",
             evidence=[
                 f"scan_xss invoked on {url!r} with no params; "
-                "supply `params=[...]` or include a query string."
+                "supply `params=[...]`, include a query string, "
+                "supply a `body_template` dict, or use `{name}` "
+                "placeholders in the URL path."
             ],
         )
 
@@ -335,15 +368,17 @@ def scan_xss(
         for template in _DEFAULT_PAYLOAD_TEMPLATES:
             canary = _make_canary()
             payload = template.format(canary=canary)
-            probe_url = _build_url_with_param(
-                url, param_name=param, value=payload,
-                other_params=other_params,
-            )
             try:
+                req_method, req_url, req_headers, req_body = build_request(
+                    url=url, method=method,
+                    param_name=param, payload=payload,
+                    body_template=body_template, body_format=body_format,
+                    other_params=other_params, extra_headers=extra_headers,
+                )
                 resp = pm.send_simple_request(
-                    "GET", probe_url,
-                    headers=dict(extra_headers or {}),
-                    body="",
+                    req_method, req_url,
+                    headers=req_headers,
+                    body=req_body,
                     timeout=15,
                 )
             except Exception as e:  # noqa: BLE001
