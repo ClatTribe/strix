@@ -30,6 +30,22 @@ SANDBOX_EXECUTION_TIMEOUT = _SERVER_TIMEOUT + 30
 SANDBOX_CONNECT_TIMEOUT = float(Config.get("strix_sandbox_connect_timeout") or "10")
 
 
+# Roadmap §8.5 — tools that the lead agent must NEVER invoke.
+# Mirrors `strix.agents.lead_agent.tool_catalog._BLOCKED_TOOLS` (kept
+# in sync intentionally — duplicated here so the executor avoids a
+# circular import on the agents package). Update both lists together.
+_LEAD_BLOCKED_TOOLS: frozenset[str] = frozenset({
+    "create_agent",
+    "spawn_webapp_specialist_team",
+    "spawn_code_specialist_team",
+    "spawn_webapp_subteam",
+    "wait_for_message",
+    "send_message_to_agent",
+    "stop_agent",
+    "view_agent_graph",
+})
+
+
 async def execute_tool(tool_name: str, agent_state: Any | None = None, **kwargs: Any) -> Any:
     execute_in_sandbox = should_execute_in_sandbox(tool_name)
     sandbox_mode = os.getenv("STRIX_SANDBOX_MODE", "false").lower() == "true"
@@ -288,6 +304,46 @@ async def _execute_single_tool(
 
     if tracer:
         execution_id = tracer.log_tool_execution_start(agent_id, tool_name, args)
+
+    # Roadmap §8.5 — architectural-commitment guard. The single-lead
+    # architecture (LeadAgent + filtered catalog) declares that the
+    # lead must NEVER spawn sub-agents — that's the architectural
+    # difference from parent-spawns-N. The catalog allowlist surfaces
+    # this in the lead's prompt context, but `get_tools_prompt()`
+    # currently renders the FULL tool registry, so the model sees
+    # `create_agent`'s schema and naturally calls it. Without this
+    # guard the architecture devolves to legacy mode at runtime.
+    #
+    # We refuse the call here (rather than at prompt-render time)
+    # because:
+    #   1. The model sees a structured error, not silent disappearance
+    #      — it can adapt within the same conversation.
+    #   2. One enforcement point covers all entry paths (XML tool
+    #      call, recovery retry, hypothetical future tool-call format).
+    #   3. The error message names the right alternative tools, so
+    #      the next iteration moves toward direct probing.
+    if (
+        tool_name in _LEAD_BLOCKED_TOOLS
+        and agent_state is not None
+        and getattr(agent_state, "category", None) == "lead"
+    ):
+        block_msg = (
+            f"Tool {tool_name!r} is blocked under the single-lead "
+            f"architecture (roadmap §8.5). The lead must probe "
+            f"directly using its tool catalog: scan_misconfig, "
+            f"scan_xss, scan_sqli, send_request, browser_action, "
+            f"http_security_headers_audit, csrf_check, jwt_audit, "
+            f"open_redirect_check, etc. Sub-agent spawning is "
+            f"architecturally disabled. Re-attempt with a direct "
+            f"probe instead."
+        )
+        if tracer and execution_id:
+            tracer.update_tool_execution(execution_id, "error", block_msg)
+        observation_xml = (
+            f"<tool_result>\n<tool_name>{tool_name}</tool_name>\n"
+            f"<error>{block_msg}</error>\n</tool_result>"
+        )
+        return observation_xml, [], False
 
     try:
         result = await execute_tool_invocation(tool_inv, agent_state)
