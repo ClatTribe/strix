@@ -210,11 +210,13 @@ def record_endpoint(
         return
     path = _canonical_path(path)
     ctx = get_security_context()
+    is_new = False
     with _lock:
         info = ctx.endpoints.get(path)
         if info is None:
             info = EndpointInfo(path=path)
             ctx.endpoints[path] = info
+            is_new = True
         if method and method.upper() not in info.methods_seen:
             info.methods_seen.append(method.upper())
         if status is not None:
@@ -232,6 +234,68 @@ def record_endpoint(
         if notes:
             info.notes = (info.notes + " " + notes).strip()[:500]
     _persist()
+
+    # Roadmap §8.5 Phase 7 — auto-invoke specialists on the FIRST
+    # observation of a strongly-typed endpoint pattern, so detection
+    # doesn't depend on the lead's prompt discipline. Today the lead
+    # often runs out of throttle budget before invoking
+    # `open_redirect_check`; auto-invocation closes that gap. Guard:
+    # only fires on the first record_endpoint call for the path
+    # (`is_new`), so repeated calls don't re-fire the specialist.
+    if is_new:
+        _maybe_auto_invoke(info, params or [])
+
+
+def _maybe_auto_invoke(info: "EndpointInfo", params: list[str]) -> None:
+    """Auto-invoke specialists when `record_endpoint` fires for a
+    path that matches a strongly-typed pattern (today: `/redirect`-
+    shaped paths with `to=`/`url=`/`next=` params → `open_redirect_check`).
+
+    Best-effort: any failure inside the chained call is swallowed.
+    Specialists invoked here run synchronously inside the caller's
+    thread — typically `send_request`. The latency hit is small
+    (one HTTP probe set per matching endpoint, once per scan).
+    """
+    if not info or not hasattr(info, "path"):
+        return
+    path = info.path.lower()
+    redirect_paths = ("/redirect", "/return", "/goto", "/forward", "/r/")
+    redirect_params = {"to", "url", "next", "redirect", "return", "dest", "goto"}
+
+    is_redirect_path = any(p in path for p in redirect_paths)
+    has_redirect_param = bool(set(params) & redirect_params)
+
+    if is_redirect_path or has_redirect_param:
+        try:
+            from strix.tools.open_redirect.open_redirect_check import (
+                open_redirect_check as _orc,
+            )
+
+            # Build a target_url. open_redirect_check auto-discovers
+            # redirect-shaped param names from the URL's query string
+            # OR from a default lexicon (`next`, `redirect`, `url`,
+            # `return`, `goto`, `dest`). When the recorded params
+            # include a non-default name, pass it via extra_param_names.
+            target_url = info.path
+            if not target_url.startswith(("http://", "https://")):
+                ctx = get_security_context()
+                base = ctx.target_url.rstrip("/") if ctx.target_url else ""
+                target_url = base + target_url
+
+            extra_names: list[str] = [
+                p for p in params if p in redirect_params
+                and p not in {"next", "redirect", "url", "return", "goto", "dest"}
+            ]
+            kwargs: dict[str, Any] = {"target_url": target_url}
+            if extra_names:
+                kwargs["extra_param_names"] = extra_names
+
+            _orc(**kwargs)
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "auto-invoke open_redirect_check failed for %s",
+                info.path, exc_info=True,
+            )
 
 
 def record_auth_state(
