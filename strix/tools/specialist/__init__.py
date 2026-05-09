@@ -31,3 +31,4 @@ from strix.tools.specialist import scan_xss as _scan_xss  # noqa: F401  # Phase 
 from strix.tools.specialist import scan_xxe as _scan_xxe  # noqa: F401  # Phase 6
 from strix.tools.specialist import scan_auth_flow as _scan_auth_flow  # noqa: F401  # Phase 6
 from strix.tools.specialist import scan_path_traversal as _scan_path_traversal  # noqa: F401  # Phase 2.2
+from strix.tools.specialist import scan_ssrf as _scan_ssrf  # noqa: F401  # Phase 2.1
