@@ -31,3 +31,10 @@ from strix.tools.specialist import scan_xss as _scan_xss  # noqa: F401  # Phase 
 from strix.tools.specialist import scan_xxe as _scan_xxe  # noqa: F401  # Phase 6
 from strix.tools.specialist import scan_auth_flow as _scan_auth_flow  # noqa: F401  # Phase 6
 from strix.tools.specialist import scan_ldap_injection as _scan_ldap_injection  # noqa: F401  # Phase 2.8
+from strix.tools.specialist import scan_xpath_injection as _scan_xpath_injection  # noqa: F401  # Phase 2.7
+from strix.tools.specialist import scan_cmd_injection as _scan_cmd_injection  # noqa: F401  # Phase 2.6
+from strix.tools.specialist import scan_secrets_in_response as _scan_secrets_in_response  # noqa: F401  # Phase 2.5
+from strix.tools.specialist import scan_nosql_injection as _scan_nosql_injection  # noqa: F401  # Phase 2.4
+from strix.tools.specialist import scan_ssti as _scan_ssti  # noqa: F401  # Phase 2.3
+from strix.tools.specialist import scan_path_traversal as _scan_path_traversal  # noqa: F401  # Phase 2.2
+from strix.tools.specialist import scan_ssrf as _scan_ssrf  # noqa: F401  # Phase 2.1
