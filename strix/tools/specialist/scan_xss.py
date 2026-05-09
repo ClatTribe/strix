@@ -269,7 +269,8 @@ def _emit_finding(
 def scan_xss(
     *,
     url: str,
-    params: list[str] | None = None,
+    params: list[str] | str | None = None,
+    param: str | None = None,
     other_params: dict[str, str] | None = None,
     extra_headers: dict[str, str] | None = None,
     method: str = "GET",
@@ -323,6 +324,25 @@ def scan_xss(
     url = url.strip()
 
     from strix.tools.specialist._request_builders import build_request
+
+    # Roadmap §8.5 Phase 3c — forgiving arg handling (mirror scan_sqli).
+    # Accept `param=` (singular), `params=` as string, and JSON-string
+    # `body_template=`. Without this, every gemini-formatted call
+    # errors out as a TypeError before the actual probe fires.
+    if param and not params:
+        params = [param]
+    if isinstance(params, str):
+        params = [params]
+    if isinstance(body_template, str):
+        s = body_template.strip()
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                import json as _json
+                parsed_template = _json.loads(s)
+                if isinstance(parsed_template, dict):
+                    body_template = parsed_template
+            except Exception:  # noqa: BLE001
+                pass
 
     parsed = urlparse(url)
     if not params:

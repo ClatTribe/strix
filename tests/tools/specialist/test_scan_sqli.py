@@ -392,6 +392,71 @@ def test_params_inferred_from_path_placeholder_when_omitted(monkeypatch) -> None
     assert out["status"] == "ok"
 
 
+def test_accepts_param_singular(monkeypatch) -> None:
+    """The lead empirically calls scan_sqli with `param="email"`
+    (singular) instead of `params=["email"]`. This must NOT TypeError."""
+    def fake_resp(method, url, headers, body, timeout):
+        return {"status_code": 200, "body": "ok"}
+
+    _patch_proxy(monkeypatch, fake_resp)
+    out = scan_sqli(
+        url="http://example.com/api",
+        method="POST",
+        param="email",  # singular
+        body_template={"email": "x", "password": "y"},
+    )
+    assert out["status"] == "ok"
+
+
+def test_accepts_params_as_string(monkeypatch) -> None:
+    """Some calls pass `params="email"` (string) instead of a list.
+    Must be treated as `params=["email"]`."""
+    def fake_resp(method, url, headers, body, timeout):
+        return {"status_code": 200, "body": "ok"}
+
+    _patch_proxy(monkeypatch, fake_resp)
+    out = scan_sqli(
+        url="http://example.com/api",
+        method="POST",
+        params="email",  # string
+        body_template={"email": "x", "password": "y"},
+    )
+    assert out["status"] == "ok"
+
+
+def test_accepts_body_template_as_json_string(monkeypatch) -> None:
+    """The XML tool-call format passes args as strings. The lead
+    serialises a dict body_template as a JSON string. The function
+    must auto-parse it back to a dict so the param substitution
+    works as expected."""
+    captured: list[str] = []
+
+    def fake_resp(method, url, headers, body, timeout):
+        captured.append(body)
+        if "'" in body:
+            return {"status_code": 500, "body": "you have an error in your sql syntax"}
+        return {"status_code": 200, "body": "ok"}
+
+    _patch_proxy(monkeypatch, fake_resp)
+    out = scan_sqli(
+        url="http://example.com/api",
+        method="POST",
+        params=["email"],
+        body_template='{"email": "x@example.com", "password": "x"}',  # JSON string!
+    )
+    assert out["status"] == "ok"
+    # If template was parsed correctly, payloads were substituted into
+    # the email field (resulting in valid JSON each time).
+    import json as _json
+    parsed = [_json.loads(b) for b in captured if b.startswith("{")]
+    assert parsed, f"no JSON-shaped probes captured: {captured!r}"
+    # The error_trigger probe ("'") should produce {"email":"'", "password":"x"}
+    err_probes = [p for p in parsed if p.get("email") == "'"]
+    assert err_probes
+    # The finding should have fired.
+    assert len(out["findings"]) == 1
+
+
 def test_json_finding_target_is_endpoint_not_query_url(monkeypatch) -> None:
     """For body-based detection the emitted finding's `target` must
     be the original URL, not a URL-with-query (no query was used)."""

@@ -321,7 +321,8 @@ def _emit_finding(
 def scan_sqli(
     *,
     url: str,
-    params: list[str] | None = None,
+    params: list[str] | str | None = None,
+    param: str | None = None,
     other_params: dict[str, str] | None = None,
     extra_headers: dict[str, str] | None = None,
     method: str = "GET",
@@ -394,6 +395,32 @@ def scan_sqli(
         build_request,
         is_path_param_url,
     )
+
+    # Roadmap §8.5 Phase 3c — forgiving arg handling. Empirically the
+    # LLM (gemini-2.5-pro) often calls these specialists with:
+    #   * `param="email"` (singular) instead of `params=["email"]`
+    #   * `params="email"` (string) instead of `params=["email"]`
+    #   * `body_template="{\"email\":\"x\"}"` (JSON string) instead of
+    #     a dict literal — the XML-tool-call format encourages string-
+    #     typed args even when the schema is dict.
+    # Without this normalisation, every such call returns a TypeError
+    # and the scan stalls. Accept the variants here.
+    if param and not params:
+        params = [param]
+    if isinstance(params, str):
+        params = [params]
+    if isinstance(body_template, str):
+        # If the string looks like a JSON object, try parsing it.
+        # Falls back to raw-template-string mode on parse failure.
+        s = body_template.strip()
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                import json as _json
+                parsed_template = _json.loads(s)
+                if isinstance(parsed_template, dict):
+                    body_template = parsed_template
+            except Exception:  # noqa: BLE001
+                pass  # leave as raw string — let build_request handle it
 
     parsed = urlparse(url)
     if not params:
