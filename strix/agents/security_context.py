@@ -430,6 +430,14 @@ def render_for_prompt(*, max_endpoints: int = 30, max_signals: int = 20) -> str:
             ts_lines.append("  - VERSION DISCLOSURE detected (CVE-lookup candidate)")
         parts.append("\n".join(ts_lines))
 
+        # Phase 1.5 — tech-stack-specific guidance. Make specialist
+        # payload selection smarter without bloating prompt: only
+        # render hints that match the detected stack.
+        guidance = _stack_specific_guidance(ts)
+        if guidance:
+            parts.append("STACK-SPECIFIC PROBES — try these first based on detected stack:\n" +
+                         "\n".join(f"  • {g}" for g in guidance))
+
     # Endpoints (most-probed first)
     eps = list(ctx.endpoints.values())
     if eps:
@@ -491,6 +499,69 @@ def render_for_prompt(*, max_endpoints: int = 30, max_signals: int = 20) -> str:
         return parts[0] + "\n(SecurityContext is empty — populate it as you probe.)"
 
     return "\n\n".join(parts)
+
+
+def _stack_specific_guidance(ts: "TechStack") -> list[str]:
+    """Return stack-specific probing hints based on detected
+    tech-stack fields. Single-pass over each field; only emit hints
+    for fields that have known signatures.
+
+    The hints stay concise (one line each) so the prompt budget
+    doesn't balloon. Real CVE/payload detail belongs in specialists,
+    not the prompt — these are nudges to the right specialist.
+    """
+    out: list[str] = []
+    server = (ts.server or "").lower()
+    language = (ts.language or "").lower()
+    framework = (ts.framework or "").lower()
+    database = (ts.database or "").lower()
+    cms = (ts.cms or "").lower()
+
+    # Database-specific SQLi payload selection
+    if "mysql" in database:
+        out.append("MySQL → use `--`, `#` comments; INFORMATION_SCHEMA exfil; UNION SELECT N,...; sleep() / benchmark() time-based")
+    elif "mssql" in database or "sql server" in database or "sqlserver" in database:
+        out.append("MSSQL → xp_cmdshell candidate (RCE pivot); WAITFOR DELAY '0:0:5'; sysobjects/syscolumns enum")
+    elif "postgres" in database:
+        out.append("PostgreSQL → pg_sleep(5); pg_read_server_files (RCE via COPY FROM); pg_user enum")
+    elif "oracle" in database:
+        out.append("Oracle → DBMS_LOCK.SLEEP; UTL_HTTP for OOB; ALL_TABLES enum")
+    elif "sqlite" in database:
+        out.append("SQLite → no time-based (no sleep); use boolean-blind only; sqlite_master enum")
+
+    # Language-specific RCE / deserialization vectors
+    if "php" in language:
+        out.append("PHP → `unserialize()` deserialization sinks (PHAR + magic methods); LFI via `?file=` with /proc/self/environ poisoning; eval() injection via type juggling")
+    if "asp.net" in language or "aspnet" in framework:
+        out.append("ASP.NET → ViewState (BinaryFormatter) deserialization (CVE-2020-0688 family); __VIEWSTATE without ValidationKey is RCE")
+    if "node" in language or "express" in framework or "javascript" in language:
+        out.append("Node.js → prototype pollution in Express body parser; eval() / Function() in template engines")
+    if "python" in language or "django" in framework or "flask" in framework:
+        out.append("Python → pickle deserialization; SSTI in Jinja2 (`{{config.__class__.__init__.__globals__}}`); SECRET_KEY signing-bypass if leaked")
+    if "java" in language or "spring" in framework or "tomcat" in server:
+        out.append("Java → ysoserial deserialization (CommonsCollections, Spring); SpEL injection (`${T(java.lang.Runtime).getRuntime().exec(...)}`); Spring4Shell CVE-2022-22965")
+    if "ruby" in language or "rails" in framework:
+        out.append("Ruby → Marshal deserialization; ERB template injection; mass-assignment without strong_params")
+
+    # Framework-specific
+    if "spring" in framework:
+        out.append("Spring → check actuator endpoints (/actuator/env, /actuator/heapdump) for credential leak")
+    if "wordpress" in cms:
+        out.append("WordPress → /wp-json/wp/v2/users (user enum); xmlrpc.php (brute-force via system.multicall); plugin/theme CVEs via cve_lookup")
+    if "drupal" in cms:
+        out.append("Drupal → Drupalgeddon family CVEs; /CHANGELOG.txt for version disclosure")
+    if "joomla" in cms:
+        out.append("Joomla → /administrator path + known CVE list; com_users registration bypass")
+
+    # Server-specific
+    if "apache" in server:
+        out.append("Apache → check .htaccess override of mod_security; OptionsBleed (CVE-2017-9798) on old versions")
+    if "nginx" in server:
+        out.append("Nginx → off-by-slash misconfig (alias path traversal); range-based DoS on old versions")
+    if "iis" in server:
+        out.append("IIS → tilde character (`~`) for short-name disclosure; ASP.NET tracing endpoint exposure")
+
+    return out
 
 
 def _specialist_recommendations(endpoints: list[Any]) -> list[str]:

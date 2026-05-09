@@ -298,6 +298,47 @@ def test_render_includes_path_param_sqli_recommendation() -> None:
     assert "{id}" in out
 
 
+def test_render_includes_stack_specific_guidance_for_mysql() -> None:
+    """Phase 1.5 — DB hint nudges to MySQL-specific SQLi tactics."""
+    set_target_url("http://x")
+    update_tech_stack(database="MySQL")
+    out = render_for_prompt()
+    assert "STACK-SPECIFIC PROBES" in out
+    assert "MySQL" in out
+    assert "INFORMATION_SCHEMA" in out
+
+
+def test_render_includes_stack_specific_guidance_for_php() -> None:
+    set_target_url("http://x")
+    update_tech_stack(language="PHP/5.3.13")
+    out = render_for_prompt()
+    assert "PHP" in out
+    assert "unserialize" in out
+
+
+def test_render_includes_stack_guidance_for_spring() -> None:
+    set_target_url("http://x")
+    update_tech_stack(framework="Spring Boot 2.5")
+    out = render_for_prompt()
+    assert "Spring4Shell" in out
+
+
+def test_render_includes_stack_guidance_for_wordpress() -> None:
+    set_target_url("http://x")
+    update_tech_stack(cms="WordPress 5.8")
+    out = render_for_prompt()
+    assert "wp-json" in out
+    assert "xmlrpc" in out
+
+
+def test_render_no_stack_guidance_when_no_match() -> None:
+    """Unknown stack → no guidance section bleeds in."""
+    set_target_url("http://x")
+    update_tech_stack(server="ProprietaryHTTPd 9000")
+    out = render_for_prompt()
+    assert "STACK-SPECIFIC PROBES" not in out
+
+
 def test_render_recommends_scan_auth_flow_for_login_endpoint() -> None:
     """The login endpoint is the entry point to most auth-gated bugs.
     The auth-flow recommendation should fire when probed_for=auth is
