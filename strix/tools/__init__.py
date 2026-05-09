@@ -32,6 +32,7 @@ from .self_audit import *  # noqa: F403
 from .specialist import *  # noqa: F403  # roadmap §8.5 Phase 1
 from .terminal import *  # noqa: F403
 from .traffic_ingest import *  # noqa: F403
+from .replay_mutation import *  # noqa: F403  # workitem.md Phase 5.5
 from .thinking import *  # noqa: F403
 from .todo import *  # noqa: F403
 from .web_search import *  # noqa: F403

@@ -79,6 +79,10 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "send_request", "browser_action", "extract_dom",
         # HAR / Burp ingestion (#141)
         "ingest_har_file", "ingest_burp_file",
+        # Replay-with-mutation orchestrator — Phase 5.5
+        "replay_mutation_on_endpoints",
+        "replay_mutation_from_har_file",
+        "replay_mutation_from_burp_file",
         # Web-app deterministic checks
         "http_security_headers_audit", "tls_audit",
         "csrf_check", "cors_deep_check", "session_entropy_check",
