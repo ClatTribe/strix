@@ -104,6 +104,7 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "passive_dns_history", "org_fingerprint", "discover_cloud_assets",
         "subdomain_takeover_check", "reverse_ip", "mail_recon",
         "saas_leaks", "well_known_harvest",
+        "scan_subdomain_takeover_active",  # Phase 2.9 — active CNAME takeover (CWE-1390)
         # HTTP primitives for spotting web-app on domain targets
         "send_request",
         # Threat-intel
