@@ -284,6 +284,34 @@ def scan_xxe(
     headers = dict(extra_headers or {})
     headers.setdefault("Content-Type", "application/xml")
 
+    # Roadmap §8.5 Phase 7 — auto-include captured auth from
+    # SecurityContext.AuthState. Many target endpoints (Juice Shop's
+    # /b2b/v2/orders, most SaaS B2B APIs) require authentication
+    # before they parse the XML body. Without this, scan_xxe gets
+    # 401 on every probe and never sees the actual XXE-relevant
+    # response. With this, scan_xxe automatically uses the JWT /
+    # cookies that scan_auth_flow already captured.
+    if "Authorization" not in headers and "authorization" not in {h.lower() for h in headers}:
+        try:
+            from strix.agents.security_context import list_auth_states
+
+            for state in list_auth_states():
+                if state.bearer:
+                    headers["Authorization"] = f"Bearer {state.bearer}"
+                    evidence.append(
+                        f"auto-included auth: Bearer ... (label={state.label})"
+                    )
+                    break
+                if state.cookies:
+                    cookie_str = "; ".join(f"{k}={v}" for k, v in state.cookies.items())
+                    headers["Cookie"] = cookie_str
+                    evidence.append(
+                        f"auto-included auth: Cookie ... (label={state.label})"
+                    )
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+
     # Phase 1 — local-file disclosure probes.
     for label, target, fingerprint in _LOCAL_FILE_PAYLOADS:
         body = _build_xxe_body(payload_kind=label, target=f"file://{target}")
