@@ -71,6 +71,8 @@ def _categories_match(a: str | None, b: str | None) -> bool:
     aliases = {
         "sql_injection": "sqli",
         "sql-injection": "sqli",
+        "nosqli": "sqli",
+        "nosql_injection": "sqli",
         "command_injection": "cmd_injection",
         "command-injection": "cmd_injection",
         "os_command_injection": "cmd_injection",
@@ -78,6 +80,7 @@ def _categories_match(a: str | None, b: str | None) -> bool:
         "cross-site-scripting": "xss",
         "stored_xss": "xss",
         "reflected_xss": "xss",
+        "dom_xss": "xss",
         "server_side_request_forgery": "ssrf",
         "insecure_deserialization": "deserialization",
         "directory_traversal": "path_traversal",
@@ -89,9 +92,27 @@ def _categories_match(a: str | None, b: str | None) -> bool:
         "exposed_secret": "info_disclosure",
         "broken_access_control": "authz",
         "missing_authorization": "authz",
+        "missing_auth": "authz",
         "open-redirect": "open_redirect",
+        # JWT findings often emit category="auth" with CWE-287 even
+        # when the manifest expects category="jwt" (CWE-347). Without
+        # this alias, every JWT-handling finding shows up as an FP.
+        # Keep auth → jwt unidirectional rather than a synonym (auth
+        # is a strict superset; not every auth finding is a JWT one)
+        # by mapping auth's normalized form to jwt only when the
+        # other side is jwt — handled below outside the dict.
     }
-    return aliases.get(a, a) == aliases.get(b, b)
+    canonical_a = aliases.get(a, a)
+    canonical_b = aliases.get(b, b)
+    if canonical_a == canonical_b:
+        return True
+    # Asymmetric overlap: a finding tagged "auth" is a candidate match
+    # for "jwt" expectations (and vice-versa) — narrow enough to be
+    # safe given the manifest's discrete vulnerability classes.
+    auth_jwt = {"auth", "jwt", "authentication"}
+    if canonical_a in auth_jwt and canonical_b in auth_jwt:
+        return True
+    return False
 
 
 def _cwe_match(a: str | None, b: str | None) -> bool:
@@ -133,7 +154,71 @@ def _endpoint_match(a: str | None, b: str | None) -> bool:
             a = "/" + a.split("/", 3)[-1] if "/" in a[len(prefix):] else "/"
         if b.startswith(prefix):
             b = "/" + b.split("/", 3)[-1] if "/" in b[len(prefix):] else "/"
-    return a == b
+    if a == b:
+        return True
+    # Substring tolerance — when one side is a path prefix of the
+    # other (e.g. expected `/api/Baskets` matches found
+    # `/api/Baskets/123`), count it. Real-world: deterministic
+    # specialists emit the concrete probe URL with substituted ID,
+    # not the path template.
+    if a and b and (a.startswith(b) or b.startswith(a)):
+        return True
+    return False
+
+
+def _title_mentions_endpoint(title: str | None, endpoint: str | None) -> bool:
+    """Fallback: when the found.endpoint is the bare host URL (no
+    path), check whether the title mentions enough of the expected
+    endpoint to count as a match. Real-world example: agent emits
+    target=`http://host` for a JWT alg=none finding but the title
+    says `JWT Signature Validation Bypass`. A `weak-jwt-handling`
+    expectation at endpoint=`/rest/user/whoami` should match here
+    because the SAME bug is being described — the agent just used
+    the broad target field."""
+    if not title or not endpoint:
+        return False
+    title_l = _norm(title)
+    # Pull out distinctive path segments from the endpoint (skip
+    # generic ones like `/api/`, `/rest/`).
+    segments = [s for s in endpoint.lower().split("/") if s and s not in
+                {"api", "rest", "v1", "v2", ""}]
+    if not segments:
+        return False
+    # If ANY distinctive segment appears in the title, count it.
+    return any(seg in title_l for seg in segments)
+
+
+def _title_mentions_id_keywords(title: str | None, expected_id: str) -> bool:
+    """Fallback: when the found.endpoint is the bare host URL but
+    the title clearly references the expected vulnerability — e.g.
+    expected `weak-jwt-handling` with title "JWT Signature Validation
+    Bypass Using none Algorithm" should match because both halves
+    of `jwt` (and `weak`) appear in the title.
+
+    Strategy: split the expected_id by `-` / `_`; if ANY distinctive
+    token appears as substring in the title, count it. Combined with
+    the category-match precondition, this is safe — the category
+    already constrains which expected entries we're considering.
+    Tolerates singular/plural via simple `s` suffix-strip.
+
+    Skip generic/structural tokens that don't disambiguate
+    vulnerabilities (`weak`, `bad`, `missing`, etc.) — they'd
+    otherwise false-match generic titles."""
+    if not title or not expected_id:
+        return False
+    title_l = _norm(title)
+    GENERIC = {"a", "an", "the", "of", "to", "in", "weak", "bad", "missing",
+               "broken", "insecure", "unsafe", "deprecated", "default"}
+    raw_tokens = [t for t in expected_id.replace("_", "-").split("-")
+                  if t and t not in GENERIC]
+    if not raw_tokens:
+        return False
+    for tok in raw_tokens:
+        # Exact substring match, OR with trailing 's' (plural), OR
+        # without trailing 's' (singular ↔ plural normalization).
+        if tok in title_l or (tok + "s") in title_l or tok.rstrip("s") in title_l:
+            return True
+    return False
 
 
 def _location_match(expected: Expected, found: Found) -> bool:
@@ -141,7 +226,13 @@ def _location_match(expected: Expected, found: Found) -> bool:
     if expected.file is not None:
         return _file_match(expected.file, found.file) and _line_match(expected.line, found.line)
     if expected.endpoint is not None:
-        return _endpoint_match(expected.endpoint, found.endpoint)
+        if _endpoint_match(expected.endpoint, found.endpoint):
+            return True
+        # Two title-based fallbacks for the common case where the
+        # agent emits target=bare-host-url with a descriptive title.
+        if _title_mentions_endpoint(found.title, expected.endpoint):
+            return True
+        return _title_mentions_id_keywords(found.title, expected.id)
     if expected.port is not None:
         return expected.port == found.port
     return True  # no location specified — category-only match

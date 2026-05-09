@@ -1,5 +1,5 @@
 target_type: web_application
-target: http://localhost:3000
+target: http://host.docker.internal:3001
 description: |
   OWASP Juice Shop running locally via docker compose. The manifest below
   is a curated subset of Juice Shop's documented vulnerabilities — chosen
@@ -13,7 +13,7 @@ description: |
 
 docker:
   compose_file: docker-compose.yml
-  wait_url: http://localhost:3000/rest/admin/application-version
+  wait_url: http://127.0.0.1:3001/rest/admin/application-version
   wait_timeout_seconds: 90
 
 expected_findings:
@@ -87,7 +87,7 @@ expected_findings:
     endpoint: /profile
     severity: high
     must_find: false
-    description: Profile-image-from-URL fetches arbitrary URLs server-side. Marked `must_find: false` because it requires authenticated upload — recall depends on auth handling (§2 in roadmap).
+    description: "Profile-image-from-URL fetches arbitrary URLs server-side. Marked `must_find: false` because it requires authenticated upload — recall depends on auth handling (§2 in roadmap)."
 
   - id: open-redirect-redirect
     category: open_redirect
@@ -95,4 +95,4 @@ expected_findings:
     endpoint: /redirect
     severity: medium
     must_find: true
-    description: `/redirect?to=...` allows arbitrary external destinations.
+    description: "`/redirect?to=...` allows arbitrary external destinations."
