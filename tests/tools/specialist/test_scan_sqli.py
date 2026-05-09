@@ -392,6 +392,71 @@ def test_params_inferred_from_path_placeholder_when_omitted(monkeypatch) -> None
     assert out["status"] == "ok"
 
 
+def test_auth_bypass_via_or_1_eq_1_dash_dash(monkeypatch) -> None:
+    """Phase 7 — auth-bypass detection. The boolean-blind triplet
+    misses Juice Shop's login because the parameterized failure
+    path catches `' OR '1'='1` (returns 401), but `' OR 1=1--`
+    comments out the password check entirely and returns 200+JWT.
+    The new auth-bypass detection path catches this."""
+    def fake_resp(method, url, headers, body, timeout):
+        import json as _json
+        try:
+            data = _json.loads(body)
+        except Exception:
+            return {"status_code": 400, "body": "bad request"}
+        email = data.get("email", "")
+        # Juice Shop's behaviour: only the comment-out style bypasses.
+        if "' OR 1=1--" in email or "admin' OR 1=1--" in email:
+            return {
+                "status_code": 200,
+                "body": '{"authentication":{"token":"eyJaaa.bbb.ccc","bid":1}}',
+            }
+        # All other inputs (baseline, '1=1' style, error trigger) → 401
+        return {"status_code": 401, "body": "Invalid email or password."}
+
+    _patch_proxy(monkeypatch, fake_resp)
+    out = scan_sqli(
+        url="http://example.com/rest/user/login",
+        method="POST",
+        params=["email"],
+        body_template={"email": "x", "password": "x"},
+    )
+    assert out["status"] == "ok"
+    assert len(out["findings"]) == 1
+    f = out["findings"][0]
+    assert f["category"] == "sqli"
+    assert f["cwe"] == "CWE-89"
+    # Auth bypass is critical (vs error-based / boolean-blind which start high).
+    assert f["severity"] == "critical"
+    # Confidence should be very high (98%) — actual successful login is unambiguous.
+    assert f["confidence"] >= 0.95
+    # Evidence should reference the bypass.
+    assert any("auth-bypass" in str(e).lower() for e in out["evidence"])
+
+
+def test_auth_bypass_does_not_fire_when_baseline_already_succeeds(monkeypatch) -> None:
+    """If baseline returns 200/JWT (e.g. the endpoint is unauthenticated
+    or any input is accepted), the auth-bypass path must NOT emit —
+    that would be a false positive."""
+    def fake_resp(method, url, headers, body, timeout):
+        # Every probe returns success, including baseline.
+        return {
+            "status_code": 200,
+            "body": '{"authentication":{"token":"eyJsuccess.x.y"}}',
+        }
+
+    _patch_proxy(monkeypatch, fake_resp)
+    out = scan_sqli(
+        url="http://example.com/api",
+        method="POST",
+        params=["email"],
+        body_template={"email": "x", "password": "x"},
+    )
+    # No finding — baseline already succeeds, so the differential
+    # signal is meaningless.
+    assert len(out["findings"]) == 0
+
+
 def test_boolean_blind_detects_via_strong_signal_when_lengths_similar(monkeypatch) -> None:
     """Phase 6 enhancement: when both true and false responses have
     similar lengths but one shows success markers (token, success:true)
