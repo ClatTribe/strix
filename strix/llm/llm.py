@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -146,6 +147,13 @@ class LLM:
                 render_ctx["security_context_snapshot"] = _sc_render()
             except Exception:  # noqa: BLE001
                 pass
+
+            # Roadmap §8.5 Phase 4b — expose native-tool-calls flag
+            # to the jinja template so it can swap the verbose
+            # `<function=...>` format-reinforcement block for a
+            # native-call directive. Saves ~10K tokens per render
+            # when native mode is on.
+            render_ctx["native_tool_calls_enabled"] = self._native_tool_calls_enabled()
 
             result = env.get_template("system_prompt.jinja").render(
                 get_tools_prompt=tool_prompt_fn,
@@ -338,8 +346,27 @@ class LLM:
                     continue
                 yield LLMResponse(content=accumulated)
 
+        full_response = None
         if chunks:
-            self._update_usage_stats(stream_chunk_builder(chunks))
+            full_response = stream_chunk_builder(chunks)
+            self._update_usage_stats(full_response)
+
+        # Roadmap §8.5 Phase 4b — native tool calling. When enabled,
+        # extract tool invocations from the API's structured
+        # `tool_calls` field rather than parsing XML out of the
+        # accumulated text. Falls back to the XML path if native
+        # extraction yields nothing (e.g. model returned text only).
+        native_tool_invs: list[dict[str, Any]] | None = None
+        if self._native_tool_calls_enabled() and full_response is not None:
+            native_tool_invs = self._extract_native_tool_invocations(full_response)
+
+        if native_tool_invs:
+            yield LLMResponse(
+                content=accumulated,
+                tool_invocations=native_tool_invs,
+                thinking_blocks=self._extract_thinking(chunks),
+            )
+            return
 
         accumulated = normalize_tool_format(accumulated)
         accumulated = fix_incomplete_tool_call(_truncate_to_first_function(accumulated))
@@ -428,7 +455,99 @@ class LLM:
         if self._supports_reasoning():
             args["reasoning_effort"] = self._reasoning_effort
 
+        # Roadmap §8.5 Phase 4b — native tool calling. When the
+        # `STRIX_TOOL_CALL_FORMAT=native` env var is set, pass the
+        # tool catalog as `tools=[...]` JSON Schema. The provider's
+        # API enforces the schema, so the model can't malformed-call
+        # — eliminating the entire class of XML-format failures
+        # that PRs #163-#175 worked around at the prompt level.
+        #
+        # When the flag is unset (default), behavior is unchanged:
+        # the model invokes tools via the `<function=...>` XML tags
+        # rendered into the system prompt by `get_tools_prompt()`.
+        if self._native_tool_calls_enabled():
+            try:
+                from strix.tools.json_schema import get_tools_json_schema
+
+                allowlist = self._system_prompt_context.get("tool_catalog_allowlist")
+                tools_schema = get_tools_json_schema(allowlist=allowlist)
+                if tools_schema:
+                    args["tools"] = tools_schema
+                    args["tool_choice"] = "auto"
+            except Exception:  # noqa: BLE001
+                logger.debug("native tool schema construction failed", exc_info=True)
+
         return args
+
+    def _native_tool_calls_enabled(self) -> bool:
+        """Return True when `STRIX_TOOL_CALL_FORMAT=native` is set
+        (case-insensitive). Default is `xml` — preserves existing
+        behaviour through Phase 4b's rollout.
+        """
+        return os.environ.get("STRIX_TOOL_CALL_FORMAT", "xml").strip().lower() == "native"
+
+    def _extract_native_tool_invocations(
+        self, response: Any,
+    ) -> list[dict[str, Any]] | None:
+        """Convert litellm's native tool_calls list to strix's
+        existing `tool_invocations` shape:
+
+            [{"toolName": "<name>", "args": {<dict>}}, ...]
+
+        The downstream executor (`_execute_single_tool`) consumes
+        this shape unchanged. So flipping native mode is internal
+        to the LLM client; no executor changes needed.
+
+        Returns None when no tool_calls present (model emitted text
+        only). Best-effort: malformed entries are dropped silently.
+        """
+        try:
+            choices = getattr(response, "choices", None) or response.get("choices", [])
+            if not choices:
+                return None
+            message = getattr(choices[0], "message", None)
+            if message is None and isinstance(choices[0], dict):
+                message = choices[0].get("message")
+            if message is None:
+                return None
+            tool_calls = getattr(message, "tool_calls", None)
+            if tool_calls is None and isinstance(message, dict):
+                tool_calls = message.get("tool_calls")
+            if not tool_calls:
+                return None
+
+            out: list[dict[str, Any]] = []
+            import json as _json
+
+            for tc in tool_calls:
+                fn = getattr(tc, "function", None)
+                if fn is None and isinstance(tc, dict):
+                    fn = tc.get("function")
+                if fn is None:
+                    continue
+                name = getattr(fn, "name", None)
+                if name is None and isinstance(fn, dict):
+                    name = fn.get("name")
+                args_raw = getattr(fn, "arguments", None)
+                if args_raw is None and isinstance(fn, dict):
+                    args_raw = fn.get("arguments")
+                # arguments is JSON-encoded string per OpenAI spec;
+                # litellm normalises to that across providers.
+                if isinstance(args_raw, str):
+                    try:
+                        args = _json.loads(args_raw) if args_raw else {}
+                    except Exception:  # noqa: BLE001
+                        args = {}
+                elif isinstance(args_raw, dict):
+                    args = args_raw
+                else:
+                    args = {}
+                if name:
+                    out.append({"toolName": name, "args": args})
+            return out or None
+        except Exception:  # noqa: BLE001
+            logger.debug("native tool_calls extraction failed", exc_info=True)
+            return None
 
     def _get_chunk_content(self, chunk: Any) -> str:
         if chunk.choices and hasattr(chunk.choices[0], "delta"):

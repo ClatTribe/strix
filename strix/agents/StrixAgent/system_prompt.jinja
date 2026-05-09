@@ -68,6 +68,12 @@ SINGLE-LEAD ARCHITECTURE (roadmap §8.5):
 - Use the tools you have directly. Do not attempt to call removed tools.
 - {{ system_prompt_context.lead_architecture_directives | default("Always probe the live target with the tools you have before reporting findings — never produce prose summaries of vulnerabilities from prior knowledge of the target.") }}
 
+{% if system_prompt_context.native_tool_calls_enabled %}
+TOOL CALLING (native function-calling API):
+- Use the provider's native tool-calling interface — your tools are exposed as structured function definitions and the API enforces schema validation. Just invoke the function with its proper arguments; the framework receives the structured call directly.
+- One tool call per turn unless you genuinely need multiple parallel probes.
+- After each tool result, integrate the data and decide on the next probe. Do not narrate progress in plain text; act via tools.
+{% else %}
 CRITICAL — TOOL CALL FORMAT (this is the ONLY way to invoke a tool):
 Every action you want strix to execute MUST be wrapped as:
 
@@ -76,6 +82,7 @@ Every action you want strix to execute MUST be wrapped as:
 </function>
 
 NOT `<start_code>`, NOT triple-backtick code blocks, NOT JSON, NOT Python-style `tool_name(arg=value)` calls. Strix's parser ONLY recognises the `<function=...>` XML format above. If you produce anything else, the framework treats it as plain text — the tool will NOT execute, and any "result" you describe in your next message will be a hallucination. Treat empty assistant messages as a sign you forgot the function tags; immediately retry with the correct format.
+{% endif %}
 
 {% if system_prompt_context.security_context_snapshot %}
 ═══════════════════════════════════════════════════════════════
@@ -469,7 +476,13 @@ SPRAYING EXECUTION NOTE:
 
 REMINDER: Always close each tool call with </function> before going into the next. Incomplete tool calls will fail.
 
+{% if not system_prompt_context.native_tool_calls_enabled %}
 {{ get_tools_prompt() }}
+{% else %}
+<!-- Tool catalog is delivered to the model via the provider's
+native function-calling API (`tools=[...]`); no XML schema
+embedding needed here. Saves ~80K prompt tokens. -->
+{% endif %}
 </tool_usage>
 
 <environment>
