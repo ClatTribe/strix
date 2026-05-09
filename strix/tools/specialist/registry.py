@@ -382,3 +382,28 @@ def _emit_telemetry(
     except Exception:  # noqa: BLE001
         # Swallow; telemetry must never break the call.
         pass
+
+    # Phase 5.3 — counter-example logging. When this call EMITTED a
+    # finding, walk the telemetry stream for misses on the same
+    # endpoint by other tools and log the (caught_by, missed_by) pair.
+    try:
+        findings = result_dict.get("findings") or []
+        if isinstance(findings, list) and findings:
+            from strix.agents.specialist_misses import (
+                record_caught_finding,
+            )
+            for f in findings:
+                if not isinstance(f, dict):
+                    continue
+                endpoint = f.get("endpoint") or target
+                if not endpoint:
+                    continue
+                record_caught_finding(
+                    endpoint=str(endpoint),
+                    caught_by_tool=tool_name,
+                    caught_by_category=category,
+                    caught_finding=f,
+                    caught_params=params,
+                )
+    except Exception:  # noqa: BLE001
+        pass
