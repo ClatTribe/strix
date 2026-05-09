@@ -199,6 +199,8 @@ def register_specialist_tool(  # noqa: PLR0913
 
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
+            import time as _time
+            started = _time.monotonic()
             try:
                 raw = func(*args, **kwargs)
             except Exception as e:  # noqa: BLE001
@@ -206,30 +208,50 @@ def register_specialist_tool(  # noqa: PLR0913
                     "specialist-tool %s raised: %s",
                     func.__name__, e, exc_info=True,
                 )
-                return output_schema(
+                err_result = output_schema(
                     status="error",
                     error=f"{type(e).__name__}: {e}",
                 ).model_dump()
+                _emit_telemetry(
+                    func.__name__, category, args, kwargs,
+                    err_result, _time.monotonic() - started,
+                )
+                return err_result
+
+            # Coerce output to schema dict.
             try:
                 if isinstance(raw, output_schema):
-                    return raw.model_dump()
-                if isinstance(raw, dict):
-                    return output_schema(**raw).model_dump()
-                if hasattr(raw, "model_dump") and callable(raw.model_dump):
-                    return raw.model_dump()
+                    coerced = raw.model_dump()
+                elif isinstance(raw, dict):
+                    coerced = output_schema(**raw).model_dump()
+                elif hasattr(raw, "model_dump") and callable(raw.model_dump):
+                    coerced = raw.model_dump()
+                else:
+                    coerced = output_schema(
+                        status="error",
+                        error=(
+                            f"specialist returned unexpected type: "
+                            f"{type(raw).__name__}"
+                        ),
+                    ).model_dump()
             except Exception as e:  # noqa: BLE001
                 logger.debug(
                     "specialist-tool %s output coercion failed: %s",
                     func.__name__, e,
                 )
-                return output_schema(
+                coerced = output_schema(
                     status="error",
-                    error=f"output coercion failed: {type(e).__name__}: {e}",
+                    error=(
+                        f"output coercion failed: "
+                        f"{type(e).__name__}: {e}"
+                    ),
                 ).model_dump()
-            return output_schema(
-                status="error",
-                error=f"specialist returned unexpected type: {type(raw).__name__}",
-            ).model_dump()
+
+            _emit_telemetry(
+                func.__name__, category, args, kwargs,
+                coerced, _time.monotonic() - started,
+            )
+            return coerced
 
         descriptor = SpecialistDescriptor(
             name=func.__name__,
@@ -297,3 +319,91 @@ def reset_registry_for_tests() -> None:
     """Test-only helper. Clears the module-level registry between
     test cases that register conflicting categories."""
     _SPECIALIST_REGISTRY.clear()
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.4 telemetry hook
+# ---------------------------------------------------------------------------
+
+
+def _emit_telemetry(
+    tool_name: str, category: str,
+    args: tuple, kwargs: dict[str, Any],
+    result_dict: dict[str, Any],
+    elapsed_seconds: float,
+) -> None:
+    """Best-effort telemetry hook called after every specialist
+    invocation. Extracts target/params from kwargs and forwards to
+    `strix.agents.specialist_telemetry.record_specialist_call`.
+
+    Failures swallowed — telemetry must never break a specialist
+    call. We import inside the function so a circular import or
+    missing module never propagates."""
+    try:
+        from strix.agents.specialist_telemetry import (
+            record_specialist_call,
+        )
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        # Most specialists take target via `url=` or `urls=`. Both
+        # shapes are common; record whichever is present.
+        target = ""
+        for key in ("url", "urls", "login_url", "target"):
+            v = kwargs.get(key)
+            if isinstance(v, str) and v:
+                target = v
+                break
+            if isinstance(v, list) and v:
+                target = str(v[0])
+                break
+        # Params shape varies — `params=[...]` or `param="..."`.
+        params: list[str] = []
+        if isinstance(kwargs.get("params"), list):
+            params = [str(p) for p in kwargs["params"]]
+        elif isinstance(kwargs.get("params"), str):
+            params = [kwargs["params"]]
+        elif isinstance(kwargs.get("param"), str):
+            params = [kwargs["param"]]
+        # Args summary excludes large-shape fields that bloat the row.
+        args_summary = {
+            k: v for k, v in kwargs.items()
+            if k not in {"body_template", "extra_headers", "other_params"}
+        }
+        record_specialist_call(
+            tool_name=tool_name,
+            category=category,
+            target=target,
+            params=params,
+            args=args_summary,
+            result=result_dict,
+            elapsed_seconds=elapsed_seconds,
+        )
+    except Exception:  # noqa: BLE001
+        # Swallow; telemetry must never break the call.
+        pass
+
+    # Phase 5.3 — counter-example logging. When this call EMITTED a
+    # finding, walk the telemetry stream for misses on the same
+    # endpoint by other tools and log the (caught_by, missed_by) pair.
+    try:
+        findings = result_dict.get("findings") or []
+        if isinstance(findings, list) and findings:
+            from strix.agents.specialist_misses import (
+                record_caught_finding,
+            )
+            for f in findings:
+                if not isinstance(f, dict):
+                    continue
+                endpoint = f.get("endpoint") or target
+                if not endpoint:
+                    continue
+                record_caught_finding(
+                    endpoint=str(endpoint),
+                    caught_by_tool=tool_name,
+                    caught_by_category=category,
+                    caught_finding=f,
+                    caught_params=params,
+                )
+    except Exception:  # noqa: BLE001
+        pass
