@@ -488,6 +488,27 @@ def scan_xss(
     except Exception:  # noqa: BLE001
         pass
 
+    # Phase 1.6 — decision provenance log
+    try:
+        from strix.agents.decision_log import record_decision
+
+        record_decision(
+            kind="specialist_invocation",
+            target=url,
+            actor={"tool_name": "scan_xss"},
+            input={
+                "method": method,
+                "params": list(params) if params else [],
+                "probes_sent": probe_count,
+            },
+            output={
+                "findings_emitted": emitted_count,
+                "drafts": len(drafts),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     return SpecialistResult(
         status="ok",
         findings=drafts,
