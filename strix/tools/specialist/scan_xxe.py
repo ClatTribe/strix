@@ -238,7 +238,7 @@ def _emit_xxe_finding(
     category="xxe-specialist",
     llm=False,
     default_budget={"cost_usd": 0.0, "max_wall_seconds": 60},
-    sandbox_execution=True,  # Phase 6 — needs sandbox network for host.docker.internal
+    sandbox_execution=False,  # host execution; proxy_manager handles host.docker.internal → 127.0.0.1 fallback
     provenance="framework",
     mitre_techniques=["T1190"],
 )

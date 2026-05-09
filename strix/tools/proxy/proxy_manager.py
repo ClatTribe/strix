@@ -273,48 +273,76 @@ class ProxyManager:
         # back to a direct request. Either path applies the same auth /
         # exclude / rate-limit middleware (the steps above), so the safety
         # contract is unchanged.
-        for use_proxy in (True, False):
-            try:
-                start_time = time.time()
-                response = requests.request(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    data=body or None,
-                    proxies=self.proxies if use_proxy else None,
-                    timeout=timeout,
-                    verify=False,
-                )
-                response_time = int((time.time() - start_time) * 1000)
+        #
+        # Roadmap §8.5 Phase 6 — when running on the HOST process (not
+        # inside the sandbox container), `host.docker.internal` is not
+        # resolvable. Build a list of fallback URLs that swap the host
+        # for 127.0.0.1 — Docker Desktop binds the same container's port
+        # there, so a host-side specialist can reach it. The original
+        # URL is tried first; the rewritten URL is the backup. This
+        # closes the gap between the agent's send_request (sandbox-side,
+        # where host.docker.internal works) and host-side specialists
+        # (where it doesn't).
+        from urllib.parse import urlparse, urlunparse
+        candidate_urls = [url]
+        try:
+            parsed = urlparse(url)
+            host = (parsed.hostname or "").lower()
+            if host == "host.docker.internal":
+                # Substitute 127.0.0.1 for host.docker.internal; preserve port + path
+                netloc_new = parsed.netloc.replace(parsed.hostname, "127.0.0.1", 1)
+                candidate_urls.append(urlunparse(parsed._replace(netloc=netloc_new)))
+        except Exception:  # noqa: BLE001
+            pass
 
-                body_content = response.text
-                if len(body_content) > 10000:
-                    body_content = body_content[:10000] + "\n... [truncated]"
+        last_error: Exception | None = None
+        for try_url in candidate_urls:
+            for use_proxy in (True, False):
+                try:
+                    start_time = time.time()
+                    response = requests.request(
+                        method=method,
+                        url=try_url,
+                        headers=headers,
+                        data=body or None,
+                        proxies=self.proxies if use_proxy else None,
+                        timeout=timeout,
+                        verify=False,
+                    )
+                    response_time = int((time.time() - start_time) * 1000)
 
-                return {
-                    "status_code": response.status_code,
-                    "headers": dict(response.headers),
-                    "body": body_content,
-                    "response_time_ms": response_time,
-                    "url": response.url,
-                    "proxy_used": use_proxy,
-                    "message": (
-                        "Request sent through proxy - check list_requests() for captured traffic"
-                        if use_proxy
-                        else "Request sent direct (proxy unreachable)"
-                    ),
-                }
-            except (RequestException, ProxyError, Timeout) as e:
-                if use_proxy:
-                    # Retry without proxy on the next loop iteration.
-                    continue
-                return {
-                    "error": f"Request failed: {type(e).__name__}",
-                    "details": str(e),
-                    "url": url,
-                }
-        # Unreachable; the for-loop returns above.
-        return {"error": "Request failed: unknown", "url": url}
+                    body_content = response.text
+                    if len(body_content) > 10000:
+                        body_content = body_content[:10000] + "\n... [truncated]"
+
+                    return {
+                        "status_code": response.status_code,
+                        "headers": dict(response.headers),
+                        "body": body_content,
+                        "response_time_ms": response_time,
+                        "url": response.url,
+                        "proxy_used": use_proxy,
+                        "message": (
+                            "Request sent through proxy - check list_requests() for captured traffic"
+                            if use_proxy
+                            else "Request sent direct (proxy unreachable)"
+                        ),
+                    }
+                except (RequestException, ProxyError, Timeout) as e:
+                    last_error = e
+                    if use_proxy:
+                        # Retry without proxy on the next loop iteration.
+                        continue
+                    # Direct request failed for this candidate URL — try
+                    # the next candidate (e.g. host.docker.internal →
+                    # 127.0.0.1 fallback).
+                    break
+        # All candidates + both routing modes failed.
+        return {
+            "error": f"Request failed: {type(last_error).__name__ if last_error else 'unknown'}",
+            "details": str(last_error) if last_error else "no candidates",
+            "url": url,
+        }
 
     def repeat_request(
         self, request_id: str, modifications: dict[str, Any] | None = None
