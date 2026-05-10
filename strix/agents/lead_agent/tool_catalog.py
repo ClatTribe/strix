@@ -96,6 +96,13 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # IaC misconfigs (CORS-credentials, open redirects)
         # become DAST hypotheses for the deployed URL.
         "scan_iac",
+        # Phase 9 — behavioural anomaly diff + timing oracle.
+        # Used as complementary signals alongside the static-
+        # payload specialists: anomaly diff catches probe-vs-
+        # baseline divergences; timing oracle confirms blind
+        # injection via 50-sample statistical fit.
+        "scan_response_anomaly",
+        "scan_timing_oracle",
         # Recon
         "fingerprint_tech_stack", "bfs_crawl",
         "well_known_harvest", "webapp_recon_pipeline",

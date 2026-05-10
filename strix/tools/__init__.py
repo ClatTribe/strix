@@ -42,6 +42,9 @@ from strix.sca import tools as _sca_tools  # noqa: F401, E402
 from strix.sast import tools as _sast_tools  # noqa: F401, E402
 # IaC / cloud-posture (Phase 11) — registers `scan_iac`.
 from strix.iac import tools as _iac_tools  # noqa: F401, E402
+# Phase 9 — behavioural anomaly diff + timing oracle.
+from strix.tools.anomaly_diff import tools as _anomaly_tools  # noqa: F401, E402
+from strix.tools.timing_oracle import tools as _timing_tools  # noqa: F401, E402
 from .thinking import *  # noqa: F403
 from .todo import *  # noqa: F403
 from .web_search import *  # noqa: F403

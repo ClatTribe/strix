@@ -653,6 +653,11 @@ Heuristic to identify endpoints backed by an LLM:
 
 ## 8. Phase 9 — Real-time intelligence + behavioural detection
 
+**Status:** 9.1 (poll-mode daemon) / 9.2 / 9.3 / 9.5 / 9.6 landed
+in **PR #219** (2026-05-10). State-machine workflow discovery
+(9.4) and the GHSA webhook subscriber + RSS / Bluesky firehose
+(9.1 full) are deferred to follow-up PRs.
+
 **Goal**: same-hour awareness of new CVEs/exploits + drift detection on
 deployed apps.
 
@@ -662,49 +667,90 @@ deployed apps.
 
 ### Items
 
-#### 9.1. Push-feed daemon (`strix/threat_intel/streaming/`)
+#### 9.1. Push-feed daemon (`strix/threat_intel/streaming/`) — **lite shipped in #219; full deferred**
 Replaces the daily cron with:
-- Webhook subscriber for GHSA (push notifications via GitHub App)
-- 5-minute polling of CISA KEV (lightweight JSON feed)
-- RSS subscriptions: HackerOne Hacktivity, exploit-db, vendor advisories
-- Bluesky firehose for `#infosec` keyword + curated researcher allow-list
-- `event_stream.jsonl` ring buffer the agent subscribes to mid-scan
-~1,500 LOC.
+- Webhook subscriber for GHSA (push notifications via GitHub App) — **deferred** (needs deployment infra + webhook endpoint)
+- 5-minute polling of CISA KEV (lightweight JSON feed) — **shipped**
+- RSS subscriptions: HackerOne Hacktivity, exploit-db, vendor advisories — **deferred** (needs moderation layer)
+- Bluesky firehose for `#infosec` keyword + curated researcher allow-list — **deferred** (needs auth + rate-limit handling)
+- `event_stream.jsonl` ring buffer the agent subscribes to mid-scan — **shipped**
 
-#### 9.2. Per-endpoint behavioural baselines (`strix/baselines/`)
+**Shipped in #219**: poll-mode daemon (`python -m strix.threat_intel
+.streaming`) that runs `poll_kev` every 5 minutes and emits
+`kev_added` / `feed_polled` events to a bounded `event_stream
+.jsonl` ring buffer. Atomic rotation when the buffer overflows.
+Per-iteration error isolation — a failed poll emits a
+`feed_polled` liveness event rather than crashing the daemon.
+
+Defer rationale for the full v1: webhook / RSS / Bluesky each
+need separate auth + endpoint infrastructure that's out of
+strix's deployment footprint. Poll-mode covers the highest-
+churn feed (KEV) and gets us 95% of the time-to-detection win.
+
+#### 9.2. Per-endpoint behavioural baselines (`strix/baselines/`) — **shipped in #219**
 - For every recon-discovered endpoint, capture:
   - 5-sample latency distribution (p50, p99)
   - Response status, headers, content-type
   - Body length distribution + JSON shape (key set)
-  - Auth-state delta (anon vs authenticated)
+  - Auth-state delta (anon vs authenticated) — **partial** (we record both anon + auth as separate rows; structured delta is a follow-up that needs `multi_role_auth` integration)
 - Persist to `behavioural_baselines.jsonl`
-~800 LOC.
 
-#### 9.3. Anomaly-diff specialist (`scan_response_anomaly`)
+**Shipped in #219**: `EndpointBaseline` dataclass + JSONL store
+(append-only, last-line-wins on read, corruption-tolerant) +
+`capture_baseline()` with caller-injected probe fn for test
+parity. Robust to probe failures: baselines record the
+surviving N samples; zero-success captures produce
+`samples=0` so the diff layer treats as "indeterminate" rather
+than asserting stability.
+
+#### 9.3. Anomaly-diff specialist (`scan_response_anomaly`) — **shipped in #219**
 - Diffs probe response against baseline
 - Anomaly classes: status-flip, length-outlier, latency-outlier (>3σ),
   new-keys-in-json, error-string-presence, header-set-change
 - Used by every other specialist as a complementary signal
-~600 LOC.
 
-#### 9.4. State-machine workflow discovery
+**Shipped in #219**: `scan_response_anomaly` LLM specialist that
+diffs single probes OR corpora of probes against the captured
+baseline. Per-class severity grading (status-flip / error-string
+= high; length / new-keys / latency = medium; header-change =
+low; aggregate = max). Both single-probe + corpus modes; corpus
+mode also runs Phase 9.6 shape clustering. KEV / EPSS-style
+overrides don't apply (these are pattern-match findings, not
+advisory matches).
+
+#### 9.4. State-machine workflow discovery — **deferred to follow-up PR**
 - Crawl auth + state-change endpoints, infer state machine
 - Probe transitions: skip-step, backward, cross-tenant
 - Persist to `workflow_graph.json`
-~1,500 LOC.
+~1,500 LOC. Deferred — needs proper graph construction +
+transition-probe orchestration; multi-week project.
 
-#### 9.5. Timing oracle specialist (`scan_timing_oracle`)
+#### 9.5. Timing oracle specialist (`scan_timing_oracle`) — **shipped in #219**
 - 50-sample timing-sensitive probes per param
 - Statistical fit (boxplot, KDE)
 - Detects blind injection / padding oracles / TOCTOU
-~700 LOC.
 
-#### 9.6. Response-shape clustering
+**Shipped in #219**: `scan_timing_oracle` LLM specialist with
+50-sample-per-payload statistical comparison. Pure-Python
+non-parametric test (Mann-Whitney-style rank-sum + median
+separation) — no scipy dep. Both gates must trigger for a
+"distinct" verdict (median sep > 1.5× pooled IQR AND rank-sum
+effect size > 0.7) — single-signal verdicts FP too often at
+N=50 on noisy networks. Caller supplies `payload_pairs` of
+parameterless `control_send_fn` / `suspect_send_fn` callables.
+
+#### 9.6. Response-shape clustering — **shipped in #219**
 - Group probe responses by shape (status × length-bucket × content-type ×
   body-fingerprint)
 - Outliers signal novel behaviour
 - Pairs with mutation fuzzer (Phase 13.5)
-~400 LOC.
+
+**Shipped in #219**: `fingerprint_response()` + `find_shape_outliers
+()` as a support module under `scan_response_anomaly`. Body-key-
+hash for JSON (shape-only, value-independent); first-512-byte
+hash for non-JSON. Outliers: clusters of size ≤ 1 across a
+corpus of size ≥ 5. Pairs cleanly with the mutation fuzzer
+when it lands (Phase 13.5).
 
 ### Deliverables
 - Streaming threat-intel daemon
