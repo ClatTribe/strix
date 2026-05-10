@@ -1,0 +1,9 @@
+id: unsupported-workflow-fixture
+info:
+  name: A workflow we can't run yet
+  severity: info
+  tags: workflow,fixture
+workflows:
+  - template: cves/2024/CVE-2024-1234.yaml
+    subtemplates:
+      - template: cves/2024/CVE-2024-2345.yaml
