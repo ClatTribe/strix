@@ -108,6 +108,10 @@ These apply across every phase:
 
 ## 5. Phase 6 — SCA + Supply Chain (highest customer-value next phase)
 
+**Status:** 6.1 / 6.2 / 6.3 / 6.5 landed in **PR #219** (2026-05-10).
+Reachability (6.4), malicious-package detection (6.6), and license
+compliance (6.7) are scoped as follow-up PRs.
+
 **Goal**: detect dependency-CVE risk in `package-lock.json` / `requirements.txt`
 / `Cargo.lock` / `Gemfile.lock` / `composer.lock`.
 
@@ -120,7 +124,7 @@ These apply across every phase:
 
 ### Items
 
-#### 6.1. Lockfile parsers (`strix/sca/parsers/`)
+#### 6.1. Lockfile parsers (`strix/sca/parsers/`) — **shipped in #219**
 - `parse_package_lock(path)` — npm v1/v2/v3 + yarn.lock + pnpm-lock.yaml
 - `parse_requirements(path)` — `requirements*.txt` + `Pipfile.lock` + `poetry.lock` + `uv.lock`
 - `parse_cargo_lock(path)` — `Cargo.lock`
@@ -131,14 +135,14 @@ These apply across every phase:
 Each returns `[(ecosystem, name, version, dev_only_bool), ...]`. ~600 LOC each;
 12 ecosystems = ~3,500 LOC total over the phase.
 
-#### 6.2. Vulnerability matching pipeline (`strix/sca/match.py`)
+#### 6.2. Vulnerability matching pipeline (`strix/sca/match.py`) — **shipped in #219**
 - Takes `(ecosystem, name, version)` from a parser
 - Queries the threat-intel cache (PR #217) for matching CVEs
 - Adds GitHub Security Advisories DB (Phase 6.5) for ecosystem-specific data
   the NVD doesn't have
 - Returns `[CVERecord with version-pattern matched, source]`
 
-#### 6.3. SCA specialist (`scan_sca_lockfiles`)
+#### 6.3. SCA specialist (`scan_sca_lockfiles`) — **shipped in #219**
 LLM-facing tool:
 ```
 scan_sca_lockfiles(
@@ -152,17 +156,17 @@ scan_sca_lockfiles(
 Walks `repo_path` for lockfiles, parses, matches, emits one finding per
 matching CVE.
 
-#### 6.4. Reachability analysis (Endor Labs differentiator)
+#### 6.4. Reachability analysis (Endor Labs differentiator) — **deferred follow-up**
 Use existing `taint_analysis` + `build_code_map` to filter SCA findings:
 "you have CVE-2024-X in package P, but your code never calls the vulnerable
 function." Drops CVSS by ~2 for unreachable, raises severity for reachable.
 ~1,200 LOC.
 
-#### 6.5. GitHub Security Advisories ingester
+#### 6.5. GitHub Security Advisories ingester — **shipped in #219**
 GHSA's GraphQL API has per-ecosystem advisory data NVD lacks. Daily polling
 into the threat-intel cache. ~600 LOC.
 
-#### 6.6. Malicious package detection (Socket.dev angle)
+#### 6.6. Malicious package detection (Socket.dev angle) — **deferred follow-up**
 Heuristic + LLM-driven:
 - Postinstall scripts that fetch external resources
 - Packages with no GitHub repo / no maintainer history
@@ -171,7 +175,7 @@ Heuristic + LLM-driven:
 - Network-call patterns ("does this package exfil to a non-listed domain?")
 ~900 LOC.
 
-#### 6.7. License compliance
+#### 6.7. License compliance — **deferred follow-up**
 Parse package metadata, flag GPL/AGPL/copyleft/commercial-restricted licenses
 in proprietary code. Maps to OPS-3 for SOC 2. ~400 LOC.
 
