@@ -225,20 +225,8 @@ function, append to `LINKER_REGISTRY`, add positive + negative
 tests in `tests/finding_chains/test_links.py`. No engine
 changes needed.
 
-**Wrapper requests from §4a v2** (cross-referenced in §14.6):
-- **Render chains as collapsible cards** — one card per
-  `chain_id`, severity from chain's max, narrative from
-  `chain.summary`, expandable to show constituent finding IDs.
-  Don't render the constituent findings as separate inbox
-  entries when they're part of a chain.
-- **Chain-type colour scheme** — `sca_dast` red, `sast_dast`
-  orange, `iac_dast` yellow, `sca_sast_dast` purple, `mixed`
-  grey. Powers the "this is a real exploit chain" visual cue.
-- **Per-link rationale on hover** — `chain.links[*].rationale`
-  explains WHY two findings are linked. Tooltip in the chain
-  card.
-- **"Promote to top" rule** — chains involving > 2 categories
-  are stronger evidence than singletons; sort first.
+**Wrapper consumers**: rendering details + chain-card UX in
+[`AISecurityEngineerUX.md`](./AISecurityEngineerUX.md) §13a.1.
 
 ### 4a.3. How each new phase plugs in
 
@@ -424,34 +412,15 @@ directly.
 The anti-rot test `test_every_cwe_mapped_control_exists_in_catalog`
 catches typos in either side automatically.
 
-### 4b.8. Wrapper requests from §4b
+### 4b.8. Wrapper consumers
 
-Cross-referenced in §14.6.
-
-- **Compliance tab** — single tab in the wrapper showing the
-  per-framework summary from `compliance_evidence.json`. Each
-  framework gets a card with `fail / warn / info / pass /
-  untested` counts.
-- **Per-control drill-down** — click a control → list of
-  finding IDs that hit it (from `control.finding_ids`). Auditor
-  trace: control → findings → fix.
-- **`untested` coverage-gap surfacing** — render untested
-  controls in a separate section: "These SOC 2 / ISO 27001 /
-  PCI / ASVS controls aren't validated by strix; you need
-  other tooling for them." This is the most actionable signal
-  for compliance teams.
-- **Framework picker in onboarding** — let the customer choose
-  which frameworks to include during setup; pass to
-  `emit_compliance_evidence(frameworks=[...])`. Default: all
-  4. Customers in regulated verticals (PCI for payments;
-  HIPAA when shipped) want the option to filter.
-- **Auditor-export button** — generates a polished
-  framework-specific PDF from the JSON artifact. Engine
-  produces structured data; wrapper does the prose
-  generation (per §3.1's split). NOT engine work.
-- **Risk-register integration** — `verdict=fail` controls
-  feed the wrapper's risk register. Engine emits; wrapper
-  manages the lifecycle (accept-risk / mitigate / etc.).
+Compliance tab UX, per-control drill-down, `untested`
+coverage-gap surfacing, framework picker, auditor-export PDF
+generation, and risk-register integration are all wrapper
+work — see
+[`AISecurityEngineerUX.md`](./AISecurityEngineerUX.md) §13a.1
+(item 2 — `compliance_evidence.json`) and §13a.2 (compliance
+tab category).
 
 ---
 
@@ -592,28 +561,13 @@ in proprietary code. Maps to OPS-3 for SOC 2. ~400 LOC.
 
 ### Wrapper dependency
 
-**Onboarding (existing ask):**
-- Wrapper's onboarding flow needs to ingest a repo path or git URL → triggers
-  this phase's pipeline. See `AISecurityEngineerUX.md` Phase A.
-
-**New requests from PR #219** (cross-referenced in §14.6):
-- **Reachability badge UI** — render `[reachability=...]` titles
-  with collapsible default for `unused` / `transitive_only`.
-- **`malicious_dependency` category UI** — separate inbox
-  section; subtype-specific iconography (typosquat / install-
-  script / known-malicious / no-license).
-- **License compliance tab** — pie chart from
-  `tool_metadata.licenses.by_family`; auto-rotate-credential
-  CTA for `info_disclosure` license findings; three policy
-  checkboxes (`license_allow_copyleft` / `_unknown` /
-  `_weak_copyleft`).
-- **`only_reachable=True` checkbox** for zero-noise dep-CVE
-  view. Engine default is False (demote-but-emit); the toggle
-  flips to suppress.
-- **OSSF malicious feed indicator** — `tool_metadata.malicious
-  .by_indicator.known_malicious` count; show "OSSF feed last
-  refreshed Xh ago" from `feed_meta.ossf_malicious`
-  cache row.
+- Onboarding flow ingests repo path / git URL → triggers
+  this phase's pipeline.
+- Reachability badge UI, malicious-dependency inbox, license
+  compliance tab, `only_reachable` toggle, OSSF feed indicator —
+  see [`AISecurityEngineerUX.md`](./AISecurityEngineerUX.md)
+  §13a (PR #219 wrapper work-list) + Phase A (onboarding) /
+  Phase B (findings inbox) / Phase C (compliance).
 
 ---
 
@@ -726,29 +680,13 @@ refresh status against the table above. Three valid choices:
    reporting (via `record_feed_status`), error isolation,
    fallback policy.
 
-### 5a.6. Wrapper requests from §5a
+### 5a.6. Wrapper consumers
 
-Cross-referenced in §14.6.
-
-- **Cron / sidecar setup in onboarding** — wrapper provisions
-  the threat-intel daemon (`python -m strix.threat_intel
-  .refresh` daily + `python -m strix.threat_intel.streaming`
-  long-running). Customers shouldn't have to wire this
-  themselves.
-- **Feed staleness indicator** — read `feed_meta` cache table;
-  show "KEV last updated 4h ago / GHSA last updated 2h ago"
-  on the dashboard. Red badge when last-polled > 24h.
-- **Real-time intel banner** — when `event_stream.jsonl` has
-  recent `kev_added` events, surface them in a top-banner
-  "X new KEV-listed CVEs match your dependencies" with click-
-  through to the relevant SCA findings.
-- **Daemon liveness** — `feed_polled` events at 5-min cadence
-  prove the streaming daemon is alive. Wrapper's status page
-  shows green/red based on most-recent event timestamp.
-- **Per-feed fallback messaging** — when a feed returns
-  `status=error`, the wrapper renders "Feed X is currently
-  unavailable; using last-known-good cache from Yh ago" rather
-  than implying total failure.
+Cron / sidecar provisioning, feed staleness indicator, real-time
+intel banner, daemon liveness page, and per-feed fallback
+messaging are wrapper work — see
+[`AISecurityEngineerUX.md`](./AISecurityEngineerUX.md) §13a.4
+(cron / daemon work).
 
 ---
 
@@ -847,29 +785,13 @@ stays valid as these land):
 
 ### Wrapper dependency
 
-**Existing ask:**
-- PR-comment bot (Phase A) uses `sast_findings.json` artifact for inline
-  comments. **Update**: SARIF 2.1.0 output is the production artifact
-  (Phase 7.5 shipped); the wrapper integrates with GitHub Code
-  Scanning natively rather than parsing markdown.
-
-**New requests from PR #219** (cross-referenced in §14.6):
-- **GitHub Code Scanning integration** — wrapper opts into SARIF
-  output by passing `scan_sast(sarif_output_path=...)`. Path
-  defaults to alongside `vulnerabilities.json`. Calibrated
-  severity in SARIF `level`; calibration breadcrumb in
-  `properties.calibration` (so reviewers see WHY a finding's
-  severity changed).
-- **"Install Semgrep" CTA** — when
-  `tool_metadata.engine_available=False`, surface install
-  instructions inline rather than failing the scan.
-- **PR-mode indicator** — `tool_metadata.diff_scope.applied=
-  True` triggers a "PR mode: scanned N changed files" badge.
-- **Calibration counts** — `tool_metadata.calibration.{bumped,
-  demoted,unchanged}` powers a "we filtered N noise findings"
-  metric.
-- **Daily SAST refresh cron** — `python -m strix.sast.refresh`
-  runs `semgrep --update`. Wrapper-side cron / sidecar.
+PR-comment bot (Phase A) consumes the SARIF artifact for inline
+comments via GitHub Code Scanning native integration (Phase 7.5
+shipped, so markdown-parsing is no longer needed). The other PR #219
+asks — Code Scanning opt-in flag, "Install Semgrep" CTA, PR-mode
+indicator, calibration-counts metric, daily SAST refresh cron — are
+documented in [`AISecurityEngineerUX.md`](./AISecurityEngineerUX.md)
+§13a (PR #219 wrapper work-list) + Phase A (PR-comment bot).
 
 ---
 
@@ -941,8 +863,11 @@ Heuristic to identify endpoints backed by an LLM:
 - Coverage of OWASP LLM Top 10 (2024) categories LLM01–LLM10
 
 ### Wrapper dependency
-- Compliance dashboard needs LLM-feature findings tagged for AI-act / GDPR /
-  EU AI Regulation evidence (Phase C).
+
+Compliance dashboard needs LLM-feature findings tagged for AI-act /
+GDPR / EU AI Regulation evidence — see
+[`AISecurityEngineerUX.md`](./AISecurityEngineerUX.md) Phase C
+(compliance tab).
 
 ---
 
@@ -1062,30 +987,12 @@ when it lands (Phase 13.5).
 
 ### Wrapper dependency
 
-Cross-referenced in §14.6.
-
-- **Behavioural tab** — render `category=anomaly` findings in
-  a dedicated tab with per-class iconography (`status_flip` /
-  `error_string_present` / `latency_outlier_3sigma` /
-  `new_keys_in_json` / `header_set_change` / `shape_outlier`).
-- **Endpoint reference panel** — for each baseline'd endpoint,
-  show the captured profile (status distribution, latency
-  p50/p99, body-length p50/p99, JSON keys) as the "what's
-  normal here" context next to anomaly findings.
-- **Real-time KEV banner** — subscribe to `event_stream.jsonl`
-  via tail-since-timestamp; surface new KEV listings in a top
-  banner (covered in §5a.6 above).
-- **Daemon-liveness indicator** — `feed_polled` events at
-  5-min cadence prove the streaming daemon is alive; wrapper
-  shows green/red based on most-recent event.
-- **Timing-oracle confidence badge** — render
-  `tool_metadata.distinct_count / pairs_analysed` as
-  "statistical confidence" alongside the finding. The blind-
-  injection signal is statistical, not deterministic; the
-  wrapper should communicate that.
-- **Mutation-fuzzer corpus view** — `tool_metadata.shape_outliers`
-  + `outlier_indices` from `scan_response_anomaly` highlights
-  outlier responses in the probe-history viewer.
+Behavioural tab UI, endpoint reference panel, real-time KEV banner,
+daemon-liveness indicator, timing-oracle confidence badge, and
+mutation-fuzzer corpus view are all wrapper work — see
+[`AISecurityEngineerUX.md`](./AISecurityEngineerUX.md) §13a (PR #219
+wrapper work-list) + Phase B (findings inbox) / Phase F (continuous
+monitoring).
 
 ---
 
@@ -1267,25 +1174,12 @@ existing threat-intel cache but doesn't share the `iac/` module.
 
 ### Wrapper dependency
 
-Cross-referenced in §14.6.
-
-- **Cloud-posture dashboard tile** — group IaC findings by
-  platform (`[iac:vercel]` / `[iac:netlify]` / `[iac:cloudflare]`
-  / `[iac:docker]`). One tile per platform with severity
-  rollup.
-- **Platform-specific iconography** — Vercel triangle /
-  Netlify diamond / Cloudflare orange / Docker blue. Each
-  finding card carries the platform badge.
-- **"Affects EVERY environment" warning** — IaC findings
-  apply to every env that shares the file (dev / staging /
-  prod). The wrapper should make this explicit in the finding
-  card so reviewers don't think it's per-env.
-- **Cloud API onboarding flag** (Phase 11.4 deferred) — when
-  customer connects AWS/GCP/Azure read-only creds, surface
-  "Cloud-posture scanning ON". Until 11.4 ships, render as
-  "Coming soon — file-based IaC scanning available now".
-- **Container image scanning** (Phase 11.5 deferred) — when
-  it ships, image findings will share the IaC dashboard tile.
+Cloud-posture dashboard tile, platform-specific iconography (Vercel /
+Netlify / Cloudflare / Docker), "affects every environment" warning,
+cloud API onboarding flag (Phase 11.4 deferred), and container image
+scanning (Phase 11.5 deferred) are all wrapper work — see
+[`AISecurityEngineerUX.md`](./AISecurityEngineerUX.md) §13a (PR #219
+wrapper work-list) + Phase B (findings inbox) / Phase A (onboarding).
 
 ---
 
@@ -1551,130 +1445,21 @@ The wrapper's customer-onboarding flow assumes:
 
 ---
 
-## 14.6. PR #219 — consolidated wrapper changelog
+## 14.6. Wrapper changelog
 
-**Single review surface for the wrapper team.** Everything in
-this PR that touches the wrapper, in one list.
+The consolidated wrapper-side work-list for PR #219 (new artifacts
+to render, finding categories needing UI, cron / daemon work,
+onboarding extensions, lead-agent behavioural changes) lives in
+[`AISecurityEngineerUX.md`](./AISecurityEngineerUX.md) §13a.
 
-### New artifacts to subscribe to / render
+That doc is the single review surface for the wrapper team —
+splitting it across the engine + UX docs duplicated content and
+made review noisy.
 
-1. **`finding_chains.json`** (§4a v2) — sits next to
-   `vulnerabilities.json`. Each chain has `chain_id`,
-   `finding_ids`, `severity` (max), `summary` (one-liner),
-   `categories[]`, `chain_type` (`sca_dast` / `sast_dast` /
-   `iac_dast` / `mixed`). Render as collapsible card grouping
-   N findings.
-2. **`compliance_evidence.json`** (§4b) — per-control verdict
-   (`fail` / `warn` / `info` / `pass` / `untested`) for SOC 2
-   / ISO 27001 / PCI DSS 4.0 / OWASP ASVS 4.0. Build the
-   compliance tab from this.
-3. **`event_stream.jsonl`** (Phase 9.1) — bounded ring buffer
-   (10k events, atomic rotation). Subscribe via tail-since-
-   timestamp. Events: `kev_added` (new CISA KEV listing) /
-   `feed_polled` (daemon liveness).
-4. **`behavioural_baselines.jsonl`** (Phase 9.2) — append-only,
-   last-line-wins per endpoint. Powers the "what's normal for
-   this endpoint" reference panel.
-5. **SARIF 2.1.0** (Phase 7.5) — opt-in via
-   `scan_sast(sarif_output_path=...)`. Calibrated severity in
-   `level` + breadcrumb in `properties.calibration`.
-   GitHub Code Scanning ingests this natively — see
-   `AISecurityEngineerUX.md` PR-comment-bot section.
-
-### New finding categories to add UI for
-
-| Category | Source | UI request |
-|---|---|---|
-| `malicious_dependency` | Phase 6.6 | Dedicated section in inbox; subtype-specific iconography |
-| `license_violation` | Phase 6.7 | License tab + auto-rotate-credential CTA for `info_disclosure` family |
-| `anomaly` | Phase 9.3 | Behavioural tab; per-anomaly-class iconography |
-| `finding_chain` | §4a v2 | Chain inbox |
-| `compliance_violation` | §4b | Compliance tab; per-control card |
-| IaC platform-prefixed (`[iac:vercel]`, `[iac:cloudflare]`, etc.) | Phase 11.3 | Group by deploy platform; platform-specific iconography |
-
-### New per-finding metadata to render
-
-* **Reachability badge** — title contains
-  `[reachability=direct_import\|transitive_only\|unused\|unknown]`.
-  Default-collapse `unused` / `transitive_only` with a toggle.
-  Show original-vs-calibrated severity.
-* **KEV badge** — title contains
-  `[KEV — actively exploited]`. Always render; KEV overrides
-  reachability demotion.
-* **Calibration breadcrumb** — SAST findings carry
-  `[calibrated:high→critical]` in title when severity changed
-  due to route-reachability or test-file demotion.
-* **Chain badge** — chain findings prefix `[chain:<chain_type>]`
-  e.g. `[chain:sca_dast]`.
-
-### New cron / daemon work for the wrapper
-
-* **Daily threat-intel refresh** — `python -m
-  strix.threat_intel.refresh` (KEV / EPSS / NVD / GHSA / OSSF
-  malicious / popular packages). Recommend 1am UTC.
-* **5-min KEV streaming daemon** — `python -m
-  strix.threat_intel.streaming`. Long-running process under
-  systemd / k8s / docker `restart: unless-stopped`. Wrapper
-  surfaces "real-time intel ON" indicator from the
-  `feed_polled` events.
-* **SAST registry refresh** — `python -m strix.sast.refresh`
-  (semgrep --update). Recommend 1:30am UTC after threat-intel.
-
-### New tool_metadata aggregates to surface
-
-* `tool_metadata.reachability.by_status` — pie/bar chart on
-  the SCA dashboard tile.
-* `tool_metadata.malicious.by_indicator` — typosquat /
-  install-script / no-license / known-malicious counts.
-* `tool_metadata.licenses.by_family` — license inventory pie
-  chart for SOC 2 OPS-3 evidence.
-* `tool_metadata.calibration.{bumped,demoted,unchanged}` (SAST)
-  — "we filtered N noise findings via reachability" badge.
-* `tool_metadata.diff_scope.applied` (SAST) — PR-mode
-  indicator.
-* `tool_metadata.summary` (compliance) — per-framework
-  verdict counts.
-
-### Lead-agent behavioural changes the wrapper should know about
-
-* **POST-SCAN STEPS** — every scan now ends with two extra
-  tool calls: `correlate_findings` then
-  `emit_compliance_evidence`. Wrapper should expect both
-  artifacts to exist after a scan completes; absence indicates
-  scan didn't finish cleanly.
-* **`category="lead"`** is the canonical agent category
-  (legacy `Root Agent` mapping unchanged).
-* **Dispatch guard** — `create_agent` is in the lead's
-  blocklist; it cannot spawn sub-agents. The wrapper's
-  agent-graph view collapses to a single root node.
-
-### Onboarding requests
-
-* **Compliance framework picker** — let the customer choose
-  SOC 2 / ISO 27001 / PCI DSS / OWASP ASVS during onboarding;
-  pass to `emit_compliance_evidence(frameworks=[...])` to
-  scope the artifact.
-* **Reachability default** — `with_reachability=True` is
-  engine default; wrapper UI toggle for "show all findings
-  including unused" (which sets the runtime view filter, not
-  the engine arg).
-* **`only_reachable=True` checkbox** for zero-noise dep-CVE
-  dashboards.
-* **License policy** — three checkboxes mapping to
-  `license_allow_copyleft` / `license_allow_unknown` /
-  `license_allow_weak_copyleft`. Default: copyleft + unknown
-  flagged, weak_copyleft allowed.
-
-### Scope clarifications (still wrapper-side, NOT engine)
-
-* Auditor-handover PDF generation
-* Customer attestation collection
-* Risk register management
-* Per-customer dashboard branding
-* SOC 2 trust portal
-* Bug-bounty triage UX
-* Multi-tenant isolation / SSO
-* Compliance policy templating
+The engine doc keeps §14.1–14.5 above as the **artifact-emission
+contract** (what the engine emits + the data shapes). Per-section
+asks (§4a v2, §4b, §5a, Phase 6/7/9/11) link out to the UX doc
+for the matching wrapper work item.
 
 ---
 
