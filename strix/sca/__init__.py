@@ -17,6 +17,10 @@ Architecture
                   the new GHSA feed.
     scanner.py  — walk a repo path, find lockfiles, parse, match,
                   emit findings.
+    reachability.py — Phase 6.4. Per-package import-level
+                  reachability scoring; demotes severity for
+                  unused / transitive-only packages, never demotes
+                  KEV-listed CVEs.
     tools.py    — `scan_sca_lockfiles` LLM-facing specialist.
 
 GHSA feed lives in `strix/threat_intel/feeds/ghsa.py`.
@@ -35,5 +39,15 @@ Public API
 
 from strix.sca.match import find_vulnerabilities  # noqa: F401
 from strix.sca.parsers.base import Package, parse_lockfile  # noqa: F401
+from strix.sca.reachability import (  # noqa: F401
+    PackageReachability,
+    REACH_DIRECT,
+    REACH_TRANSITIVE_ONLY,
+    REACH_UNKNOWN,
+    REACH_UNUSED,
+    annotate_matches as annotate_reachability,
+    classify_package,
+    collect_repo_imports,
+)
 from strix.sca.scanner import scan_repo_lockfiles  # noqa: F401
 from strix.sca.tools import scan_sca_lockfiles  # noqa: F401

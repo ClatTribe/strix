@@ -1,0 +1,89 @@
+target_type: local_code
+target: src
+description: |
+  Reachability-efficiency benchmark for Phase 6.4. Lockfile has 6
+  vulnerable packages; app.js imports only 3 of them. The
+  remaining 3 are in the dep tree (npm install gives you
+  node_modules entries) but no source file references them.
+
+  This deliberately overstates the reduction we'd see on a real
+  repo — production codebases have varied import patterns and
+  some legitimate transitive deps. The point isn't "every fixture
+  prunes 50%"; it's "the pipeline can prune at all", and the
+  ratio is auditable from `tool_metadata.reachability.by_status`.
+
+  Reachability claims (auditable in test_runner_paired_targets.py
+  and test_reachability_integration.py):
+
+    direct_import : 3   (lodash, ejs, express)
+    unused        : 3   (ws, minimist, yargs)
+    transitive_only : 0
+    unknown       : 0
+
+  Severity demotion:
+
+    lodash, ejs, express     → high  (kept)
+    ws, minimist, yargs      → low   (demoted from high; -2 tiers)
+
+  KEV / EPSS overrides are exercised in unit tests, not here.
+
+expected_findings:
+  # ---- imported / reachable — high severity preserved ----
+  - id: reach-lodash
+    category: vulnerable_dependency
+    cwe: CWE-1321
+    file: package-lock.json
+    severity: high
+    must_find: true
+    description: lodash@4.17.20 imported via `require('lodash')` → high preserved.
+
+  - id: reach-ejs
+    category: vulnerable_dependency
+    cwe: CWE-94
+    file: package-lock.json
+    severity: critical
+    must_find: true
+    description: ejs@3.1.6 imported via `require('ejs')` → critical preserved.
+
+  - id: reach-express
+    category: vulnerable_dependency
+    cwe: CWE-601
+    file: package-lock.json
+    severity: medium
+    must_find: false   # advisory severity drift; gated soft
+    description: express@4.16.0 imported via `require('express')`.
+
+  # ---- unimported / unused — demoted from high → low ----
+  - id: reach-ws
+    category: vulnerable_dependency
+    cwe: CWE-400
+    file: package-lock.json
+    severity: low
+    must_find: true
+    reachability: unused
+    description: |
+      ws@5.2.2 has a known ReDoS CVE but no source file imports
+      it. Demoted from high → low. The finding still surfaces so
+      reviewers see the dead dep + can rip it out.
+
+  - id: reach-minimist
+    category: vulnerable_dependency
+    cwe: CWE-1321
+    file: package-lock.json
+    severity: low
+    must_find: true
+    reachability: unused
+    description: |
+      minimist@1.2.5 prototype pollution; not imported by app
+      code → demoted high → low.
+
+  - id: reach-yargs
+    category: vulnerable_dependency
+    cwe: CWE-1321
+    file: package-lock.json
+    severity: low
+    must_find: true
+    reachability: unused
+    description: |
+      yargs@16.0.0 (range-vulnerable via deprecated dep
+      `y18n`); not imported → demoted high → low.

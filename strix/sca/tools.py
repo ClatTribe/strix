@@ -45,8 +45,15 @@ def _emit_finding(
     *,
     package_match,
     repo_path: str,
+    reachability=None,
 ) -> str | None:
-    """Emit one finding per vulnerable package via tracer."""
+    """Emit one finding per vulnerable package via tracer.
+
+    `reachability` (Phase 6.4) is an optional `PackageReachability`
+    record. When present, the finding's severity is demoted per the
+    record's `adjusted_severity()` rule (KEV / EPSS override
+    demotion), and the writeup includes the import evidence so
+    reviewers see *why* a finding was demoted (or kept high)."""
     try:
         from strix.telemetry.tracer import get_global_tracer
 
@@ -77,6 +84,15 @@ def _emit_finding(
             sev = "critical"
         elif (headline.epss or 0.0) >= 0.5:
             sev = _bump_severity(sev)
+        # Phase 6.4 — apply reachability demotion last; it's a no-op
+        # when KEV / EPSS≥0.5 (override happens inside
+        # adjusted_severity).
+        if reachability is not None:
+            sev = reachability.adjusted_severity(
+                sev,
+                kev=headline.kev,
+                epss=headline.epss,
+            )
 
         cve_summary_lines = []
         for c in sorted_cves[:5]:
@@ -98,6 +114,12 @@ def _emit_finding(
         )
         if headline.kev:
             title += " [KEV — actively exploited]"
+        # Reachability suffix — kept short so the title stays
+        # scannable. Only added when status differs from
+        # `direct_import` (the default-case "code uses it" status
+        # adds noise to every title otherwise).
+        if reachability is not None and reachability.status != "direct_import":
+            title += f" [reachability={reachability.status}]"
 
         return tracer.add_vulnerability_report(
             title=title,
@@ -143,8 +165,20 @@ def _emit_finding(
                 f"Package: {pkg.name}\n"
                 f"Version: {pkg.version}\n"
                 f"Dev-only: {pkg.dev_only}\n"
-                f"Direct dependency: {pkg.direct}\n\n"
-                f"Matching CVEs ({len(cves)}):\n"
+                f"Direct dependency: {pkg.direct}\n"
+                + (
+                    f"Reachability: {reachability.status} — "
+                    f"{reachability.reason}\n"
+                    + (
+                        "Importing files: "
+                        + ", ".join(reachability.importing_files[:5])
+                        + ("\n" if reachability.importing_files else "\n")
+                        if reachability.importing_files
+                        else "Importing files: (none)\n"
+                    )
+                    if reachability is not None else ""
+                )
+                + f"\nMatching CVEs ({len(cves)}):\n"
                 + "\n".join(cve_summary_lines)
             ),
             poc_description=(
@@ -214,6 +248,8 @@ def scan_sca_lockfiles(
     min_epss: float = 0.0,
     skip_dev_only: bool = True,
     max_lockfiles: int = 50,
+    with_reachability: bool = True,
+    only_reachable: bool = False,
 ) -> SpecialistResult:
     """Walk `repo_path` for lockfiles, parse each, match against the
     threat-intel cache, emit one finding per vulnerable package.
@@ -227,12 +263,25 @@ def scan_sca_lockfiles(
         skip_dev_only: skip dev-only dependencies (default True —
             production runtime exposure is the main concern).
         max_lockfiles: hard cap to bound runtime.
+        with_reachability: when True (default), enrich each finding
+            with import-level reachability (Phase 6.4). Demotes
+            severity for `unused` (-2 tiers) and `transitive_only`
+            (-1 tier) packages. NEVER demotes KEV / EPSS≥0.5
+            findings. Set False to skip the source-tree walk on
+            very large repos.
+        only_reachable: when True, suppress findings for packages
+            classified as `unused` or `transitive_only`. Useful for
+            dashboards that want zero-noise dep CVE views; default
+            False so demoted findings are still surfaced (the
+            wrapper renders the demotion badge).
 
     Auto-emits one finding per vulnerable package. Findings are
     severity-calibrated:
       * CISA KEV match → critical (actively exploited)
       * EPSS ≥ 0.5    → escalate one tier
       * Otherwise highest CVE severity wins
+      * Reachability `unused`     → demote 2 tiers (unless KEV/EPSS)
+      * Reachability `transitive_only` → demote 1 tier (unless KEV/EPSS)
     """
     if not isinstance(repo_path, str) or not repo_path.strip():
         return SpecialistResult(status="error", error="repo_path required")
@@ -272,8 +321,55 @@ def scan_sca_lockfiles(
             tool_metadata=report.to_dict(),
         )
 
+    # ----- Phase 6.4: import-level reachability annotation -----
+    # Computed once over the whole repo, indexed by (ecosystem, name)
+    # so the per-package emit loop is O(1) lookup. We always pull
+    # the dict (cheap), but skip the source-tree walk entirely when
+    # `with_reachability=False`.
+    reachability_map: dict = {}
+    reachability_stats = {
+        "direct_import": 0, "transitive_only": 0,
+        "unused": 0, "unknown": 0,
+    }
+    if with_reachability:
+        try:
+            from strix.sca.reachability import annotate_matches as _annotate
+
+            reachability_map = _annotate(
+                report.vulnerable_packages, repo_path=repo_path,
+            )
+            for r in reachability_map.values():
+                reachability_stats[r.status] = (
+                    reachability_stats.get(r.status, 0) + 1
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("sca: reachability annotate failed: %s", e, exc_info=True)
+            reachability_map = {}
+
+    suppressed_by_reachability = 0
+
     for match in report.vulnerable_packages:
-        rid = _emit_finding(package_match=match, repo_path=repo_path)
+        reach = reachability_map.get(
+            (match.package.ecosystem, match.package.name)
+        )
+        # `only_reachable` policy: drop findings for unused /
+        # transitive packages entirely. KEV / EPSS≥0.5 still passes
+        # (those override demotion via `adjusted_severity`).
+        if (
+            only_reachable
+            and reach is not None
+            and reach.status in ("unused", "transitive_only")
+            and not match.has_kev
+            and (match.max_epss or 0.0) < 0.5
+        ):
+            suppressed_by_reachability += 1
+            continue
+
+        rid = _emit_finding(
+            package_match=match,
+            repo_path=repo_path,
+            reachability=reach,
+        )
         if rid:
             emitted_count += 1
         sev = match.severity_max
@@ -281,11 +377,25 @@ def scan_sca_lockfiles(
             sev = "critical"
         elif match.max_epss >= 0.5 and sev != "critical":
             sev = _bump_severity(sev)
+        # Apply reachability demotion AFTER KEV/EPSS escalation —
+        # the override happens inside `adjusted_severity` so KEV
+        # findings can't be quietly demoted by a "we don't see the
+        # import" signal.
+        if reach is not None:
+            sev = reach.adjusted_severity(
+                sev,
+                kev=match.has_kev,
+                epss=match.max_epss,
+            )
+        title_suffix = ""
+        if reach is not None and reach.status != "direct_import":
+            title_suffix = f" [reachability={reach.status}]"
         drafts.append(FindingDraft(
             title=(
                 f"Vulnerable dependency `{match.package.ecosystem}:"
                 f"{match.package.name}@{match.package.version}` "
                 f"({len(match.cves)} CVE{'s' if len(match.cves) > 1 else ''})"
+                f"{title_suffix}"
             )[:480],
             severity=sev,
             cwe=None,
@@ -299,6 +409,7 @@ def scan_sca_lockfiles(
             f"vuln_dep: {match.package.display_name} → "
             f"{len(match.cves)} CVE(s)"
             + (" [KEV]" if match.has_kev else "")
+            + (f" [{reach.status}]" if reach is not None else "")
         )
 
     # SecurityContext + decision_log
@@ -361,5 +472,13 @@ def scan_sca_lockfiles(
             "kev_count": report.kev_count,
             "critical_count": report.critical_count,
             "findings_emitted_to_tracer": emitted_count,
+            # Phase 6.4 — per-status reachability rollup. Lets the
+            # wrapper render a "we filtered N noise findings" badge
+            # without re-walking the source tree itself.
+            "reachability": {
+                "enabled": with_reachability,
+                "by_status": reachability_stats,
+                "suppressed": suppressed_by_reachability,
+            },
         },
     )

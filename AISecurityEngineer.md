@@ -229,9 +229,24 @@ only in production telemetry.
 
 ## 5. Phase 6 — SCA + Supply Chain (highest customer-value next phase)
 
-**Status:** 6.1 / 6.2 / 6.3 / 6.5 landed in **PR #219** (2026-05-10).
-Reachability (6.4), malicious-package detection (6.6), and license
+**Status:** 6.1 / 6.2 / 6.3 / 6.4 / 6.5 landed in **PR #219**
+(2026-05-10). Malicious-package detection (6.6) and license
 compliance (6.7) are scoped as follow-up PRs.
+
+**Phase 6.4 (reachability) shipped as v1**: import-level only.
+`scan_sca_lockfiles` now classifies every vulnerable package as
+`direct_import` / `transitive_only` / `unused` / `unknown` based
+on whether app source files reference the package by name.
+Severity demotes -1 tier for `transitive_only`, -2 for `unused`;
+`direct_import` and `unknown` are no-ops. KEV / EPSS≥0.5 override
+demotion (the threat is real even if the local import graph
+doesn't reflect it). The headline efficiency claim — "30-60% noise
+reduction on the high tier for real repos" — is measured by the
+new `benchmarks/per_target/fixtures/code/sca-reachability/`
+fixture, which plants a 3-direct/3-unused split and asserts the
+filtered high-count drops from 4 → 1. Function-level reachability
+(call-graph from the specific vulnerable function to a real entry
+point) is **6.4 v2**, deferred to a future PR.
 
 **Goal**: detect dependency-CVE risk in `package-lock.json` / `requirements.txt`
 / `Cargo.lock` / `Gemfile.lock` / `composer.lock`.
@@ -277,7 +292,7 @@ scan_sca_lockfiles(
 Walks `repo_path` for lockfiles, parses, matches, emits one finding per
 matching CVE.
 
-#### 6.4. Reachability analysis (Endor Labs differentiator) — **deferred follow-up**
+#### 6.4. Reachability analysis (Endor Labs differentiator) — **v1 shipped in #219**
 Use existing `taint_analysis` + `build_code_map` to filter SCA findings:
 "you have CVE-2024-X in package P, but your code never calls the vulnerable
 function." Drops CVSS by ~2 for unreachable, raises severity for reachable.
