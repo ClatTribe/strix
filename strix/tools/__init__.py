@@ -45,6 +45,8 @@ from strix.iac import tools as _iac_tools  # noqa: F401, E402
 # Phase 9 — behavioural anomaly diff + timing oracle.
 from strix.tools.anomaly_diff import tools as _anomaly_tools  # noqa: F401, E402
 from strix.tools.timing_oracle import tools as _timing_tools  # noqa: F401, E402
+# §4a v2 — cross-category finding-chain artifact.
+from strix.finding_chains import tools as _chain_tools  # noqa: F401, E402
 from .thinking import *  # noqa: F403
 from .todo import *  # noqa: F403
 from .web_search import *  # noqa: F403

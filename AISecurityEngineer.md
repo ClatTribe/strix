@@ -176,6 +176,55 @@ This is the single-lead *replacement* for the deprecated multi-agent
 subscribe" pattern. One agent, one conversation, the chain happens
 inside the lead's reasoning rather than across agents.
 
+### 4a.2b. Output-time correlation: `finding_chains.json` (shipped in #219)
+
+Prompt-time correlation (above) reduces wasted probes during the
+scan. **Output-time correlation** rolls the emitted finding set
+into `FindingChain` artifacts so the wrapper renders one
+exploit chain across categories instead of N disconnected
+reports.
+
+`strix/finding_chains/` ships:
+
+- **5 deterministic linker heuristics** — same input, same chains.
+  No LLM call. ~ms on typical finding volumes.
+  - `link_sca_to_dast_by_cwe` — SCA vulnerable dep + DAST
+    exploit sharing CWE family on same target.
+  - `link_sast_to_dast_by_cwe_endpoint` — SAST sink + DAST
+    exploit sharing CWE family on same target.
+  - `link_iac_to_dast_by_category` — IaC misconfig + DAST
+    runtime confirmation (CORS / open-redirect categories).
+  - `link_anomaly_to_specialist` — Phase 9 anomaly diff +
+    matching DAST specialist on same endpoint.
+  - `link_sca_to_sast_by_package` — SCA flagged package +
+    SAST hit in code that mentions the package.
+- **Union-find chain builder** — runs every linker, unions the
+  edge set, emits one `FindingChain` per connected component
+  of size ≥ 2. Singletons are excluded — they're already in
+  the source artifact.
+- **`correlate_findings` LLM tool** — reads
+  `vulnerabilities.json`, builds chains, writes
+  `finding_chains.json`. Always-on in the lead's core catalog
+  (asset-type-agnostic). The prompt addendum tells the lead
+  to run it before `finish_scan`.
+
+Per-chain rollup: max severity across the chain, category
+union, narrative one-liner ("Vulnerable dependency
+`npm:lodash@4.17.20` → Prototype pollution at /api/merge"),
+chain type (`sca_dast` / `sast_dast` / `iac_dast` /
+`sca_sast_dast` / `mixed`).
+
+What this is NOT: an LLM-driven correlator. The linkers are
+heuristic; over-linking risks fake chains. A future iteration
+could add LLM-driven narrative generation but the determinism
+matters — the chain artifact is part of the run's reproducible
+telemetry.
+
+Adding linkers: drop a `link_<name>(findings) -> list[ChainLink]`
+function, append to `LINKER_REGISTRY`, add positive + negative
+tests in `tests/finding_chains/test_links.py`. No engine
+changes needed.
+
 ### 4a.3. How each new phase plugs in
 
 Every phase ahead adds at least one new tool to the catalog. Each one

@@ -49,6 +49,13 @@ _CORE_TOOLS: frozenset[str] = frozenset({
     "finish_scan",
     # Notes / scratchpad
     "create_note", "list_notes", "get_note", "update_note", "delete_note",
+    # §4a v2 — cross-category finding-chain correlator. Runs at
+    # the end of the scan to bundle related findings (SCA dep +
+    # DAST exploit, SAST sink + IaC misconfig, etc.) into single
+    # `FindingChain` entries. Always-on because correlation is
+    # asset-type-agnostic — a chain can span any combination of
+    # categories the lead happens to cover.
+    "correlate_findings",
 })
 
 

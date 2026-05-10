@@ -277,7 +277,17 @@ _CROSS_ASSET_BLOCK = (
     "tells you the path exists; the matching specialist confirms "
     "it's exploitable with payload extraction).\n"
     "Cross-asset findings should reference both surfaces in "
-    "`description` + `technical_analysis` so reviewers see the chain."
+    "`description` + `technical_analysis` so reviewers see the chain.\n"
+    "\n"
+    "POST-SCAN STEP. Before calling `finish_scan`, ALWAYS run "
+    "`correlate_findings` (no args needed in the default case). "
+    "It reads every emitted finding and bundles related ones "
+    "into single `FindingChain` artifacts written to "
+    "`finding_chains.json`. The wrapper renders a chain as ONE "
+    "exploit narrative spanning categories (SCA package + DAST "
+    "exploit + SAST sink) instead of N disconnected reports. "
+    "Pure Python, ~ms, no LLM cost. Skipping it leaves correlation "
+    "value on the table."
 )
 
 
