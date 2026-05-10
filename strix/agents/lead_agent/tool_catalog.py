@@ -56,6 +56,13 @@ _CORE_TOOLS: frozenset[str] = frozenset({
     # asset-type-agnostic — a chain can span any combination of
     # categories the lead happens to cover.
     "correlate_findings",
+    # §4b — compliance evidence emission. Maps every emitted
+    # finding to SOC 2 / ISO 27001 / PCI DSS / OWASP ASVS
+    # control IDs via CWE + category, writes
+    # `compliance_evidence.json`. Always-on; the wrapper
+    # consumes the artifact for compliance dashboards / auditor
+    # handoff.
+    "emit_compliance_evidence",
 })
 
 

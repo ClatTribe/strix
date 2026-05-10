@@ -47,6 +47,8 @@ from strix.tools.anomaly_diff import tools as _anomaly_tools  # noqa: F401, E402
 from strix.tools.timing_oracle import tools as _timing_tools  # noqa: F401, E402
 # §4a v2 — cross-category finding-chain artifact.
 from strix.finding_chains import tools as _chain_tools  # noqa: F401, E402
+# §4b — compliance evidence emission (SOC 2 / ISO 27001 / PCI / ASVS).
+from strix.compliance import tools as _compliance_tools  # noqa: F401, E402
 from .thinking import *  # noqa: F403
 from .todo import *  # noqa: F403
 from .web_search import *  # noqa: F403

@@ -276,6 +276,141 @@ only in production telemetry.
 
 ---
 
+## 4b. Cross-cutting: compliance evidence emission
+
+> **Why this is its own section, not a phase.** §1 names "security
+> and compliance" as the dual product goal. §3.1 splits ownership:
+> the engine emits structured artifacts; the wrapper builds compliance
+> dashboards / auditor PDFs / customer trust portals. But until §4b
+> the engine wasn't producing the **machine-readable mapping** that
+> turns finding files into compliance evidence. The wrapper had to
+> reinvent the CWE → control mapping per customer.
+>
+> Like §4a (asset-aware planning) and §5a (dynamic refresh), this
+> is cross-cutting — it touches every category of finding (SCA,
+> SAST, IaC, DAST, anomaly, finding-chain) without belonging to any
+> single one.
+>
+> Shipped in PR #219 alongside §4a v2's finding-chain artifact. The
+> two artifacts pair: chains group findings by exploit narrative;
+> compliance evidence maps findings to control IDs.
+
+**The engine commitment** (per §3.1): emit
+`compliance_evidence.json` alongside `vulnerabilities.json` +
+`finding_chains.json`. The wrapper consumes these for compliance
+dashboards / auditor handoff. The engine does NOT generate
+auditor-facing prose, policy templates, or per-customer dashboards
+— those stay wrapper-side.
+
+### 4b.1. Frameworks shipped (v1)
+
+| Framework | Coverage | Carrier domain |
+|---|---|---|
+| **SOC 2** Trust Service Criteria | 12 controls (CC6 / CC7 / CC8 / A1 / C1) | App-layer security findings |
+| **ISO 27001:2022** Annex A | 17 controls (A.5 / A.8) | Application + supply-chain |
+| **PCI DSS 4.0** | 16 requirements (Req 4 / 6 / 7 / 8 / 11) | Payment-handling SaaS |
+| **OWASP ASVS 4.0** | 28 verifiable requirements | Reference for the others |
+
+Deferred to follow-up PRs:
+- HIPAA Security Rule (164.308 / 164.312) — needs legal review
+- GDPR Art. 32 / EU AI Act
+- CIS Benchmarks — infrastructure-class, closer to IaC rules
+
+### 4b.2. How findings get mapped to controls
+
+Auto-derived from CWE — no per-rule retrofit needed. `mappings.py`
+has a CWE → list-of-(framework, control_id) table for every CWE
+strix's specialists emit (~33 CWEs). When CWE is absent (SCA's
+`vulnerable_dependency` category), category-based fallback kicks
+in.
+
+Same input → same control set. Pure lookup; no LLM, no inference.
+
+Example: CWE-89 (SQL Injection) maps to
+`{soc2:CC6.1, iso27001:A.8.26, iso27001:A.8.28, pci_dss:6.5.1,
+owasp_asvs:V5.3.4}`. A finding emitting `cwe=CWE-89` automatically
+flags all five.
+
+### 4b.3. Per-control verdict logic
+
+Each control gets one of five verdicts:
+
+| Verdict | Meaning |
+|---|---|
+| `fail` | At least one finding at high or critical severity hits this control |
+| `warn` | At least one finding at low or medium severity hits this control |
+| `info` | Only info-severity findings hit this control |
+| `pass` | Control is in strix's coverage AND no findings hit it |
+| `untested` | Control is in the framework catalog but **no rule in our corpus maps to it** — a coverage gap the wrapper should surface |
+
+`untested` is the most actionable signal for compliance teams:
+"these are the SOC 2 / ISO 27001 controls strix can't validate
+automatically; you need other tooling for them."
+
+### 4b.4. The artifact
+
+`compliance_evidence.json`:
+```json
+{
+  "schema_version": 1,
+  "frameworks": ["soc2", "iso27001", "pci_dss", "owasp_asvs"],
+  "controls": [
+    {
+      "framework": "soc2",
+      "control_id": "CC6.1",
+      "fqid": "soc2:CC6.1",
+      "title": "Logical access security",
+      "verdict": "fail",
+      "finding_ids": ["f1", "f2"],
+      "finding_severities": ["critical", "high"],
+      "rationale": "Control hit by 2 finding(s)..."
+    },
+    ...
+  ],
+  "summary": {
+    "soc2": {"fail": 3, "warn": 2, "info": 0, "pass": 5, "untested": 2, "total": 12},
+    ...
+  }
+}
+```
+
+### 4b.5. Tool: `emit_compliance_evidence`
+
+Always-on in the lead's core catalog. Runs at scan-end (lead
+prompt addendum says: after `correlate_findings`, before
+`finish_scan`). Pure Python, ~ms, no LLM cost.
+
+Failed + warned controls bubble up as `category=compliance_violation`
+findings so the lead sees them in its result loop. `pass` /
+`info` / `untested` controls don't pollute the lead's context —
+they're informational, the wrapper renders them from the artifact
+directly.
+
+### 4b.6. What this is NOT
+
+- Not a substitute for a compliance program. We provide
+  application-security evidence; auditors still need governance,
+  risk management, vendor diligence, employee training, etc.
+- Not auditor-grade prose generation. The artifact is structured
+  data; the wrapper renders human-friendly explanations.
+- Not a per-customer mapping engine. The CWE → control map is
+  static + version-controlled; customisations belong in the
+  wrapper's policy layer.
+
+### 4b.7. Adding a new framework
+
+1. Add control catalog dict in `frameworks.py`.
+2. Map every CWE in `CWE_TO_CONTROLS` that touches the new
+   framework.
+3. Map any category in `CATEGORY_TO_CONTROLS` that touches it.
+4. Add a test pinning the canonical CWEs (CWE-79, CWE-89,
+   CWE-798) hit the new framework's catalog.
+
+The anti-rot test `test_every_cwe_mapped_control_exists_in_catalog`
+catches typos in either side automatically.
+
+---
+
 ## 5. Phase 6 — SCA + Supply Chain (highest customer-value next phase)
 
 **Status:** 6.1 / 6.2 / 6.3 / 6.4 v1 / 6.5 / 6.6 / 6.7 landed in
