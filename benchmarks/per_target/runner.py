@@ -132,6 +132,8 @@ def docker_down(fixture_dir: Path, manifest: dict[str, Any]) -> None:
 
 
 def resolve_target(fixture_dir: Path, manifest: dict[str, Any]) -> str:
+    """Single-target resolver. Kept for back-compat with all existing
+    fixtures (`flask-vuln`, `juiceshop`, `sca-vuln-deps`)."""
     target = manifest.get("target")
     if target is None:
         raise ValueError("expected.yaml missing 'target'")
@@ -144,14 +146,117 @@ def resolve_target(fixture_dir: Path, manifest: dict[str, Any]) -> str:
     return str(target)
 
 
+def resolve_targets(
+    fixture_dir: Path, manifest: dict[str, Any],
+) -> list[tuple[str, str]]:
+    """Multi-target resolver. Returns a list of (target_type, target)
+    tuples. Three accepted manifest shapes:
+
+      1. **Single-target legacy.** `target_type:` + `target:` → one
+         tuple. Existing fixtures use this; nothing changes.
+
+      2. **Paired-asset.** `target_type:` + `target:` (the primary)
+         PLUS an `additional_targets:` list of `{type, target}` →
+         multiple tuples. Path-typed targets (local_code / repository)
+         are resolved relative to the fixture dir like the single-target
+         path; URL / IP / domain targets pass through.
+
+      3. **All-list.** `targets:` is a list of `{type, target}` →
+         multiple tuples. No primary. Reserved for future fixtures
+         that don't have an obvious primary asset.
+
+    Examples:
+      # legacy (single):
+      target_type: web_application
+      target: http://localhost:3000
+
+      # paired (web + code):
+      target_type: web_application
+      target: http://localhost:3000
+      additional_targets:
+        - type: local_code
+          target: src/
+
+      # all-list:
+      targets:
+        - type: web_application
+          target: http://localhost:3000
+        - type: local_code
+          target: src/
+    """
+    out: list[tuple[str, str]] = []
+
+    def resolve_one(tt: str, t: str) -> str:
+        if tt in ("local_code", "repository"):
+            cand = (fixture_dir / t).resolve()
+            if cand.exists():
+                return str(cand)
+        return str(t)
+
+    if isinstance(manifest.get("targets"), list) and manifest["targets"]:
+        for entry in manifest["targets"]:
+            if not isinstance(entry, dict):
+                continue
+            tt = (entry.get("type") or "").strip()
+            tg = entry.get("target")
+            if tt and tg:
+                out.append((tt, resolve_one(tt, tg)))
+        if out:
+            return out
+
+    primary_type = (manifest.get("target_type") or "").strip()
+    primary_target = manifest.get("target")
+    if primary_type and primary_target is not None:
+        out.append((primary_type, resolve_one(primary_type, primary_target)))
+
+    for entry in (manifest.get("additional_targets") or []):
+        if not isinstance(entry, dict):
+            continue
+        tt = (entry.get("type") or "").strip()
+        tg = entry.get("target")
+        if tt and tg:
+            out.append((tt, resolve_one(tt, tg)))
+
+    if not out:
+        raise ValueError(
+            "expected.yaml missing 'target' / 'target_type' (or 'targets' list)"
+        )
+    return out
+
+
 def run_strix(
-    target: str, scan_mode: str, run_dir: Path, extra_args: list[str]
+    targets: str | list[tuple[str, str]],
+    scan_mode: str,
+    run_dir: Path,
+    extra_args: list[str],
 ) -> tuple[int, float]:
-    cmd = ["strix", "-n", "-t", target, "-m", scan_mode] + extra_args
+    """Invoke the strix CLI.
+
+    `targets` accepts either:
+      * a bare string (legacy single-target path used by every fixture
+        before the paired-asset benchmark), OR
+      * a list of (target_type, target) tuples — passed as repeated
+        `-t` flags. The CLI accepts `--target` / `-t` with
+        `action="append"`, so multiple flags route into
+        `LeadAgent`'s scan_config and the per-target-type catalog
+        filter unions across all of them.
+    """
+    if isinstance(targets, str):
+        target_args = ["-t", targets]
+        printable = targets
+    else:
+        target_args = []
+        printable_parts: list[str] = []
+        for _tt, t in targets:
+            target_args += ["-t", t]
+            printable_parts.append(t)
+        printable = " + ".join(printable_parts)
+    cmd = ["strix", "-n", *target_args, "-m", scan_mode] + extra_args
     print(f"[runner] {' '.join(cmd)}")
     start = time.time()
     proc = subprocess.run(cmd, cwd=run_dir, env=os.environ.copy())
     duration = time.time() - start
+    print(f"[runner] target(s): {printable}  duration={duration:.1f}s")
     return proc.returncode, duration
 
 
@@ -468,13 +573,23 @@ def main() -> int:
 
     manifest, expected = parse_expected(fixture_dir)
 
+    # Resolve all targets up-front. Single-target manifests yield a
+    # one-element list; paired-asset manifests yield N elements. The
+    # primary `target` field below stays a string for back-compat with
+    # baseline result files that index it as a scalar.
+    target_tuples = resolve_targets(fixture_dir, manifest)
+    primary_target = target_tuples[0][1]
+    primary_type = target_tuples[0][0]
+    additional_targets = [
+        {"type": tt, "target": t} for tt, t in target_tuples[1:]
+    ]
+
     if args.rescore:
         # Skip strix entirely; just parse + score the existing run output.
         run_dir = Path(args.rescore).resolve()
         if not run_dir.exists():
             print(f"error: --rescore dir not found: {run_dir}", file=sys.stderr)
             return 2
-        target = resolve_target(fixture_dir, manifest)
         exit_code = 0
         duration = 0.0
         findings = collect_findings(run_dir)
@@ -490,9 +605,16 @@ def main() -> int:
         docker_running = False
         try:
             docker_running = docker_up(fixture_dir, manifest)
-            target = resolve_target(fixture_dir, manifest)
+            # Single target → pass the bare string for parity with the
+            # legacy CLI invocation captured in baseline results.
+            # Paired → pass the (type, target) list so the CLI receives
+            # repeated -t flags.
+            run_targets: str | list[tuple[str, str]] = (
+                primary_target if len(target_tuples) == 1
+                else target_tuples
+            )
             exit_code, duration = run_strix(
-                target, args.scan_mode, run_dir, args.strix_arg
+                run_targets, args.scan_mode, run_dir, args.strix_arg
             )
             findings = collect_findings(run_dir)
             stats = collect_stats(run_dir)
@@ -506,8 +628,9 @@ def main() -> int:
         "fixture": str(fixture_dir.relative_to(Path.cwd()))
         if str(fixture_dir).startswith(str(Path.cwd()))
         else str(fixture_dir),
-        "target": target,
-        "target_type": manifest.get("target_type"),
+        "target": primary_target,
+        "target_type": primary_type or manifest.get("target_type"),
+        "additional_targets": additional_targets,
         "scan_mode": args.scan_mode,
         "model": os.environ.get("STRIX_LLM"),
         "strix_exit_code": exit_code,
