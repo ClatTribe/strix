@@ -1,0 +1,12 @@
+# Pinned production deps
+django==4.2.0
+requests==2.28.2
+flask==2.0.3
+
+# Editable install — should be skipped
+-e git+https://github.com/example/proj.git@abc#egg=foo
+
+# Comment-only line
+
+# Range specifier — should be skipped
+urllib3>=1.0

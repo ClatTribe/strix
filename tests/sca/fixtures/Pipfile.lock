@@ -1,0 +1,19 @@
+{
+    "_meta": {"hash": {"sha256": "fake"}, "pipfile-spec": 6},
+    "default": {
+        "django": {
+            "hashes": ["sha256:fake"],
+            "index": "pypi",
+            "version": "==4.2.0"
+        },
+        "requests": {
+            "hashes": ["sha256:fake"],
+            "version": "==2.28.2"
+        }
+    },
+    "develop": {
+        "pytest": {
+            "version": "==7.4.0"
+        }
+    }
+}

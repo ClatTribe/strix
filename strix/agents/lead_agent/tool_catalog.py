@@ -82,6 +82,10 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # daily-updated). Single-tool fan-out across CVE / exposed-
         # panel / default-cred / misconfig templates.
         "scan_nuclei_templates",
+        # Phase 6 — SCA / dependency CVE detection. Useful for web-app
+        # targets when the repo is co-located with the deployed URL
+        # (typical vibe-coded SaaS workflow).
+        "scan_sca_lockfiles",
         # Recon
         "fingerprint_tech_stack", "bfs_crawl",
         "well_known_harvest", "webapp_recon_pipeline",
@@ -109,15 +113,21 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # Code-target specialists
         "build_code_map", "taint_analysis", "score_reachability",
         "secrets_scan", "sbom_extract",
+        # Phase 6 — SCA / supply-chain (npm/pypi/cargo/ruby/composer/go)
+        # backed by threat-intel cache (KEV / EPSS / NVD / GHSA).
+        "scan_sca_lockfiles",
         # File primitives
         "terminal_execute",
         # Threat-intel for code targets
+        "lookup_known_cves", "lookup_cve_by_id",
     }),
     "local_code": frozenset({
         "scan_misconfig",
         "build_code_map", "taint_analysis", "score_reachability",
         "secrets_scan", "sbom_extract",
+        "scan_sca_lockfiles",  # Phase 6 — SCA
         "terminal_execute",
+        "lookup_known_cves", "lookup_cve_by_id",
     }),
     "domain": frozenset({
         "scan_misconfig",

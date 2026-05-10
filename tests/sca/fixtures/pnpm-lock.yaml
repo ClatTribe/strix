@@ -1,0 +1,21 @@
+lockfileVersion: '6.0'
+
+packages:
+  /express@4.17.1:
+    resolution:
+      integrity: sha512-fake==
+    dev: false
+
+  /lodash@4.17.20:
+    resolution:
+      integrity: sha512-fake==
+    dev: false
+
+  /jest@29.5.0:
+    resolution:
+      integrity: sha512-fake==
+    dev: true
+
+  /'@scope/utility@1.5.2':
+    resolution:
+      integrity: sha512-fake==

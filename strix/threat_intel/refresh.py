@@ -24,6 +24,7 @@ import logging
 import sys
 
 from strix.threat_intel.feeds.epss import poll_epss
+from strix.threat_intel.feeds.ghsa import poll_ghsa
 from strix.threat_intel.feeds.kev import poll_kev
 from strix.threat_intel.feeds.nvd import poll_nvd_recent
 from strix.threat_intel.lookup import cache_status
@@ -33,6 +34,7 @@ _FEEDS = {
     "kev": "CISA Known Exploited Vulnerabilities",
     "epss": "FIRST.org EPSS scores",
     "nvd": "NIST NVD CVE 2.0 (recent window)",
+    "ghsa": "GitHub Security Advisories (per-ecosystem)",
 }
 
 
@@ -79,6 +81,11 @@ def main(argv: list[str] | None = None) -> int:
         "--nvd-days",
         type=int, default=14,
         help="NVD recent-window size in days (1-120, default 14).",
+    )
+    parser.add_argument(
+        "--ghsa-days",
+        type=int, default=30,
+        help="GHSA recent-window in days (default 30; 365 for backfill).",
     )
     parser.add_argument(
         "--epss-all",
@@ -145,6 +152,16 @@ def main(argv: list[str] | None = None) -> int:
         results["epss"] = r
         print(f"  EPSS: status={r['status']} ingested={r.get('ingested')} "
               f"skipped={r.get('skipped')}")
+        if r["status"] != "ok":
+            overall_ok = False
+            print(f"  error: {r.get('error')}", file=sys.stderr)
+
+    if "ghsa" in requested:
+        print(f"[refresh] polling GHSA (last {args.ghsa_days} days) ...")
+        r = poll_ghsa(days_window=args.ghsa_days)
+        results["ghsa"] = r
+        print(f"  GHSA: status={r['status']} ingested={r.get('ingested')} "
+              f"pages={r.get('pages')}")
         if r["status"] != "ok":
             overall_ok = False
             print(f"  error: {r.get('error')}", file=sys.stderr)

@@ -34,6 +34,10 @@ from .terminal import *  # noqa: F403
 from .traffic_ingest import *  # noqa: F403
 from .replay_mutation import *  # noqa: F403  # workitem.md Phase 5.5
 from .nuclei_runner import *  # noqa: F403  # community-corpus runner
+
+# SCA / supply-chain analysis (Phase 6) — registers
+# `scan_sca_lockfiles`.
+from strix.sca import tools as _sca_tools  # noqa: F401, E402
 from .thinking import *  # noqa: F403
 from .todo import *  # noqa: F403
 from .web_search import *  # noqa: F403
