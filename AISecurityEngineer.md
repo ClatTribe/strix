@@ -106,6 +106,127 @@ These apply across every phase:
 
 ---
 
+## 4a. Cross-cutting: single-lead asset-aware planning
+
+> **Why this is its own section, not a phase.** Every phase below adds a
+> *capability* (SCA, SAST, AI-feature security, IaC, ...). What turns a
+> capability bundle into an "AI security engineer" is how the single lead
+> agent **plans across assets** with them. That planning layer cuts across
+> every phase and gets revisited as each new capability lands. Treating it
+> as a phase would imply "we ship it once and move on"; it isn't.
+>
+> This section was retro-added in PR #219 alongside Phase 6 because that
+> was the first phase where the cross-asset story became concrete (SCA on
+> the repo + DAST on the URL = paired scan of the same vibe-coded SaaS).
+> Future phases extend the same machinery rather than rebuild it.
+
+**The architectural commitment** (since roadmap §8.5 Phase 3): one lead
+agent, one conversation, one LLM client. No sub-agents. The lead's tool
+catalog is filtered per `target_type` so it never sees irrelevant tools.
+The deprecated multi-agent "specialist hands findings up to coordinator"
+pattern is gone.
+
+**The two questions that single-lead has to answer well**:
+
+1. *Given the asset(s) in scope, where do I start?* — **asset-aware routing**
+2. *Given a finding on asset A, what does it imply for asset B?* — **cross-asset correlation**
+
+### 4a.1. Asset-aware routing
+
+For each registered target type, the lead's system prompt names the
+**anchor tool(s)** it should start with — the highest-EV first probe for
+that asset class. The mapping (per `strix/agents/lead_agent/lead_agent.py`
+`_PER_ASSET_GUIDANCE`):
+
+| Target type        | Anchor                                                  | Why                                                       |
+|--------------------|---------------------------------------------------------|-----------------------------------------------------------|
+| `web_application`  | `webapp_recon_pipeline` → `fingerprint_tech_stack` → specialists | Recon-first; tech stack picks the relevant specialists    |
+| `repository`       | `scan_sca_lockfiles` first                              | Cheapest, deterministic, surfaces the #1 vuln class       |
+| `local_code`       | `scan_sca_lockfiles` then SAST                          | Same as above; SCA precedes SAST in expected impact       |
+| `domain`           | `domain_recon_pipeline` → `subdomain_takeover_check`    | Network footprint before any web probing                  |
+| `ip_address`       | port scan → `tls_audit` → pivot to web-app              | Network-first, then HTTP if a web service is found        |
+
+This is intentionally **prescriptive guidance, not enforcement**. The
+catalog filter is the enforcement (the lead literally cannot call
+`browser_action` on a `repository` target — the tool isn't in scope).
+The prompt block tells the lead *which of the in-scope tools is the
+right first probe*.
+
+### 4a.2. Cross-asset correlation
+
+When the run has more than one target type in scope (the typical
+vibe-coded SaaS case: deployed URL + co-located source repo), the
+prompt appends an explicit cross-asset block with concrete chains:
+
+- **SCA → DAST**. SCA flags `lodash<4.17.21` → prototype pollution →
+  probe the live URL for unsafe object merge endpoints / client-side
+  template injection.
+- **SAST → DAST**. `taint_analysis` flags an `eval` sink reachable from
+  `/api/exec` → confirm it's reachable in the live deployment with
+  `scan_cmd_injection`.
+- **DAST → SCA/SAST**. Live SQL error in a response → grep the repo for
+  the offending query → emit a code-level follow-up finding so the
+  wrapper has both the runtime evidence and the fix location.
+- **Convergent evidence bumps severity**. A package shows up in *both*
+  the SCA inventory AND a DAST behavioural probe → it's a real exploit
+  path, not just an advisory match → escalate.
+
+This is the single-lead *replacement* for the deprecated multi-agent
+"specialist publishes finding to a shared bus and other specialists
+subscribe" pattern. One agent, one conversation, the chain happens
+inside the lead's reasoning rather than across agents.
+
+### 4a.3. How each new phase plugs in
+
+Every phase ahead adds at least one new tool to the catalog. Each one
+must answer:
+
+1. **Which `target_type` catalog(s) does the tool belong to?** — defined
+   in `strix/agents/lead_agent/tool_catalog.py`.
+2. **Should it be the anchor for that type, or a follow-up?** — if
+   anchor, named in `_PER_ASSET_GUIDANCE`.
+3. **What cross-asset chain does it enable?** — added to the
+   `_CROSS_ASSET_BLOCK` examples when material.
+
+Concretely for the phases below:
+- **Phase 7 (SAST)** — anchor for `repository`/`local_code` after SCA;
+  cross-asset link: SAST sink + SCA package version → DAST probe target.
+- **Phase 8 (AI-feature security)** — sub-anchor for `web_application`
+  when LLM endpoints are detected; cross-asset link: AI prompt-injection
+  attack chains into business-logic abuse.
+- **Phase 11 (IaC / cloud posture)** — new target type `iac_repository`
+  or shares `repository`; cross-asset link: misconfigured Vercel env
+  variable exposure → DAST probe for that endpoint.
+
+### 4a.4. Validation: paired-asset benchmark
+
+Per-phase recall has always been measured on single-target fixtures
+(`benchmarks/per_target/fixtures/code/flask-vuln/`,
+`web/juiceshop/`). Phase 6 added `code/sca-vuln-deps/` for SCA-specific
+recall. The deliberate gap: there's no fixture today that exercises
+*paired* scans (a repo + the URL it deploys to) — that's where the
+cross-asset chains actually fire.
+
+**Open follow-up**: build a `web+code/vibe-app/` fixture that's both a
+checked-in repo AND a docker-compose deployment of the app, with
+`expected.yaml` entries that require BOTH a DAST emit and a matching
+SCA emit (e.g. `lodash@4.17.20` in lockfile + reachable
+prototype-pollution behaviour on the URL). Without this, "single-lead
+correlates across assets" stays an architectural assertion — measurable
+only in production telemetry.
+
+### 4a.5. What this is NOT
+
+- Not a separate planning agent. The cross-asset block is a prompt
+  augmentation; the lead's reasoning loop is unchanged.
+- Not a workflow engine. There's no DAG, no scheduler, no retry policy.
+  The lead picks the order; the prompt suggests good defaults.
+- Not a static rule set. The chains in `_CROSS_ASSET_BLOCK` are seeds.
+  The lead can (and should) generate novel chains in-context once it
+  has evidence — that's the §1.4 "Compose primitives" capability.
+
+---
+
 ## 5. Phase 6 — SCA + Supply Chain (highest customer-value next phase)
 
 **Status:** 6.1 / 6.2 / 6.3 / 6.5 landed in **PR #219** (2026-05-10).
