@@ -250,6 +250,10 @@ def scan_sca_lockfiles(
     max_lockfiles: int = 50,
     with_reachability: bool = True,
     only_reachable: bool = False,
+    with_malicious_detection: bool = True,
+    with_license_check: bool = True,
+    license_allow_copyleft: bool = False,
+    license_allow_unknown: bool = False,
 ) -> SpecialistResult:
     """Walk `repo_path` for lockfiles, parse each, match against the
     threat-intel cache, emit one finding per vulnerable package.
@@ -274,6 +278,19 @@ def scan_sca_lockfiles(
             dashboards that want zero-noise dep CVE views; default
             False so demoted findings are still surfaced (the
             wrapper renders the demotion badge).
+        with_malicious_detection: when True (default), run the
+            Phase 6.6 heuristics — typosquat detection (Levenshtein
+            ≤ 2 from popular package names), install-script flag
+            (npm `hasInstallScript`), and missing-license signal.
+            Emits `category="malicious_dependency"` findings.
+        with_license_check: when True (default), run the Phase 6.7
+            license classifier and emit `category="license_violation"`
+            findings for copyleft / commercial-restricted /
+            unknown licenses (per the policy below).
+        license_allow_copyleft: when True, GPL/AGPL/SSPL deps don't
+            emit. Use for OSS / GPL-licensed projects.
+        license_allow_unknown: when True, missing-license deps
+            don't emit. Rarely the right call.
 
     Auto-emits one finding per vulnerable package. Findings are
     severity-calibrated:
@@ -412,6 +429,119 @@ def scan_sca_lockfiles(
             + (f" [{reach.status}]" if reach is not None else "")
         )
 
+    # ----- Phase 6.6: malicious-package heuristics -----
+    # Operates on the FULL package set (not just vulnerable_packages
+    # — typosquats and install-script flags are independent of CVE
+    # match status, since the whole point is "this package isn't in
+    # any CVE feed yet but smells like trouble").
+    malicious_stats = {"typosquat": 0, "install_script": 0, "no_license": 0}
+    if with_malicious_detection:
+        try:
+            from strix.sca.malicious import (
+                analyse_packages as _analyse_malicious,
+                INDICATOR_TYPOSQUAT,
+                INDICATOR_INSTALL_SCRIPT,
+                INDICATOR_NO_LICENSE,
+            )
+
+            all_packages: list = []
+            for lf_path in report.lockfiles_scanned:
+                from strix.sca.parsers.base import parse_lockfile as _parse_lf
+                try:
+                    all_packages.extend(_parse_lf(lf_path))
+                except Exception:  # noqa: BLE001
+                    pass
+            for malreport in _analyse_malicious(all_packages):
+                if skip_dev_only and malreport.package.dev_only:
+                    continue
+                for ind in malreport.indicators:
+                    pkg = malreport.package
+                    title = (
+                        f"Suspicious dependency `{pkg.ecosystem}:"
+                        f"{pkg.name}@{pkg.version}` [{ind.indicator}]"
+                    )
+                    drafts.append(FindingDraft(
+                        title=title[:480],
+                        severity=ind.severity,
+                        cwe=None,
+                        endpoint=pkg.source_path,
+                        category="malicious_dependency",
+                        verification_status="pattern_match",
+                        confidence=ind.confidence,
+                        description=ind.rationale[:480],
+                    ))
+                    evidence.append(
+                        f"malicious_pattern: {pkg.display_name} → "
+                        f"{ind.indicator} ({ind.severity})"
+                    )
+                    malicious_stats[ind.indicator] = (
+                        malicious_stats.get(ind.indicator, 0) + 1
+                    )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("malicious analysis failed: %s", e, exc_info=True)
+
+    # ----- Phase 6.7: license-compliance check -----
+    license_stats = {
+        "permissive": 0, "weak_copyleft": 0, "copyleft": 0,
+        "commercial_restricted": 0, "unknown": 0,
+    }
+    if with_license_check:
+        try:
+            from strix.sca.licenses import find_license_violations
+
+            # Reuse parsed packages from malicious pass when present;
+            # otherwise re-parse. Cheap because lockfiles are small.
+            license_packages: list = []
+            try:
+                license_packages = list(all_packages)  # type: ignore[name-defined]
+            except NameError:
+                from strix.sca.parsers.base import parse_lockfile as _parse_lf
+                for lf_path in report.lockfiles_scanned:
+                    try:
+                        license_packages.extend(_parse_lf(lf_path))
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            # Bookkeeping rollup for tool_metadata — covers ALL
+            # packages, not just violations, so the wrapper can
+            # render a "license inventory: 80% permissive" pie
+            # chart without re-running the classifier.
+            from strix.sca.licenses import classify_license
+            for pkg in license_packages:
+                if "license" not in pkg.metadata:
+                    continue
+                fam = classify_license(pkg.metadata.get("license"))
+                license_stats[fam] = license_stats.get(fam, 0) + 1
+
+            for v in find_license_violations(
+                license_packages,
+                allow_copyleft=license_allow_copyleft,
+                allow_unknown=license_allow_unknown,
+                skip_dev_only=skip_dev_only,
+            ):
+                pkg = v.package
+                title = (
+                    f"License `{v.license_text}` on "
+                    f"`{pkg.ecosystem}:{pkg.name}@{pkg.version}` "
+                    f"({v.family})"
+                )
+                drafts.append(FindingDraft(
+                    title=title[:480],
+                    severity=v.severity,
+                    cwe=None,
+                    endpoint=pkg.source_path,
+                    category="license_violation",
+                    verification_status="verified",
+                    confidence=0.9,
+                    description=v.rationale[:480],
+                ))
+                evidence.append(
+                    f"license: {pkg.display_name} → "
+                    f"{v.family} ({v.severity})"
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("license analysis failed: %s", e, exc_info=True)
+
     # SecurityContext + decision_log
     try:
         from strix.agents.security_context import record_endpoint
@@ -479,6 +609,22 @@ def scan_sca_lockfiles(
                 "enabled": with_reachability,
                 "by_status": reachability_stats,
                 "suppressed": suppressed_by_reachability,
+            },
+            # Phase 6.6 — malicious-pattern rollup. Per-indicator
+            # counts so the wrapper can render "3 typosquats, 2
+            # install-scripts" headline numbers without recounting.
+            "malicious": {
+                "enabled": with_malicious_detection,
+                "by_indicator": malicious_stats,
+            },
+            # Phase 6.7 — license inventory rollup. Per-family
+            # counts across ALL packages (not just violations) so
+            # the wrapper can render the license-pie chart for
+            # SOC 2 OPS-3 / ISO 27001 evidence without
+            # re-classifying.
+            "licenses": {
+                "enabled": with_license_check,
+                "by_family": license_stats,
             },
         },
     )

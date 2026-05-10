@@ -48,7 +48,17 @@ def parse_package_lock(path: Path) -> list[Package]:
     # v2/v3: packages map keyed by node_modules path.
     packages = doc.get("packages")
     if isinstance(packages, dict):
-        # The empty-key entry "" describes the root project; skip.
+        # Root entry "" lists the top-level direct deps. We use it
+        # to determine direct/transitive without relying on the
+        # `indirect` field (which is rarely populated in v3).
+        root_entry = packages.get("") if isinstance(packages.get(""), dict) else {}
+        root_direct: set[str] = set()
+        for k in ("dependencies", "devDependencies", "peerDependencies",
+                  "optionalDependencies"):
+            d = root_entry.get(k) if isinstance(root_entry.get(k), dict) else {}
+            for n in d:
+                root_direct.add(n.lower().strip())
+
         for pkg_path, info in packages.items():
             if not isinstance(info, dict) or pkg_path == "":
                 continue
@@ -66,17 +76,40 @@ def parse_package_lock(path: Path) -> list[Package]:
             if key in seen:
                 continue
             seen.add(key)
+            # A package is direct iff:
+            #   * its name is in the root entry's deps lists, AND
+            #   * its node_modules path is NOT nested under another
+            #     package (`node_modules/X/node_modules/Y` → Y is
+            #     definitively transitive even if it shares a name
+            #     with a root dep).
+            # Path nesting is the unambiguous signal — count the
+            # number of `node_modules/` segments. > 1 = transitive.
+            nesting_depth = pkg_path.count("node_modules/")
+            is_direct = (
+                nesting_depth <= 1
+                and (not root_direct or name in root_direct)
+            )
+            # Honour explicit `indirect` field if present (rare but
+            # authoritative).
+            if info.get("indirect") is True:
+                is_direct = False
             out.append(Package(
                 ecosystem="npm",
                 name=name,
                 version=version,
                 dev_only=bool(info.get("dev")),
-                direct=info.get("indirect", False) is False,
+                direct=is_direct,
                 source_path=str(path),
                 metadata={
                     "resolved": info.get("resolved", ""),
                     "integrity": info.get("integrity", ""),
                     "license": info.get("license"),
+                    # Phase 6.6: surface npm install-script flag so
+                    # `malicious.py` can flag packages that run
+                    # arbitrary code during `npm install`. Common
+                    # malicious-package vector — Socket.dev /
+                    # Snyk both anchor on this.
+                    "has_install_script": bool(info.get("hasInstallScript")),
                 },
             ))
 

@@ -229,9 +229,9 @@ only in production telemetry.
 
 ## 5. Phase 6 — SCA + Supply Chain (highest customer-value next phase)
 
-**Status:** 6.1 / 6.2 / 6.3 / 6.4 / 6.5 landed in **PR #219**
-(2026-05-10). Malicious-package detection (6.6) and license
-compliance (6.7) are scoped as follow-up PRs.
+**Status:** 6.1 / 6.2 / 6.3 / 6.4 v1 / 6.5 / 6.6 / 6.7 landed in
+**PR #219** (2026-05-10). Function-level reachability (6.4 v2) is
+explicitly deferred — see deferral note below.
 
 **Phase 6.4 (reachability) shipped as v1**: import-level only.
 `scan_sca_lockfiles` now classifies every vulnerable package as
@@ -241,12 +241,42 @@ Severity demotes -1 tier for `transitive_only`, -2 for `unused`;
 `direct_import` and `unknown` are no-ops. KEV / EPSS≥0.5 override
 demotion (the threat is real even if the local import graph
 doesn't reflect it). The headline efficiency claim — "30-60% noise
-reduction on the high tier for real repos" — is measured by the
-new `benchmarks/per_target/fixtures/code/sca-reachability/`
-fixture, which plants a 3-direct/3-unused split and asserts the
-filtered high-count drops from 4 → 1. Function-level reachability
-(call-graph from the specific vulnerable function to a real entry
-point) is **6.4 v2**, deferred to a future PR.
+reduction on the high tier for real repos" — is measured by
+`benchmarks/per_target/fixtures/code/sca-reachability/`, which
+plants a 3-direct/3-unused split and asserts the filtered
+high-count drops from 4 → 1.
+
+**Phase 6.6 (malicious detection) shipped**: typosquat detection
+(Levenshtein ≤ 2 against curated popular-package corpora for npm
++ pypi), `hasInstallScript` flagging on npm packages (medium for
+direct, high for transitive — transitive code at install time is
+the documented vector for `event-stream`-style attacks), and
+missing-license signal. Emits `category="malicious_dependency"`.
+Out of scope for v1 (would need npm/pypi registry API):
+recently-published-with-high-downloads, maintainer-history checks,
+network-call patterns at install time.
+
+**Phase 6.7 (license compliance) shipped**: SPDX classification
+into permissive / weak_copyleft / copyleft /
+commercial_restricted / unknown. Default policy flags copyleft
+(GPL/AGPL/SSPL) + commercial-restricted (BUSL/Elastic) + unknown
+as `license_violation` findings. AGPL specifically calls out the
+SaaS distribution problem in the rationale. `tool_metadata.
+licenses.by_family` exposes the full inventory (not just
+violations) so wrappers can render SOC 2 OPS-3 license-pie
+charts without re-classifying. Compound expressions
+(`(MIT OR Apache-2.0)`) take the most-restrictive family —
+conservative engineering default for auditor sign-off.
+
+**6.4 v2 — deferred**. Function-level reachability (call-graph
+from the specific vulnerable function to a real application entry
+point) is in the same complexity class as building a small
+Semgrep: needs proper AST parsing for JS/TS + Python, type/scope
+resolution, dataflow tracking, and a path-finding pass through
+the call graph. Multi-week project, not a Phase-6 sub-item.
+Tracked as a separate roadmap entry rather than shipped as a
+half-baked v2 — when it lands it'll be the "Endor Labs reachability"
+parity feature on its own.
 
 **Goal**: detect dependency-CVE risk in `package-lock.json` / `requirements.txt`
 / `Cargo.lock` / `Gemfile.lock` / `composer.lock`.
@@ -292,7 +322,7 @@ scan_sca_lockfiles(
 Walks `repo_path` for lockfiles, parses, matches, emits one finding per
 matching CVE.
 
-#### 6.4. Reachability analysis (Endor Labs differentiator) — **v1 shipped in #219**
+#### 6.4. Reachability analysis (Endor Labs differentiator) — **v1 shipped in #219; v2 explicitly deferred**
 Use existing `taint_analysis` + `build_code_map` to filter SCA findings:
 "you have CVE-2024-X in package P, but your code never calls the vulnerable
 function." Drops CVSS by ~2 for unreachable, raises severity for reachable.
@@ -302,7 +332,7 @@ function." Drops CVSS by ~2 for unreachable, raises severity for reachable.
 GHSA's GraphQL API has per-ecosystem advisory data NVD lacks. Daily polling
 into the threat-intel cache. ~600 LOC.
 
-#### 6.6. Malicious package detection (Socket.dev angle) — **deferred follow-up**
+#### 6.6. Malicious package detection (Socket.dev angle) — **v1 shipped in #219**
 Heuristic + LLM-driven:
 - Postinstall scripts that fetch external resources
 - Packages with no GitHub repo / no maintainer history
@@ -311,7 +341,7 @@ Heuristic + LLM-driven:
 - Network-call patterns ("does this package exfil to a non-listed domain?")
 ~900 LOC.
 
-#### 6.7. License compliance — **deferred follow-up**
+#### 6.7. License compliance — **shipped in #219**
 Parse package metadata, flag GPL/AGPL/copyleft/commercial-restricted licenses
 in proprietary code. Maps to OPS-3 for SOC 2. ~400 LOC.
 

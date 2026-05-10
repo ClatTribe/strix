@@ -21,6 +21,12 @@ Architecture
                   reachability scoring; demotes severity for
                   unused / transitive-only packages, never demotes
                   KEV-listed CVEs.
+    malicious.py — Phase 6.6. Typosquat / install-script /
+                  no-license heuristics for unknown-malicious
+                  packages (no CVE feed yet).
+    licenses.py — Phase 6.7. SPDX license classification +
+                  copyleft / commercial-restricted flagging for
+                  SOC 2 OPS-3 license inventory.
     tools.py    — `scan_sca_lockfiles` LLM-facing specialist.
 
 GHSA feed lives in `strix/threat_intel/feeds/ghsa.py`.
@@ -39,6 +45,25 @@ Public API
 
 from strix.sca.match import find_vulnerabilities  # noqa: F401
 from strix.sca.parsers.base import Package, parse_lockfile  # noqa: F401
+from strix.sca.licenses import (  # noqa: F401
+    FAMILY_COMMERCIAL_RESTRICTED,
+    FAMILY_COPYLEFT,
+    FAMILY_PERMISSIVE,
+    FAMILY_UNKNOWN,
+    FAMILY_WEAK_COPYLEFT,
+    LicenseViolation,
+    classify_license,
+    find_license_violations,
+)
+from strix.sca.malicious import (  # noqa: F401
+    INDICATOR_INSTALL_SCRIPT,
+    INDICATOR_NO_LICENSE,
+    INDICATOR_TYPOSQUAT,
+    MaliciousIndicator,
+    PackageMaliciousReport,
+    analyse_package as analyse_malicious_package,
+    analyse_packages as analyse_malicious_packages,
+)
 from strix.sca.reachability import (  # noqa: F401
     PackageReachability,
     REACH_DIRECT,

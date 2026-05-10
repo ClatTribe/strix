@@ -147,6 +147,11 @@ def parse_poetry_or_uv_lock(path: Path) -> list[Package]:
         if key in seen:
             continue
         seen.add(key)
+        # Poetry / uv lockfiles sometimes carry a `description` and
+        # `optional`, but `license` is rarely present (poetry doesn't
+        # write it by default). Surface what we have so 6.7 license
+        # classification can fall back to "unknown" cleanly when
+        # absent rather than silently misclassify as permissive.
         out.append(Package(
             ecosystem="pypi",
             name=name,
@@ -156,6 +161,8 @@ def parse_poetry_or_uv_lock(path: Path) -> list[Package]:
             metadata={
                 "category": category,
                 "optional": bool(entry.get("optional", False)),
+                "license": entry.get("license"),
+                "description": entry.get("description", ""),
             },
         ))
     return out
