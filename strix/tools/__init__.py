@@ -37,6 +37,10 @@ from .thinking import *  # noqa: F403
 from .todo import *  # noqa: F403
 from .web_search import *  # noqa: F403
 
+# Threat-intel daemon — registers lookup_known_cves /
+# lookup_cve_by_id / list_actively_exploited_cves / threat_intel_status.
+from strix.threat_intel import tools as _threat_intel_tools  # noqa: F401, E402
+
 
 __all__ = [
     "ImplementedInClientSideOnlyError",

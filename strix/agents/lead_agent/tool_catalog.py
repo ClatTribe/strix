@@ -38,6 +38,11 @@ _CORE_TOOLS: frozenset[str] = frozenset({
     "check_budget",
     # Threat intel — always-on (read-only, framework provenance)
     "cve_lookup", "nvd_lookup",
+    # Local threat-intel cache (CISA KEV + FIRST EPSS + NVD recent).
+    # Always-on so any specialist that fingerprints a tech stack can
+    # pivot to "what known CVEs apply?".
+    "lookup_known_cves", "lookup_cve_by_id",
+    "list_actively_exploited_cves", "threat_intel_status",
     # Reasoning
     "think",
     # Termination
