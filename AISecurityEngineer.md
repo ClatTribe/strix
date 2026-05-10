@@ -798,6 +798,12 @@ escalate to bounded LLM-driven probe generation.
 
 ## 10. Phase 11 — IaC / cloud posture
 
+**Status:** 11.1 (vibe-coded subset) / 11.3 v1 landed in
+**PR #219** (2026-05-10). Terraform / Pulumi / k8s parsers
+(11.1 enterprise scope), Checkov shell-out (11.2), cloud API
+integration (11.4), and container image scanning (11.5) are
+deferred to follow-up PRs.
+
 **Goal**: scan Terraform / CloudFormation / Pulumi / K8s manifests; audit
 Vercel / Cloudflare / Netlify configs.
 
@@ -807,38 +813,74 @@ Vercel / Cloudflare / Netlify configs.
 
 ### Items
 
-#### 11.1. IaC parsers
-- Terraform (HCL2 parser via `python-hcl2`)
-- CloudFormation (YAML/JSON)
-- Pulumi (Python/TypeScript AST)
-- Kubernetes manifests (YAML)
-- Docker Compose / Dockerfile
-~2,000 LOC.
+#### 11.1. IaC parsers — **vibe-coded subset shipped in #219; enterprise deferred**
+- Terraform (HCL2 parser via `python-hcl2`) — **deferred** (enterprise scope)
+- CloudFormation (YAML/JSON) — **deferred** (enterprise scope)
+- Pulumi (Python/TypeScript AST) — **deferred** (enterprise scope)
+- Kubernetes manifests (YAML) — **deferred** (enterprise scope)
+- Docker Compose / Dockerfile — **shipped in #219**
 
-#### 11.2. Checkov rule integration
+**Shipped in #219**: parsers for `vercel.json`, `netlify.toml`,
+`wrangler.toml`, `Dockerfile`, `docker-compose.yml` — the actual
+deploy surface for vibe-coded SaaS. Strategic call: Terraform /
+Pulumi / k8s are enterprise patterns that vibe-coded apps rarely
+write themselves.
+
+#### 11.2. Checkov rule integration — **deferred to follow-up PR**
 - Shell out to `checkov` (1,500+ rules) OR pure-Python equivalents
 - SOC 2 / CIS / NIST / HIPAA mapping built into Checkov rules
 - Auto-fix suggestions when present
 ~1,000 LOC.
 
-#### 11.3. Edge-platform config audit
+Defer rationale: heavy external dep (`checkov` is ~80MB). The
+v1 native rule pack covers the highest-impact patterns; Checkov
+adds SOC 2 / CIS / NIST mapping which is more relevant after
+the wrapper's compliance dashboard work (Phase A in
+AISecurityEngineerUX.md).
+
+#### 11.3. Edge-platform config audit — **shipped in #219 (22 rules)**
 - Vercel: parse `vercel.json` + project settings via API
 - Cloudflare Workers: `wrangler.toml` + KV bindings + service bindings
 - Netlify: `netlify.toml` + Edge Functions config
 - Specific to vibe-coded apps' deployment surface
-~1,500 LOC.
 
-#### 11.4. Cloud API integration (read-only)
+**Shipped in #219**: 22 native rules across 4 platforms.
+  * **Vercel (5)**: cors-wildcard-with-credentials, redirect-
+    external-host, cron-no-auth-marker, env-hardcoded-secret,
+    function-overly-large-max-duration.
+  * **Netlify (3)**: redirect-external-wildcard,
+    build-env-hardcoded-secret, csp-unsafe-inline-or-eval,
+    cors-wildcard-with-credentials.
+  * **Cloudflare (4)**: vars-hardcoded-secret, r2-public-binding,
+    route-overly-broad, kv-no-preview-id.
+  * **Dockerfile (5)**: no-user-directive, user-root,
+    latest-tag, env-hardcoded-secret, add-from-url.
+  * **docker-compose.yml (5)**: privileged-container,
+    host-network-mode, docker-socket-mount, db-port-exposed,
+    environment-hardcoded-secret.
+
+Cross-asset routing per §4a: IaC misconfig → DAST probe of the
+deployed URL. Lead-agent's cross-asset block now includes the
+specific chain (CORS-wildcard-with-credentials → cors_deep_check
+on the live URL; redirect-external → open_redirect_check; etc.).
+
+Project-settings-API integration (read live Vercel project
+config via `vc.token` etc.) is deferred — needs customer
+credentials, distinct workflow.
+
+#### 11.4. Cloud API integration (read-only) — **deferred to follow-up PR**
 - AWS: IAM policy review, S3 bucket policies, Security Group analysis
 - GCP: project IAM, GCS bucket ACL, Compute firewall
 - Azure: RBAC, storage account access policies
 - Authenticated via customer-supplied read-only credentials
-~3,000 LOC.
+~3,000 LOC. Deferred — requires customer-credential ingestion
+flow (wrapper-side) before the engine can use it.
 
-#### 11.5. Container image scanning
+#### 11.5. Container image scanning — **deferred to follow-up PR**
 - Wrap `trivy` or `grype` for image-CVE scanning
 - Map detected base-image OSes to threat-intel cache
-~800 LOC.
+~800 LOC. Deferred — separate engine concern; reuses the
+existing threat-intel cache but doesn't share the `iac/` module.
 
 ### Deliverables
 - 5 IaC parsers

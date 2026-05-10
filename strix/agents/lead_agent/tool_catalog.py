@@ -90,6 +90,12 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # web-app target with a checked-in repo means we can flag
         # source-level bugs that DAST might miss.
         "scan_sast",
+        # Phase 11 — IaC / cloud posture. Vercel / Netlify /
+        # Cloudflare / Docker configs land in the repo for vibe-
+        # coded SaaS; SAST rules don't cover them. Cross-asset:
+        # IaC misconfigs (CORS-credentials, open redirects)
+        # become DAST hypotheses for the deployed URL.
+        "scan_iac",
         # Recon
         "fingerprint_tech_stack", "bfs_crawl",
         "well_known_harvest", "webapp_recon_pipeline",
@@ -124,6 +130,9 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # OWASP-Top-Ten registry pack. Severity-calibrated against
         # code_map routes + test-file demote.
         "scan_sast",
+        # Phase 11 — IaC / cloud posture (vercel.json / netlify.toml
+        # / wrangler.toml / Dockerfile / docker-compose.yml).
+        "scan_iac",
         # File primitives
         "terminal_execute",
         # Threat-intel for code targets
@@ -135,6 +144,7 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "secrets_scan", "sbom_extract",
         "scan_sca_lockfiles",  # Phase 6 — SCA
         "scan_sast",            # Phase 7 — SAST
+        "scan_iac",             # Phase 11 — IaC
         "terminal_execute",
         "lookup_known_cves", "lookup_cve_by_id",
     }),
