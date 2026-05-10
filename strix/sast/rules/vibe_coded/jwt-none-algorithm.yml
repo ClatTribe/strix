@@ -1,0 +1,32 @@
+rules:
+  - id: strix-jwt-none-algorithm
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      JWT verification accepts the `none` algorithm — anyone can
+      forge a valid-looking token without a signature. Restrict
+      `algorithms` to a specific allowlist (`['HS256']` or
+      `['RS256']`). The vulnerable pattern usually comes from
+      copy-pasted "decode-only" examples that became production
+      verification code.
+    metadata:
+      cwe: "CWE-347"
+      owasp: "A02:2021"
+      category: jwt
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          jwt.verify($T, $K, {algorithms: ["none"]})
+      - pattern: |
+          jwt.verify($T, $K, {algorithms: ["none", ...]})
+      - pattern: |
+          jwt.verify($T, $K, {algorithms: [..., "none"]})
+      - pattern: |
+          jwt.decode($T, ..., algorithms=["none"])
+      - patterns:
+          - pattern: jwt.decode($T, ...)
+          - pattern-not-inside: |
+              jwt.decode($T, ..., algorithms=[...])
+          - pattern-not-inside: |
+              jwt.decode($T, options=...)

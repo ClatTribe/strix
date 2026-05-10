@@ -1,0 +1,32 @@
+rules:
+  - id: strix-localstorage-token-storage
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      Auth token stored in `localStorage`. Any XSS in the app —
+      a single dangerouslySetInnerHTML, a single dependency
+      compromise — gets unrestricted access to the token. Use an
+      httpOnly + Secure + SameSite=Lax cookie set by the server
+      instead; the JS layer never touches the token at all.
+    metadata:
+      cwe: "CWE-922"
+      owasp: "A05:2021"
+      category: info_disclosure
+      confidence: MEDIUM
+      vibe_pattern: true
+    pattern-either:
+      - patterns:
+          - pattern: localStorage.setItem($K, $V)
+          - metavariable-regex:
+              metavariable: $K
+              regex: (?i)^["'](token|jwt|access_?token|refresh_?token|session|sessionId|api_?key|auth_?token)["']$
+      - patterns:
+          - pattern: window.localStorage.setItem($K, $V)
+          - metavariable-regex:
+              metavariable: $K
+              regex: (?i)^["'](token|jwt|access_?token|refresh_?token|session|sessionId|api_?key|auth_?token)["']$
+      - patterns:
+          - pattern: sessionStorage.setItem($K, $V)
+          - metavariable-regex:
+              metavariable: $K
+              regex: (?i)^["'](token|jwt|access_?token|refresh_?token|session|sessionId|api_?key|auth_?token)["']$

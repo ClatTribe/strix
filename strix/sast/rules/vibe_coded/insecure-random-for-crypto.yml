@@ -1,0 +1,36 @@
+rules:
+  - id: strix-insecure-random-for-crypto
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      `Math.random()` / `random.random()` is NOT cryptographically
+      secure — its output is predictable from a small number of
+      observed samples. Used for a session token / password reset
+      / API key, an attacker can reproduce the value. Use
+      `crypto.randomBytes()` (Node) or `secrets.token_*`
+      (Python) instead.
+    metadata:
+      cwe: "CWE-338"
+      owasp: "A02:2021"
+      category: crypto
+      confidence: MEDIUM
+      vibe_pattern: true
+    pattern-either:
+      - patterns:
+          - pattern: |
+              const $X = Math.random()
+          - metavariable-regex:
+              metavariable: $X
+              regex: ^(token|secret|sessionId|session_id|apiKey|api_key|resetToken|reset_token|nonce|csrfToken|csrf_token|otp|inviteCode|invite_code|password|salt)$
+      - patterns:
+          - pattern: |
+              $X = random.random()
+          - metavariable-regex:
+              metavariable: $X
+              regex: ^(token|secret|session_id|api_key|reset_token|nonce|csrf_token|otp|invite_code|password|salt)$
+      - patterns:
+          - pattern: |
+              $X = random.randint($A, $B)
+          - metavariable-regex:
+              metavariable: $X
+              regex: ^(otp|password|invite_code|token)$

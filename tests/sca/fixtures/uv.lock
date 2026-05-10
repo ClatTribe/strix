@@ -1,0 +1,12 @@
+version = 1
+requires-python = ">=3.10"
+
+[[package]]
+name = "flask"
+version = "2.3.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "werkzeug"
+version = "2.3.7"
+source = { registry = "https://pypi.org/simple" }

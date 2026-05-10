@@ -1,0 +1,27 @@
+rules:
+  - id: strix-express-permissive-cors
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      CORS configured to allow any origin AND credentials. This
+      enables cross-origin attackers to read authenticated
+      responses from any site. AI-generated CORS setups commonly
+      copy `origin: '*'` from tutorials without realising it
+      forbids `credentials: true`.
+    metadata:
+      cwe: "CWE-1004"
+      owasp: "A05:2021"
+      category: misconfig
+      confidence: HIGH
+      vibe_pattern: true
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern: |
+                  cors({..., origin: "*", ..., credentials: true, ...})
+          - patterns:
+              - pattern: |
+                  cors({..., credentials: true, ..., origin: "*", ...})
+          - patterns:
+              - pattern: |
+                  $APP.use(cors({..., origin: true, ..., credentials: true, ...}))

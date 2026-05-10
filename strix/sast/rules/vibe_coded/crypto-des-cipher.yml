@@ -1,0 +1,32 @@
+rules:
+  - id: strix-crypto-des-cipher
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      DES / 3DES cipher in use. DES has a 56-bit key which is
+      brute-forceable in hours on modern hardware. 3DES is
+      retired by NIST (2023) and shouldn't be used for new
+      code. Use AES-256-GCM for symmetric encryption.
+    metadata:
+      cwe: "CWE-327"
+      owasp: "A02:2021"
+      category: crypto
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          crypto.createCipheriv("des", ...)
+      - pattern: |
+          crypto.createCipheriv("des-cbc", ...)
+      - pattern: |
+          crypto.createCipheriv("des3", ...)
+      - pattern: |
+          crypto.createCipheriv("des-ede3-cbc", ...)
+      - pattern: |
+          DES.new(...)
+      - pattern: |
+          DES3.new(...)
+      - pattern: |
+          Cipher(algorithms.TripleDES(...), ...)
+      - pattern: |
+          Cipher(algorithms.DES(...), ...)

@@ -1,0 +1,17 @@
+name = "vibe-worker"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+routes = ["*/*"]
+
+[vars]
+ANTHROPIC_KEY = "sk-ant-deadbeefDEADBEEF1234567890abcdef"
+PUBLIC_API_BASE = "https://api.example.com"
+
+[[r2_buckets]]
+binding = "PUBLIC_CDN"
+bucket_name = "vibe-public-assets"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "abc123def456"
+# No preview_id — wrangler dev shares production KV.

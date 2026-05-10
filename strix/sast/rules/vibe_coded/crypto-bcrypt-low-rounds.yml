@@ -1,0 +1,38 @@
+rules:
+  - id: strix-crypto-bcrypt-low-rounds
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      bcrypt called with cost factor < 10. Lower rounds let an
+      attacker brute-force hashed passwords much faster. Modern
+      hardware should handle ≥ 12 in ~250ms. AI-generated code
+      copy-pastes example values from old StackOverflow answers
+      where 8 was the recommendation. Use 12 or higher for
+      passwords.
+    metadata:
+      cwe: "CWE-916"
+      owasp: "A02:2021"
+      category: crypto
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - patterns:
+          - pattern: bcrypt.hash($PWD, $ROUNDS, ...)
+          - metavariable-comparison:
+              metavariable: $ROUNDS
+              comparison: $ROUNDS < 10
+      - patterns:
+          - pattern: bcrypt.hashSync($PWD, $ROUNDS)
+          - metavariable-comparison:
+              metavariable: $ROUNDS
+              comparison: $ROUNDS < 10
+      - patterns:
+          - pattern: bcrypt.genSaltSync($ROUNDS)
+          - metavariable-comparison:
+              metavariable: $ROUNDS
+              comparison: $ROUNDS < 10
+      - patterns:
+          - pattern: bcrypt.gensalt(rounds=$ROUNDS)
+          - metavariable-comparison:
+              metavariable: $ROUNDS
+              comparison: $ROUNDS < 10

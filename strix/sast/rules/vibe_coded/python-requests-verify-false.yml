@@ -1,0 +1,25 @@
+rules:
+  - id: strix-python-requests-verify-false
+    languages: [python]
+    severity: WARNING
+    message: >-
+      `requests.get(verify=False)` (or similar) disables TLS
+      certificate validation — MITM-vulnerable. AI-generated
+      code adds this when the TLS cert was self-signed in
+      development; the flag survives into production. Trust
+      the system CA bundle, OR pass `verify="/path/to/ca.pem"`
+      for a specific custom CA.
+    metadata:
+      cwe: "CWE-295"
+      owasp: "A02:2021"
+      category: crypto
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: requests.get($URL, verify=False, ...)
+      - pattern: requests.post($URL, verify=False, ...)
+      - pattern: requests.put($URL, verify=False, ...)
+      - pattern: requests.request($M, $URL, verify=False, ...)
+      - pattern: httpx.get($URL, verify=False, ...)
+      - pattern: |
+          urllib3.disable_warnings(...)

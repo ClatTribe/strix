@@ -1,0 +1,30 @@
+rules:
+  - id: strix-eval-with-user-input
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      `eval()` / `new Function()` / `exec()` evaluates a string
+      built from user input — remote code execution. There is
+      almost never a legitimate reason to do this in a web app;
+      the AI suggested it as a shortcut for dynamic dispatch.
+      Use a switch/case, an allowlisted dispatch table, or a
+      proper templating engine instead.
+    metadata:
+      cwe: "CWE-94"
+      owasp: "A03:2021"
+      category: cmd_injection
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          eval($REQ.body.$X)
+      - pattern: |
+          eval($REQ.query.$X)
+      - pattern: |
+          eval($REQ.params.$X)
+      - pattern: |
+          new Function($REQ.body.$X, ...)
+      - pattern: |
+          new Function($REQ.query.$X, ...)
+      - pattern: |
+          exec($REQ.$X.$Y)

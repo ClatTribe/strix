@@ -1,0 +1,49 @@
+rules:
+  - id: strix-llm-openai-key-in-source
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      OpenAI / Anthropic API key as a literal in source. Source
+      code ends up in CI artifacts, Docker layers, public GitHub
+      mirrors. Once a key leaks it must be rotated. Read from
+      env: `process.env.OPENAI_API_KEY` (Node) /
+      `os.environ["OPENAI_API_KEY"]` (Python). The SDKs respect
+      this env var by default — usually you can drop the explicit
+      `apiKey:` arg entirely.
+    metadata:
+      cwe: "CWE-798"
+      owasp: "A07:2021"
+      category: info_disclosure
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - patterns:
+          - pattern: |
+              new OpenAI({apiKey: $K, ...})
+          - metavariable-regex:
+              metavariable: $K
+              regex: ^"sk-[A-Za-z0-9_-]+"$
+      - patterns:
+          - pattern: |
+              new Anthropic({apiKey: $K, ...})
+          - metavariable-regex:
+              metavariable: $K
+              regex: ^"sk-ant-[A-Za-z0-9_-]+"$
+      - patterns:
+          - pattern: |
+              openai.api_key = $K
+          - metavariable-regex:
+              metavariable: $K
+              regex: ^"sk-[A-Za-z0-9_-]+"$
+      - patterns:
+          - pattern: |
+              OpenAI(api_key=$K)
+          - metavariable-regex:
+              metavariable: $K
+              regex: ^"sk-[A-Za-z0-9_-]+"$
+      - patterns:
+          - pattern: |
+              Anthropic(api_key=$K)
+          - metavariable-regex:
+              metavariable: $K
+              regex: ^"sk-ant-[A-Za-z0-9_-]+"$

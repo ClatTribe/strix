@@ -1,0 +1,27 @@
+rules:
+  - id: strix-langchain-llmchain-user-template
+    languages: [python, javascript, typescript]
+    severity: WARNING
+    message: >-
+      Langchain `PromptTemplate` / `ChatPromptTemplate` constructed
+      with user input as the template string. This is SSTI in the
+      prompt: variables you didn't intend become substitutable
+      placeholders. Use `from_template($STATIC_STRING)` with a
+      hardcoded template, then pass user data via `format(**vars)`.
+    metadata:
+      cwe: "CWE-1336"
+      owasp: "A03:2021"
+      category: ssti
+      confidence: MEDIUM
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          PromptTemplate(template=request.$X, ...)
+      - pattern: |
+          PromptTemplate.from_template(request.$X)
+      - pattern: |
+          PromptTemplate.from_template($REQ.body.$X)
+      - pattern: |
+          ChatPromptTemplate.from_messages([..., ("user", $REQ.body.$X), ...])
+      - pattern: |
+          ChatPromptTemplate.from_template(request.$X)

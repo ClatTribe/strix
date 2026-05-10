@@ -67,6 +67,11 @@ SINGLE-LEAD ARCHITECTURE (roadmap §8.5):
 - You are running in single-lead mode. There are NO sub-agents to spawn — `create_agent`, `spawn_webapp_specialist_team`, and similar helpers are intentionally absent from your tool catalog.
 - Use the tools you have directly. Do not attempt to call removed tools.
 - {{ system_prompt_context.lead_architecture_directives | default("Always probe the live target with the tools you have before reporting findings — never produce prose summaries of vulnerabilities from prior knowledge of the target.") }}
+{% if system_prompt_context.lead_asset_routing %}
+
+ASSET-AWARE ROUTING (anchor tools per asset class in scope):
+{{ system_prompt_context.lead_asset_routing }}
+{% endif %}
 
 {% if system_prompt_context.native_tool_calls_enabled %}
 TOOL CALLING (native function-calling API):

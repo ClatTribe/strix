@@ -1,0 +1,135 @@
+target_type: local_code
+target: src
+description: |
+  Phase 11 IaC benchmark. Plants a vibe-coded SaaS deploy
+  config across all 4 supported platforms (Vercel + Cloudflare
+  + Docker + docker-compose) — every file has at least one
+  intentional misconfig the bundled rule pack should catch.
+
+  Pure pattern-match — no threat-intel cache needed; no
+  external CLI (semgrep / checkov) needed. The runner can score
+  against this fixture without any setup.
+
+expected_findings:
+  # ---- Vercel ----
+  - id: iac-vercel-cors-creds
+    category: misconfig
+    cwe: CWE-1004
+    file: vercel.json
+    severity: high
+    must_find: true
+
+  - id: iac-vercel-redirect-external
+    category: open_redirect
+    cwe: CWE-601
+    file: vercel.json
+    severity: medium
+    must_find: true
+
+  - id: iac-vercel-cron-no-auth
+    category: authz
+    cwe: CWE-862
+    file: vercel.json
+    severity: medium
+    must_find: true
+
+  - id: iac-vercel-env-secret
+    category: info_disclosure
+    cwe: CWE-798
+    file: vercel.json
+    severity: critical
+    must_find: true
+
+  - id: iac-vercel-max-duration
+    category: misconfig
+    cwe: CWE-400
+    file: vercel.json
+    severity: low
+    must_find: false
+
+  # ---- Cloudflare ----
+  - id: iac-cf-vars-secret
+    category: info_disclosure
+    cwe: CWE-798
+    file: wrangler.toml
+    severity: critical
+    must_find: true
+
+  - id: iac-cf-r2-public
+    category: misconfig
+    cwe: CWE-732
+    file: wrangler.toml
+    severity: medium
+    must_find: true
+
+  - id: iac-cf-route-wildcard
+    category: misconfig
+    cwe: CWE-732
+    file: wrangler.toml
+    severity: high
+    must_find: true
+
+  - id: iac-cf-kv-no-preview
+    category: misconfig
+    cwe: CWE-732
+    file: wrangler.toml
+    severity: low
+    must_find: false
+
+  # ---- Dockerfile ----
+  - id: iac-dockerfile-no-user
+    category: misconfig
+    cwe: CWE-269
+    file: Dockerfile
+    severity: high
+    must_find: true
+
+  - id: iac-dockerfile-latest
+    category: misconfig
+    cwe: CWE-1357
+    file: Dockerfile
+    severity: low
+    must_find: true
+
+  - id: iac-dockerfile-env-secret
+    category: info_disclosure
+    cwe: CWE-798
+    file: Dockerfile
+    severity: critical
+    must_find: true
+
+  - id: iac-dockerfile-add-url
+    category: misconfig
+    cwe: CWE-494
+    file: Dockerfile
+    severity: medium
+    must_find: true
+
+  # ---- docker-compose ----
+  - id: iac-compose-privileged
+    category: misconfig
+    cwe: CWE-269
+    file: docker-compose.yml
+    severity: high
+    must_find: true
+
+  - id: iac-compose-docker-sock
+    category: misconfig
+    cwe: CWE-269
+    file: docker-compose.yml
+    severity: critical
+    must_find: true
+
+  - id: iac-compose-db-port
+    category: misconfig
+    cwe: CWE-668
+    file: docker-compose.yml
+    severity: high
+    must_find: true
+
+  - id: iac-compose-env-secret
+    category: info_disclosure
+    cwe: CWE-798
+    file: docker-compose.yml
+    severity: critical
+    must_find: true

@@ -1,0 +1,29 @@
+rules:
+  - id: strix-react-href-javascript-protocol
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      `<a href={user_input}>` will accept `javascript:` URLs and
+      execute the payload in the victim's browser when clicked.
+      This is XSS even though it doesn't look like XSS. AI-
+      generated React frequently builds links from user-submitted
+      profile URLs, comment links, etc. Validate the protocol —
+      allow `http:` / `https:` / `mailto:` only, OR use the
+      `Linkify`-style sanitisers that strip `javascript:`.
+    metadata:
+      cwe: "CWE-79"
+      owasp: "A03:2021"
+      category: xss
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          <a href={$REQ.body.$X} ... />
+      - pattern: |
+          <a href={$REQ.query.$X} ... />
+      - pattern: |
+          <a href={$REQ.params.$X} ... />
+      - pattern: |
+          <a href={props.$X} ... />
+      - pattern: |
+          <a href={$ITEM.$X} ... />

@@ -38,12 +38,31 @@ _CORE_TOOLS: frozenset[str] = frozenset({
     "check_budget",
     # Threat intel — always-on (read-only, framework provenance)
     "cve_lookup", "nvd_lookup",
+    # Local threat-intel cache (CISA KEV + FIRST EPSS + NVD recent).
+    # Always-on so any specialist that fingerprints a tech stack can
+    # pivot to "what known CVEs apply?".
+    "lookup_known_cves", "lookup_cve_by_id",
+    "list_actively_exploited_cves", "threat_intel_status",
     # Reasoning
     "think",
     # Termination
     "finish_scan",
     # Notes / scratchpad
     "create_note", "list_notes", "get_note", "update_note", "delete_note",
+    # §4a v2 — cross-category finding-chain correlator. Runs at
+    # the end of the scan to bundle related findings (SCA dep +
+    # DAST exploit, SAST sink + IaC misconfig, etc.) into single
+    # `FindingChain` entries. Always-on because correlation is
+    # asset-type-agnostic — a chain can span any combination of
+    # categories the lead happens to cover.
+    "correlate_findings",
+    # §4b — compliance evidence emission. Maps every emitted
+    # finding to SOC 2 / ISO 27001 / PCI DSS / OWASP ASVS
+    # control IDs via CWE + category, writes
+    # `compliance_evidence.json`. Always-on; the wrapper
+    # consumes the artifact for compliance dashboards / auditor
+    # handoff.
+    "emit_compliance_evidence",
 })
 
 
@@ -73,6 +92,31 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_ssti",  # Phase 2.3 — server-side template injection (CWE-1336)
         "scan_path_traversal",  # Phase 2.2 — CWE-22 file-traversal specialist
         "scan_ssrf",  # Phase 2.1 — deterministic SSRF specialist (A10:2021)
+        # Community-corpus runner (nuclei-templates, ~9k probes,
+        # daily-updated). Single-tool fan-out across CVE / exposed-
+        # panel / default-cred / misconfig templates.
+        "scan_nuclei_templates",
+        # Phase 6 — SCA / dependency CVE detection. Useful for web-app
+        # targets when the repo is co-located with the deployed URL
+        # (typical vibe-coded SaaS workflow).
+        "scan_sca_lockfiles",
+        # Phase 7 — SAST. Same co-location rationale as scan_sca_lockfiles:
+        # web-app target with a checked-in repo means we can flag
+        # source-level bugs that DAST might miss.
+        "scan_sast",
+        # Phase 11 — IaC / cloud posture. Vercel / Netlify /
+        # Cloudflare / Docker configs land in the repo for vibe-
+        # coded SaaS; SAST rules don't cover them. Cross-asset:
+        # IaC misconfigs (CORS-credentials, open redirects)
+        # become DAST hypotheses for the deployed URL.
+        "scan_iac",
+        # Phase 9 — behavioural anomaly diff + timing oracle.
+        # Used as complementary signals alongside the static-
+        # payload specialists: anomaly diff catches probe-vs-
+        # baseline divergences; timing oracle confirms blind
+        # injection via 50-sample statistical fit.
+        "scan_response_anomaly",
+        "scan_timing_oracle",
         # Recon
         "fingerprint_tech_stack", "bfs_crawl",
         "well_known_harvest", "webapp_recon_pipeline",
@@ -100,15 +144,30 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # Code-target specialists
         "build_code_map", "taint_analysis", "score_reachability",
         "secrets_scan", "sbom_extract",
+        # Phase 6 — SCA / supply-chain (npm/pypi/cargo/ruby/composer/go)
+        # backed by threat-intel cache (KEV / EPSS / NVD / GHSA).
+        "scan_sca_lockfiles",
+        # Phase 7 — semgrep-driven SAST with vibe-coded rule pack +
+        # OWASP-Top-Ten registry pack. Severity-calibrated against
+        # code_map routes + test-file demote.
+        "scan_sast",
+        # Phase 11 — IaC / cloud posture (vercel.json / netlify.toml
+        # / wrangler.toml / Dockerfile / docker-compose.yml).
+        "scan_iac",
         # File primitives
         "terminal_execute",
         # Threat-intel for code targets
+        "lookup_known_cves", "lookup_cve_by_id",
     }),
     "local_code": frozenset({
         "scan_misconfig",
         "build_code_map", "taint_analysis", "score_reachability",
         "secrets_scan", "sbom_extract",
+        "scan_sca_lockfiles",  # Phase 6 — SCA
+        "scan_sast",            # Phase 7 — SAST
+        "scan_iac",             # Phase 11 — IaC
         "terminal_execute",
+        "lookup_known_cves", "lookup_cve_by_id",
     }),
     "domain": frozenset({
         "scan_misconfig",

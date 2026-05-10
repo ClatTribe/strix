@@ -1,0 +1,38 @@
+rules:
+  - id: strix-crypto-md5-for-security
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      MD5 used in a security context (password hashing, signature,
+      content integrity). MD5 is broken — collisions are trivially
+      generated. AI-generated code uses it because it's a one-line
+      `crypto.createHash('md5')` call. Switch to SHA-256 for
+      integrity, bcrypt/argon2 for passwords. MD5 for non-security
+      uses (cache keys, dedup IDs) is fine, but rename so the
+      intent is clear.
+    metadata:
+      cwe: "CWE-327"
+      owasp: "A02:2021"
+      category: crypto
+      confidence: MEDIUM
+      vibe_pattern: true
+    pattern-either:
+      - patterns:
+          - pattern: crypto.createHash("md5").update($X).digest($Y)
+          - pattern-inside: |
+              function $FN(...) {
+                ...
+              }
+      - patterns:
+          - pattern: |
+              hashlib.md5($X).hexdigest()
+          - pattern-inside: |
+              def $FN(...):
+                  ...
+      - patterns:
+          - pattern: |
+              hashlib.md5($X).digest()
+      - pattern: |
+          $X.password = crypto.createHash("md5").update($PWD).digest("hex")
+      - pattern: |
+          $USER.password = hashlib.md5($PWD).hexdigest()

@@ -1,0 +1,24 @@
+{
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin", "value": "*" },
+        { "key": "Access-Control-Allow-Credentials", "value": "true" }
+      ]
+    }
+  ],
+  "redirects": [
+    { "source": "/go/:url", "destination": "https://:url" }
+  ],
+  "crons": [
+    { "path": "/api/jobs/cleanup", "schedule": "0 0 * * *" }
+  ],
+  "env": {
+    "OPENAI_KEY": "sk-deadbeefDEADBEEF1234567890abcdefABCD",
+    "NODE_ENV": "production"
+  },
+  "functions": {
+    "api/long-job.js": { "maxDuration": 600 }
+  }
+}

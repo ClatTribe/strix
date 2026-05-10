@@ -1,0 +1,26 @@
+rules:
+  - id: strix-crypto-sha1-for-security
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: >-
+      SHA-1 used in a security context. SHA-1 collisions have
+      been demonstrated in practice (SHAttered, 2017). Use SHA-256
+      or SHA-3 for integrity, bcrypt/argon2/scrypt for passwords.
+      Same fingerprint check as MD5: SHA-1 is fine for
+      non-security uses (Git, cache keys); flag only when in
+      security pathways.
+    metadata:
+      cwe: "CWE-327"
+      owasp: "A02:2021"
+      category: crypto
+      confidence: MEDIUM
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          $X.password = crypto.createHash("sha1").update($PWD).digest("hex")
+      - pattern: |
+          $USER.password = hashlib.sha1($PWD).hexdigest()
+      - pattern: |
+          $TOKEN = crypto.createHash("sha1").update($SECRET + $X).digest("hex")
+      - pattern: |
+          $TOKEN = hashlib.sha1($SECRET + $X).hexdigest()

@@ -1,0 +1,20 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      OPENAI_KEY: "sk-deadbeefDEADBEEF1234567890abcdef"
+
+  db:
+    image: postgres:16
+    privileged: true
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: dev
+
+  watchtower:
+    image: containrrr/watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

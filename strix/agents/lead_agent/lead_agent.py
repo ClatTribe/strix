@@ -137,6 +137,187 @@ _LEAD_SYSTEM_PROMPT_ADDENDUM = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Asset-aware routing guidance.
+#
+# The lead's tool catalog is filtered per target type (see
+# `tool_catalog.py`). That stops the LLM from invoking irrelevant tools
+# but doesn't tell it *which* tools should anchor its plan for the
+# specific asset(s) in scope. The blurb below renders into the prompt's
+# `system_prompt_context["lead_asset_routing"]` slot — the StrixAgent
+# Jinja template surfaces it just below the architectural directives.
+#
+# Rules:
+#   * One short paragraph per asset class (web / repo / domain / ip).
+#   * When MULTIPLE asset classes are present, append a "cross-asset"
+#     block telling the lead to correlate findings (e.g., SCA on the
+#     repo informs DAST hypotheses on the URL).
+#   * No tool-call examples here — those live in the directives block
+#     above. This block is *what* not *how*.
+# ---------------------------------------------------------------------------
+
+
+_PER_ASSET_GUIDANCE: dict[str, str] = {
+    "web_application": (
+        "Web target: probe the live URL. Anchor on `webapp_recon_pipeline` "
+        "→ `fingerprint_tech_stack` → matching specialists "
+        "(scan_sqli / scan_xss / scan_idor / scan_ssrf / scan_auth_flow / "
+        "scan_business_logic / scan_oauth). Use HAR / Burp imports if the "
+        "user supplied them. Prioritise authenticated surfaces: business "
+        "logic + IDOR are usually the highest-impact bugs on a live app."
+    ),
+    "repository": (
+        "Repo target: anchor on `scan_sca_lockfiles` FIRST — it's "
+        "deterministic, cheap, and surfaces the #1 vuln class for modern "
+        "apps (vulnerable dependencies). Phase 6.4 reachability filtering "
+        "is on by default: findings carry `[reachability=...]` tags "
+        "indicating whether the vulnerable package is actually imported "
+        "by app code. `direct_import` keeps original severity, "
+        "`transitive_only` demotes one tier, `unused` demotes two — KEV "
+        "and EPSS≥0.5 always override. Then run `scan_sast` (Phase 7 — "
+        "Semgrep with strix's vibe-coded rule pack + OWASP-Top-Ten); "
+        "findings auto-calibrate severity (route-reachable bumps, "
+        "test-file demotes). Then `scan_iac` (Phase 11) for "
+        "vercel.json / netlify.toml / wrangler.toml / Dockerfile / "
+        "docker-compose.yml misconfigs — CORS-credentials, hardcoded "
+        "secrets in env, exposed DB ports, USER root, privileged "
+        "containers. Then `build_code_map` + `taint_analysis` for "
+        "deeper user-input → sink flows, `secrets_scan` for "
+        "credentials, `scan_misconfig` for infra drift."
+    ),
+    "local_code": (
+        "Local code target: same play as `repository` — `scan_sca_lockfiles` "
+        "first for dependency CVEs, then `scan_sast` (Phase 7) for "
+        "AI-generated patterns (mass-assignment, missing authz, "
+        "dangerouslySetInnerHTML, etc.), then `scan_iac` (Phase 11) "
+        "for deploy-config misconfigs, then deeper `build_code_map` + "
+        "`taint_analysis` if needed. Lockfile presence is high-signal: "
+        "if there's a `package-lock.json` / `requirements.txt` / "
+        "`Cargo.lock` / `go.sum`, SCA findings nearly always precede "
+        "SAST findings in severity. SCA findings include reachability "
+        "tags (Phase 6.4) so prioritise reachable / direct-import hits "
+        "for cross-asset DAST follow-ups. scan_sast is diff-aware via "
+        "`since_commit=` for PR-time scans. scan_iac is the canonical "
+        "source for 'misconfig affects deploy of EVERY env, not just "
+        "this PR' findings."
+    ),
+    "domain": (
+        "Domain target: anchor on `domain_recon_pipeline` → "
+        "`subdomain_enum_tool` → `subdomain_takeover_check`. Pivot to "
+        "web-app probes (`send_request` + specialists) on any subdomain "
+        "that returns 2xx with HTML."
+    ),
+    "ip_address": (
+        "IP target: enumerate exposed ports and services with "
+        "`terminal_execute` (nmap-style), then `tls_audit` and "
+        "`websocket_audit` on anything that speaks TLS / WS. Treat any "
+        "HTTP service found here as if it were a web_application target "
+        "and probe it with `send_request`."
+    ),
+}
+
+
+_CROSS_ASSET_BLOCK = (
+    "CROSS-ASSET CORRELATION. You have more than one asset in scope. "
+    "Treat findings on one asset as hypotheses on the others:\n"
+    "  * SCA finding on repo (`scan_sca_lockfiles`) names a vulnerable "
+    "dep with a known CVE class → probe the live URL for that class. "
+    "Example: `lodash@<4.17.21` → prototype-pollution → look for "
+    "client-side template injection / unsafe object merge endpoints. "
+    "If the SCA finding's title carries `[reachability=direct_import]` "
+    "(or no reachability tag), prioritise the DAST follow-up — the "
+    "package is actually used in code, exploitation is realistic. "
+    "If it carries `[reachability=unused]` or `[reachability="
+    "transitive_only]`, the DAST probe is lower-priority but still "
+    "worth a single check (a future PR may import the package; the "
+    "demoted severity reflects current import graph only).\n"
+    "  * SAST finding (`scan_sast` or `taint_analysis`) names a sink "
+    "(e.g. `eval`, raw SQL string, `dangerouslySetInnerHTML`) → "
+    "confirm it's reachable from the live URL by probing the matching "
+    "endpoint with the relevant specialist (scan_sqli for raw SQL, "
+    "scan_xss for innerHTML / template injection, scan_cmd_injection "
+    "for eval / exec). When the SAST finding's severity already came "
+    "back as `critical` after Phase 7.4 calibration (route-reachable "
+    "+1 tier), the DAST follow-up is the highest-priority cross-asset "
+    "chain.\n"
+    "  * DAST finding on URL (e.g. SQL error in response) → check the "
+    "repo for the offending file/sink and emit a follow-up code-level "
+    "finding so the wrapper has both the runtime evidence and the fix "
+    "location.\n"
+    "  * Same package surfaced by SCA *and* a DAST behaviour — bump "
+    "severity / confidence; it's a real exploit path, not just an "
+    "advisory match. This is the strongest cross-asset signal: a "
+    "reachable SCA hit + matching live exploit confirms the chain "
+    "end-to-end.\n"
+    "  * IaC misconfig (`scan_iac` finding with `category=misconfig` / "
+    "`open_redirect`) → DAST probe of the deployed URL with the "
+    "matching specialist. CORS-wildcard-with-credentials in vercel.json "
+    "→ `cors_deep_check` cross-origin probe. Vercel redirect with "
+    "external-host wildcard → `open_redirect_check` against the "
+    "matching path. IaC `category=info_disclosure` (hardcoded secret) "
+    "→ rotate the credential AND check breach corpora for prior "
+    "exposure. IaC findings affect EVERY environment (dev / staging / "
+    "prod sharing the IaC file), so confirming runtime exposure on a "
+    "single env is sufficient evidence.\n"
+    "  * Behavioural anomaly (`scan_response_anomaly`) — when a probe "
+    "diverges from baseline (status flip, length outlier, "
+    "error_string_present, latency outlier), use the anomaly class to "
+    "pivot. `error_string_present` → `scan_sqli` / "
+    "`scan_cmd_injection` for end-to-end exploit. "
+    "`latency_outlier_3sigma` → `scan_timing_oracle` for "
+    "statistical confirmation of blind injection. `new_keys_in_json` "
+    "→ inspect the new key's value to confirm it doesn't expose "
+    "private data (info-disclosure candidate). Capture baselines "
+    "(Phase 9.2) before probing — the diff layer needs a 'normal' "
+    "to compare against.\n"
+    "  * Timing-oracle finding (`scan_timing_oracle`) — distinct "
+    "median separation between control + suspect payloads is the "
+    "blind-injection signature. Pivot to `scan_blind_cmd_injection` "
+    "or `scan_sqli` for the end-to-end exploit (the timing oracle "
+    "tells you the path exists; the matching specialist confirms "
+    "it's exploitable with payload extraction).\n"
+    "Cross-asset findings should reference both surfaces in "
+    "`description` + `technical_analysis` so reviewers see the chain.\n"
+    "\n"
+    "POST-SCAN STEPS. Before calling `finish_scan`, ALWAYS run "
+    "TWO post-scan tools (order matters):\n"
+    "  1. `correlate_findings` — bundles related findings into "
+    "`FindingChain` artifacts (`finding_chains.json`). The "
+    "wrapper renders a chain as ONE exploit narrative spanning "
+    "categories (SCA package + DAST exploit + SAST sink) "
+    "instead of N disconnected reports.\n"
+    "  2. `emit_compliance_evidence` — maps every emitted "
+    "finding to SOC 2 / ISO 27001 / PCI DSS / OWASP ASVS "
+    "control IDs via CWE + category, writes "
+    "`compliance_evidence.json` with per-control verdicts "
+    "(fail / warn / info / pass / untested). The wrapper "
+    "consumes this for compliance dashboards / auditor handoff.\n"
+    "Both are pure Python, ~ms each, no LLM cost. Skipping "
+    "either leaves wrapper-side value on the table."
+)
+
+
+def _build_asset_routing_block(target_types: set[str] | list[str]) -> str:
+    """Build the `lead_asset_routing` system-prompt slot from
+    `target_types`. Returns "" when target_types is empty (no
+    extra guidance needed)."""
+    if not target_types:
+        return ""
+    seen: list[str] = []
+    for tt in sorted(set(target_types)):
+        if not isinstance(tt, str):
+            continue
+        guidance = _PER_ASSET_GUIDANCE.get(tt.strip().lower())
+        if guidance:
+            seen.append(f"[{tt}] {guidance}")
+    if not seen:
+        return ""
+    out = "\n\n".join(seen)
+    if len(seen) > 1:
+        out += "\n\n" + _CROSS_ASSET_BLOCK
+    return out
+
+
 class LeadAgent(StrixAgent):
     """Single-lead architecture (roadmap §8.5 Phase 3).
 
@@ -199,6 +380,13 @@ class LeadAgent(StrixAgent):
         system_prompt_context["target_types"] = sorted(target_types)
         system_prompt_context["tool_catalog_allowlist"] = sorted(
             get_lead_tool_catalog(target_types=target_types)
+        )
+        # Asset-aware routing guidance — names which tools to anchor
+        # on per asset class, plus a cross-asset block when more than
+        # one class is in scope. Empty string when target_types is
+        # empty (the StrixAgent template treats it as no-op).
+        system_prompt_context["lead_asset_routing"] = (
+            _build_asset_routing_block(target_types)
         )
         system_prompt_context["tool_catalog_blocklist"] = sorted(
             list_blocked_tools()

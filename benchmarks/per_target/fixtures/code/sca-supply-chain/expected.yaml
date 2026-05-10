@@ -1,0 +1,90 @@
+target_type: local_code
+target: src
+description: |
+  Phase 6.6 + 6.7 supply-chain benchmark. The lockfile pins:
+
+    Malicious-pattern bait:
+      * `lodahs`        — typosquat of lodash (distance 2)
+      * `reqests`       — typosquat of pypi `requests`-shaped name in
+                          npm corpus (still triggers npm typosquat
+                          via Levenshtein vs `requests`-similar npm
+                          packages — the cross-ecosystem corpus
+                          guard kicks in elsewhere).
+      * `sharp@0.32.0`  — direct dep with hasInstallScript=true
+                          (legitimate native module, but flagged
+                          medium for human review).
+
+    License bait:
+      * `agpl-utility`  — AGPL-3.0 → SaaS killer, high severity.
+      * `busl-cache`    — BUSL-1.1 → commercial-restricted, high.
+      * `no-license-pkg` — license=null → unknown, medium.
+
+    Clean baseline:
+      * `lodash@4.17.21`  — MIT, no CVE in v1 corpus
+      * `express@4.18.2`  — MIT, no relevant CVE
+
+  This is a **pattern-recognition benchmark**. Recall is binary
+  per finding: did the pipeline emit a `malicious_dependency`
+  finding for the typosquat? Did it emit a `license_violation`
+  for the AGPL package? It does NOT measure DAST behaviour — that
+  belongs in `web+code/vibe-app/`.
+
+expected_findings:
+  # ---- malicious heuristics ----
+  - id: malicious-typosquat-lodahs
+    category: malicious_dependency
+    file: package-lock.json
+    severity: medium
+    must_find: true
+    description: |
+      `lodahs` is a typosquat of `lodash` at edit-distance 2
+      (transposition). Detected by Levenshtein against the npm
+      popular-package corpus.
+
+  - id: malicious-install-script-sharp
+    category: malicious_dependency
+    file: package-lock.json
+    severity: medium
+    must_find: true
+    description: |
+      `sharp@0.32.0` runs an install script during `npm install`
+      (legitimate native binary; flagged for review). Direct dep
+      → medium severity.
+
+  # ---- license violations ----
+  - id: license-agpl-utility
+    category: license_violation
+    file: package-lock.json
+    severity: high
+    must_find: true
+    description: |
+      `agpl-utility@2.0.0` is AGPL-3.0 — incompatible with
+      proprietary SaaS distribution (network use = distribution
+      under AGPL). Severity high.
+
+  - id: license-busl-cache
+    category: license_violation
+    file: package-lock.json
+    severity: high
+    must_find: true
+    description: |
+      `busl-cache@1.5.0` is BUSL-1.1 — commercial-restricted.
+      Confirm explicit redistribution rights.
+
+  - id: license-no-license-pkg
+    category: license_violation
+    file: package-lock.json
+    severity: medium
+    must_find: true
+    description: |
+      `no-license-pkg` declares no license. Compliance unknown.
+
+  # ---- soft / advisory (don't gate recall on these) ----
+  - id: malicious-typosquat-reqests
+    category: malicious_dependency
+    file: package-lock.json
+    severity: medium
+    must_find: false
+    description: |
+      `reqests` may or may not flag as a typosquat depending on
+      the npm corpus's similar-names. Soft assertion.

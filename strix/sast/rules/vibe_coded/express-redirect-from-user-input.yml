@@ -1,0 +1,27 @@
+rules:
+  - id: strix-express-redirect-from-user-input
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      `res.redirect()` consumes a URL from user input — open
+      redirect. An attacker phishes by sending a link to your site
+      that bounces to `evil.com`. Validate the redirect target
+      against an allowlist of safe paths, or only accept relative
+      paths (starting with `/`).
+    metadata:
+      cwe: "CWE-601"
+      owasp: "A01:2021"
+      category: open_redirect
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          res.redirect($REQ.body.$X)
+      - pattern: |
+          res.redirect($REQ.query.$X)
+      - pattern: |
+          res.redirect($REQ.params.$X)
+      - pattern: |
+          res.redirect($CODE, $REQ.$X.$Y)
+      - pattern: |
+          response.redirect($REQ.$X)

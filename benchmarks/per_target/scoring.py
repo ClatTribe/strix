@@ -69,6 +69,15 @@ def _categories_match(a: str | None, b: str | None) -> bool:
         return True
     # tolerate plurals / common variants
     aliases = {
+        # Phase 6 SCA — `scan_sca_lockfiles` emits
+        # category="vulnerable_dependency"; the benchmark manifest uses
+        # the same key. Add a few common variants so synonym findings
+        # (some specialists tag as "supply_chain" or "dependency_cve")
+        # still match.
+        "supply_chain": "vulnerable_dependency",
+        "dependency_cve": "vulnerable_dependency",
+        "vulnerable_dep": "vulnerable_dependency",
+        "vulnerable-dependency": "vulnerable_dependency",
         "sql_injection": "sqli",
         "sql-injection": "sqli",
         "nosqli": "sqli",

@@ -404,3 +404,114 @@ def test_lead_agent_prompt_size_reduced_by_filter() -> None:
         f"not have applied; check `system_prompt_context.tool_catalog_"
         f"allowlist` is being threaded through to `get_tools_prompt`"
     )
+
+
+# ---------------------------------------------------------------------------
+# Asset-aware routing (Phase 6 — DAST + SCA correlation)
+# ---------------------------------------------------------------------------
+
+
+def _make_agent(*target_types: str) -> LeadAgent:
+    """Helper: build a LeadAgent with the given target_types."""
+    state = AgentState(task="t", agent_name="lead", max_iterations=10)
+    return LeadAgent({
+        "state": state,
+        "scan_config": {
+            "targets": [
+                {"type": tt, "details": {}}
+                for tt in target_types
+            ],
+        },
+    })
+
+
+def test_asset_routing_repository_anchors_on_sca() -> None:
+    """When the only asset is a repo, the routing block must name
+    `scan_sca_lockfiles` as the anchor — that's what makes Phase 6
+    actionable on a code-only target."""
+    agent = _make_agent("repository")
+    routing = agent.llm._system_prompt_context.get("lead_asset_routing", "")
+    assert "[repository]" in routing
+    assert "scan_sca_lockfiles" in routing
+
+
+def test_asset_routing_local_code_anchors_on_sca() -> None:
+    agent = _make_agent("local_code")
+    routing = agent.llm._system_prompt_context.get("lead_asset_routing", "")
+    assert "[local_code]" in routing
+    assert "scan_sca_lockfiles" in routing
+
+
+def test_asset_routing_web_anchors_on_dast_specialists() -> None:
+    """Pure web target — DAST anchors named, SCA not the lead-with."""
+    agent = _make_agent("web_application")
+    routing = agent.llm._system_prompt_context.get("lead_asset_routing", "")
+    assert "[web_application]" in routing
+    # DAST specialist names must be present.
+    assert "scan_sqli" in routing
+    assert "scan_xss" in routing
+    # Single-asset path → no cross-asset block.
+    assert "CROSS-ASSET CORRELATION" not in routing
+
+
+def test_asset_routing_paired_web_repo_includes_cross_asset_block() -> None:
+    """The vibe-coded-app workflow: deployed URL + co-located repo.
+    The routing prompt MUST surface the cross-asset block so the
+    lead correlates SCA findings with DAST hypotheses (and vice
+    versa). This is the single-lead alternative to the deprecated
+    multi-agent "specialist hands findings up" pattern."""
+    agent = _make_agent("web_application", "repository")
+    routing = agent.llm._system_prompt_context.get("lead_asset_routing", "")
+    assert "[web_application]" in routing
+    assert "[repository]" in routing
+    assert "CROSS-ASSET CORRELATION" in routing
+    # Pin the canonical example so the LLM has a concrete chain to
+    # follow — abstract instruction-only routing has historically
+    # produced no behaviour change.
+    assert "lodash" in routing
+    assert "prototype-pollution" in routing or "prototype pollution" in routing.lower()
+
+
+def test_asset_routing_renders_into_system_prompt() -> None:
+    """The routing block must reach the *rendered* system prompt, not
+    just the context dict. If the jinja template doesn't pick up
+    `lead_asset_routing`, the LLM never sees it."""
+    agent = _make_agent("web_application", "repository")
+    sp = agent.llm.system_prompt
+    assert "ASSET-AWARE ROUTING" in sp
+    assert "[repository]" in sp
+    assert "CROSS-ASSET CORRELATION" in sp
+
+
+def test_asset_routing_empty_when_no_known_target_types() -> None:
+    """Garbage target_types → routing block is empty (graceful
+    degradation, not a hard error)."""
+    state = AgentState(task="t", agent_name="lead", max_iterations=10)
+    agent = LeadAgent({
+        "state": state,
+        "scan_config": {
+            "targets": [{"type": "unknown_alien_target", "details": {}}],
+        },
+    })
+    routing = agent.llm._system_prompt_context.get("lead_asset_routing", "")
+    # Either empty string or absent — both are acceptable.
+    assert routing == "" or "ASSET-AWARE ROUTING" not in (
+        agent.llm.system_prompt
+    )
+
+
+def test_asset_routing_domain_anchors_on_recon() -> None:
+    agent = _make_agent("domain")
+    routing = agent.llm._system_prompt_context.get("lead_asset_routing", "")
+    assert "[domain]" in routing
+    assert "domain_recon_pipeline" in routing
+
+
+def test_asset_routing_ip_anchors_on_port_scan() -> None:
+    agent = _make_agent("ip_address")
+    routing = agent.llm._system_prompt_context.get("lead_asset_routing", "")
+    assert "[ip_address]" in routing
+    # IP-target routing pivots to web-app probes when HTTP found —
+    # the cross-correlation hint is in the per-asset block, not the
+    # multi-asset block (since only one asset class is in scope).
+    assert "send_request" in routing

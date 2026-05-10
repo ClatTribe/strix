@@ -1,0 +1,28 @@
+rules:
+  - id: strix-window-open-from-user
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      `window.open()` / `window.location` set from user input —
+      open redirect / tabnabbing. The classic version is
+      `window.open(req.body.url)` for a "share to" link; modern
+      version is `router.push(searchParams.get('return_to'))`.
+      Validate against an allowlist of safe paths.
+    metadata:
+      cwe: "CWE-601"
+      owasp: "A01:2021"
+      category: open_redirect
+      confidence: MEDIUM
+      vibe_pattern: true
+    pattern-either:
+      - pattern: window.open($REQ.body.$X, ...)
+      - pattern: window.open($REQ.query.$X, ...)
+      - pattern: window.open(searchParams.get($X), ...)
+      - pattern: |
+          window.location = $REQ.body.$X
+      - pattern: |
+          window.location.href = searchParams.get($X)
+      - pattern: |
+          router.push(searchParams.get($X))
+      - pattern: |
+          location.replace($REQ.body.$X)

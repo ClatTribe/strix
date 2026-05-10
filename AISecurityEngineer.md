@@ -1,0 +1,1741 @@
+# AI Security Engineer — Engine Roadmap
+
+This document is the strategic roadmap for **strix as the engine** powering the
+[webappsec](../webappsec/) wrapper that vibe-coded-app companies log into. The
+wrapper's UX is documented separately in [`AISecurityEngineerUX.md`](./AISecurityEngineerUX.md).
+
+> **Audience**: contributors to `strix/`. The phases below are technical
+> capabilities. Customer-visible product surfaces (PR-comment bots,
+> compliance dashboards, trust pages, etc.) are deliberately scoped out of
+> this doc — they live in the wrapper.
+
+---
+
+## 1. Vision
+
+> **An AI security engineer for companies building vibe-coded apps** — apps
+> shipped fast by AI assistants (Cursor, v0, Bolt, Replit, Lovable), built
+> on heavy npm trees, deployed to edge runtimes, often with LLM features
+> baked in.
+
+The engine should:
+
+1. **Detect** — bugs the customer wouldn't have found themselves: dependency
+   CVEs, OWASP Top 10, AI-feature attacks, business-logic flaws, configuration
+   drift.
+2. **Reason** — like a senior engineer, not a regex: hypothesis → probe →
+   confirm → chain → exploit-story.
+3. **Stay current** — real-time threat intel, daily community-corpus refresh,
+   continuous learning from every customer's misses.
+4. **Compose** — primitives into novel exploits when no public signature
+   exists yet.
+5. **Remember** — across engagements; build per-customer experience.
+
+Each phase below moves us a measurable step closer.
+
+---
+
+## 2. Current state (post Phases 1–5)
+
+**Shipped (24 PRs merged into main, #193–#215, plus #216, #217, #218):**
+
+| Layer | What's there |
+|---|---|
+| **Foundation** | Decision log, OOB-DNS service, OpenAPI parser, tech-stack KB, parallel dispatch, provider failover |
+| **17 deterministic specialists** | OWASP Top 10 + CWE Top 25 coverage (sqli, xss, xxe, ssrf, idor, oauth, deserialization, path traversal, ssti, nosqli, xpath, ldap, secrets, request smuggling, blind variants, business logic) |
+| **Multi-role auth** | Anon + default-creds + admin + user-a + user-b session capture |
+| **Reasoning layer** | Hypothesis-EV scoring, chaining graph, telemetry, counter-example logging, replay-mutation orchestrator |
+| **Real-time intel** (PR #217) | CISA KEV + FIRST EPSS + NIST NVD local cache + 4 LLM tools |
+| **Community corpus** (PR #218) | 13,123 nuclei templates, daily-updated, `scan_nuclei_templates` tool |
+
+**Validated**: 88% recall on the Juice Shop benchmark (8/9 must-find findings).
+
+---
+
+## 3. Strategic frame
+
+Three constraints shape every phase below:
+
+### 3.1. Engine ≠ product
+Strix produces structured findings + telemetry. The wrapper builds the
+product (UX, billing, compliance dashboards, customer trust pages). Engine
+phases must produce **machine-readable artifacts** the wrapper consumes:
+
+- `vulnerabilities.json` (existing tracer output)
+- `decision_log.jsonl` (Phase 1.6)
+- `specialist_telemetry.jsonl` (Phase 5.4)
+- `specialist_misses.jsonl` (Phase 5.3)
+- New: `sca_inventory.json`, `sast_findings.json`, `compliance_evidence.json`,
+  `iac_posture.json`, `ai_feature_findings.json` (this roadmap)
+
+### 3.2. Vibe-coded apps shape priorities
+Top vuln sources empirically:
+1. **Dependency CVEs** (~70% of disclosed bugs in modern web apps)
+2. **Inlined secrets** (AI assistants love hardcoding API keys)
+3. **AI-generated auth flaws** (mass-assignment, missing authz checks)
+4. **LLM-feature attacks** (prompt injection, jailbreak, tool-call abuse)
+5. **Configuration drift** (Vercel/Cloudflare/Netlify settings)
+
+DAST is one piece. SCA + SAST + secrets + LLM-feature security are the rest.
+
+### 3.3. Continuous, not one-shot
+Vibe coders ship 10–50 PRs/day. The engine must support:
+- Diff-aware mode (scan only what changed)
+- Daemon mode (run continuously, alert on regression)
+- Per-PR context (correlate findings with commit/author)
+
+---
+
+## 4. Core principles
+
+These apply across every phase:
+
+1. **Deterministic + LLM-augmented**, not LLM-everywhere. Static fast paths
+   first; LLM-driven specialists as fallback when static returns 0 findings on
+   strong-signal endpoints.
+2. **Bounded inner-LLM calls**. Cached system prompts, capped tool subsets,
+   wall-time budgets. Cost-predictable; no token-runaway.
+3. **External corpus over hand-written**. Community-maintained payload
+   libraries (nuclei, Semgrep rules, exploit-DB, Snyk DB) update for free.
+4. **Best-effort throughout**. Failures swallowed; cache stays at last-known-
+   good; never raise into the agent loop.
+5. **Telemetry-driven improvement**. Every miss recorded; nightly active-
+   learning consumes the corpus.
+6. **Composable artifacts**. Each capability emits a typed JSONL the wrapper
+   can consume independently. No coupling between SCA and DAST emit paths.
+
+---
+
+## 4a. Cross-cutting: single-lead asset-aware planning
+
+> **Why this is its own section, not a phase.** Every phase below adds a
+> *capability* (SCA, SAST, AI-feature security, IaC, ...). What turns a
+> capability bundle into an "AI security engineer" is how the single lead
+> agent **plans across assets** with them. That planning layer cuts across
+> every phase and gets revisited as each new capability lands. Treating it
+> as a phase would imply "we ship it once and move on"; it isn't.
+>
+> This section was retro-added in PR #219 alongside Phase 6 because that
+> was the first phase where the cross-asset story became concrete (SCA on
+> the repo + DAST on the URL = paired scan of the same vibe-coded SaaS).
+> Future phases extend the same machinery rather than rebuild it.
+
+**The architectural commitment** (since roadmap §8.5 Phase 3): one lead
+agent, one conversation, one LLM client. No sub-agents. The lead's tool
+catalog is filtered per `target_type` so it never sees irrelevant tools.
+The deprecated multi-agent "specialist hands findings up to coordinator"
+pattern is gone.
+
+**The two questions that single-lead has to answer well**:
+
+1. *Given the asset(s) in scope, where do I start?* — **asset-aware routing**
+2. *Given a finding on asset A, what does it imply for asset B?* — **cross-asset correlation**
+
+### 4a.1. Asset-aware routing
+
+For each registered target type, the lead's system prompt names the
+**anchor tool(s)** it should start with — the highest-EV first probe for
+that asset class. The mapping (per `strix/agents/lead_agent/lead_agent.py`
+`_PER_ASSET_GUIDANCE`):
+
+| Target type        | Anchor                                                  | Why                                                       |
+|--------------------|---------------------------------------------------------|-----------------------------------------------------------|
+| `web_application`  | `webapp_recon_pipeline` → `fingerprint_tech_stack` → specialists | Recon-first; tech stack picks the relevant specialists    |
+| `repository`       | `scan_sca_lockfiles` first                              | Cheapest, deterministic, surfaces the #1 vuln class       |
+| `local_code`       | `scan_sca_lockfiles` then SAST                          | Same as above; SCA precedes SAST in expected impact       |
+| `domain`           | `domain_recon_pipeline` → `subdomain_takeover_check`    | Network footprint before any web probing                  |
+| `ip_address`       | port scan → `tls_audit` → pivot to web-app              | Network-first, then HTTP if a web service is found        |
+
+This is intentionally **prescriptive guidance, not enforcement**. The
+catalog filter is the enforcement (the lead literally cannot call
+`browser_action` on a `repository` target — the tool isn't in scope).
+The prompt block tells the lead *which of the in-scope tools is the
+right first probe*.
+
+### 4a.2. Cross-asset correlation
+
+When the run has more than one target type in scope (the typical
+vibe-coded SaaS case: deployed URL + co-located source repo), the
+prompt appends an explicit cross-asset block with concrete chains:
+
+- **SCA → DAST**. SCA flags `lodash<4.17.21` → prototype pollution →
+  probe the live URL for unsafe object merge endpoints / client-side
+  template injection.
+- **SAST → DAST**. `taint_analysis` flags an `eval` sink reachable from
+  `/api/exec` → confirm it's reachable in the live deployment with
+  `scan_cmd_injection`.
+- **DAST → SCA/SAST**. Live SQL error in a response → grep the repo for
+  the offending query → emit a code-level follow-up finding so the
+  wrapper has both the runtime evidence and the fix location.
+- **Convergent evidence bumps severity**. A package shows up in *both*
+  the SCA inventory AND a DAST behavioural probe → it's a real exploit
+  path, not just an advisory match → escalate.
+
+This is the single-lead *replacement* for the deprecated multi-agent
+"specialist publishes finding to a shared bus and other specialists
+subscribe" pattern. One agent, one conversation, the chain happens
+inside the lead's reasoning rather than across agents.
+
+### 4a.2b. Output-time correlation: `finding_chains.json` (shipped in #219)
+
+Prompt-time correlation (above) reduces wasted probes during the
+scan. **Output-time correlation** rolls the emitted finding set
+into `FindingChain` artifacts so the wrapper renders one
+exploit chain across categories instead of N disconnected
+reports.
+
+`strix/finding_chains/` ships:
+
+- **5 deterministic linker heuristics** — same input, same chains.
+  No LLM call. ~ms on typical finding volumes.
+  - `link_sca_to_dast_by_cwe` — SCA vulnerable dep + DAST
+    exploit sharing CWE family on same target.
+  - `link_sast_to_dast_by_cwe_endpoint` — SAST sink + DAST
+    exploit sharing CWE family on same target.
+  - `link_iac_to_dast_by_category` — IaC misconfig + DAST
+    runtime confirmation (CORS / open-redirect categories).
+  - `link_anomaly_to_specialist` — Phase 9 anomaly diff +
+    matching DAST specialist on same endpoint.
+  - `link_sca_to_sast_by_package` — SCA flagged package +
+    SAST hit in code that mentions the package.
+- **Union-find chain builder** — runs every linker, unions the
+  edge set, emits one `FindingChain` per connected component
+  of size ≥ 2. Singletons are excluded — they're already in
+  the source artifact.
+- **`correlate_findings` LLM tool** — reads
+  `vulnerabilities.json`, builds chains, writes
+  `finding_chains.json`. Always-on in the lead's core catalog
+  (asset-type-agnostic). The prompt addendum tells the lead
+  to run it before `finish_scan`.
+
+Per-chain rollup: max severity across the chain, category
+union, narrative one-liner ("Vulnerable dependency
+`npm:lodash@4.17.20` → Prototype pollution at /api/merge"),
+chain type (`sca_dast` / `sast_dast` / `iac_dast` /
+`sca_sast_dast` / `mixed`).
+
+What this is NOT: an LLM-driven correlator. The linkers are
+heuristic; over-linking risks fake chains. A future iteration
+could add LLM-driven narrative generation but the determinism
+matters — the chain artifact is part of the run's reproducible
+telemetry.
+
+Adding linkers: drop a `link_<name>(findings) -> list[ChainLink]`
+function, append to `LINKER_REGISTRY`, add positive + negative
+tests in `tests/finding_chains/test_links.py`. No engine
+changes needed.
+
+**Wrapper requests from §4a v2** (cross-referenced in §14.6):
+- **Render chains as collapsible cards** — one card per
+  `chain_id`, severity from chain's max, narrative from
+  `chain.summary`, expandable to show constituent finding IDs.
+  Don't render the constituent findings as separate inbox
+  entries when they're part of a chain.
+- **Chain-type colour scheme** — `sca_dast` red, `sast_dast`
+  orange, `iac_dast` yellow, `sca_sast_dast` purple, `mixed`
+  grey. Powers the "this is a real exploit chain" visual cue.
+- **Per-link rationale on hover** — `chain.links[*].rationale`
+  explains WHY two findings are linked. Tooltip in the chain
+  card.
+- **"Promote to top" rule** — chains involving > 2 categories
+  are stronger evidence than singletons; sort first.
+
+### 4a.3. How each new phase plugs in
+
+Every phase ahead adds at least one new tool to the catalog. Each one
+must answer:
+
+1. **Which `target_type` catalog(s) does the tool belong to?** — defined
+   in `strix/agents/lead_agent/tool_catalog.py`.
+2. **Should it be the anchor for that type, or a follow-up?** — if
+   anchor, named in `_PER_ASSET_GUIDANCE`.
+3. **What cross-asset chain does it enable?** — added to the
+   `_CROSS_ASSET_BLOCK` examples when material.
+
+Concretely for the phases below:
+- **Phase 7 (SAST)** — anchor for `repository`/`local_code` after SCA;
+  cross-asset link: SAST sink + SCA package version → DAST probe target.
+- **Phase 8 (AI-feature security)** — sub-anchor for `web_application`
+  when LLM endpoints are detected; cross-asset link: AI prompt-injection
+  attack chains into business-logic abuse.
+- **Phase 11 (IaC / cloud posture)** — new target type `iac_repository`
+  or shares `repository`; cross-asset link: misconfigured Vercel env
+  variable exposure → DAST probe for that endpoint.
+
+### 4a.4. Validation: paired-asset benchmark
+
+Per-phase recall has always been measured on single-target fixtures
+(`benchmarks/per_target/fixtures/code/flask-vuln/`,
+`web/juiceshop/`). Phase 6 added `code/sca-vuln-deps/` for SCA-specific
+recall. The deliberate gap: there's no fixture today that exercises
+*paired* scans (a repo + the URL it deploys to) — that's where the
+cross-asset chains actually fire.
+
+**Open follow-up**: build a `web+code/vibe-app/` fixture that's both a
+checked-in repo AND a docker-compose deployment of the app, with
+`expected.yaml` entries that require BOTH a DAST emit and a matching
+SCA emit (e.g. `lodash@4.17.20` in lockfile + reachable
+prototype-pollution behaviour on the URL). Without this, "single-lead
+correlates across assets" stays an architectural assertion — measurable
+only in production telemetry.
+
+### 4a.5. What this is NOT
+
+- Not a separate planning agent. The cross-asset block is a prompt
+  augmentation; the lead's reasoning loop is unchanged.
+- Not a workflow engine. There's no DAG, no scheduler, no retry policy.
+  The lead picks the order; the prompt suggests good defaults.
+- Not a static rule set. The chains in `_CROSS_ASSET_BLOCK` are seeds.
+  The lead can (and should) generate novel chains in-context once it
+  has evidence — that's the §1.4 "Compose primitives" capability.
+
+---
+
+## 4b. Cross-cutting: compliance evidence emission
+
+> **Why this is its own section, not a phase.** §1 names "security
+> and compliance" as the dual product goal. §3.1 splits ownership:
+> the engine emits structured artifacts; the wrapper builds compliance
+> dashboards / auditor PDFs / customer trust portals. But until §4b
+> the engine wasn't producing the **machine-readable mapping** that
+> turns finding files into compliance evidence. The wrapper had to
+> reinvent the CWE → control mapping per customer.
+>
+> Like §4a (asset-aware planning) and §5a (dynamic refresh), this
+> is cross-cutting — it touches every category of finding (SCA,
+> SAST, IaC, DAST, anomaly, finding-chain) without belonging to any
+> single one.
+>
+> Shipped in PR #219 alongside §4a v2's finding-chain artifact. The
+> two artifacts pair: chains group findings by exploit narrative;
+> compliance evidence maps findings to control IDs.
+
+**The engine commitment** (per §3.1): emit
+`compliance_evidence.json` alongside `vulnerabilities.json` +
+`finding_chains.json`. The wrapper consumes these for compliance
+dashboards / auditor handoff. The engine does NOT generate
+auditor-facing prose, policy templates, or per-customer dashboards
+— those stay wrapper-side.
+
+### 4b.1. Frameworks shipped (v1)
+
+| Framework | Coverage | Carrier domain |
+|---|---|---|
+| **SOC 2** Trust Service Criteria | 12 controls (CC6 / CC7 / CC8 / A1 / C1) | App-layer security findings |
+| **ISO 27001:2022** Annex A | 17 controls (A.5 / A.8) | Application + supply-chain |
+| **PCI DSS 4.0** | 16 requirements (Req 4 / 6 / 7 / 8 / 11) | Payment-handling SaaS |
+| **OWASP ASVS 4.0** | 28 verifiable requirements | Reference for the others |
+
+Deferred to follow-up PRs:
+- HIPAA Security Rule (164.308 / 164.312) — needs legal review
+- GDPR Art. 32 / EU AI Act
+- CIS Benchmarks — infrastructure-class, closer to IaC rules
+
+### 4b.2. How findings get mapped to controls
+
+Auto-derived from CWE — no per-rule retrofit needed. `mappings.py`
+has a CWE → list-of-(framework, control_id) table for every CWE
+strix's specialists emit (~33 CWEs). When CWE is absent (SCA's
+`vulnerable_dependency` category), category-based fallback kicks
+in.
+
+Same input → same control set. Pure lookup; no LLM, no inference.
+
+Example: CWE-89 (SQL Injection) maps to
+`{soc2:CC6.1, iso27001:A.8.26, iso27001:A.8.28, pci_dss:6.5.1,
+owasp_asvs:V5.3.4}`. A finding emitting `cwe=CWE-89` automatically
+flags all five.
+
+### 4b.3. Per-control verdict logic
+
+Each control gets one of five verdicts:
+
+| Verdict | Meaning |
+|---|---|
+| `fail` | At least one finding at high or critical severity hits this control |
+| `warn` | At least one finding at low or medium severity hits this control |
+| `info` | Only info-severity findings hit this control |
+| `pass` | Control is in strix's coverage AND no findings hit it |
+| `untested` | Control is in the framework catalog but **no rule in our corpus maps to it** — a coverage gap the wrapper should surface |
+
+`untested` is the most actionable signal for compliance teams:
+"these are the SOC 2 / ISO 27001 controls strix can't validate
+automatically; you need other tooling for them."
+
+### 4b.4. The artifact
+
+`compliance_evidence.json`:
+```json
+{
+  "schema_version": 1,
+  "frameworks": ["soc2", "iso27001", "pci_dss", "owasp_asvs"],
+  "controls": [
+    {
+      "framework": "soc2",
+      "control_id": "CC6.1",
+      "fqid": "soc2:CC6.1",
+      "title": "Logical access security",
+      "verdict": "fail",
+      "finding_ids": ["f1", "f2"],
+      "finding_severities": ["critical", "high"],
+      "rationale": "Control hit by 2 finding(s)..."
+    },
+    ...
+  ],
+  "summary": {
+    "soc2": {"fail": 3, "warn": 2, "info": 0, "pass": 5, "untested": 2, "total": 12},
+    ...
+  }
+}
+```
+
+### 4b.5. Tool: `emit_compliance_evidence`
+
+Always-on in the lead's core catalog. Runs at scan-end (lead
+prompt addendum says: after `correlate_findings`, before
+`finish_scan`). Pure Python, ~ms, no LLM cost.
+
+Failed + warned controls bubble up as `category=compliance_violation`
+findings so the lead sees them in its result loop. `pass` /
+`info` / `untested` controls don't pollute the lead's context —
+they're informational, the wrapper renders them from the artifact
+directly.
+
+### 4b.6. What this is NOT
+
+- Not a substitute for a compliance program. We provide
+  application-security evidence; auditors still need governance,
+  risk management, vendor diligence, employee training, etc.
+- Not auditor-grade prose generation. The artifact is structured
+  data; the wrapper renders human-friendly explanations.
+- Not a per-customer mapping engine. The CWE → control map is
+  static + version-controlled; customisations belong in the
+  wrapper's policy layer.
+
+### 4b.7. Adding a new framework
+
+1. Add control catalog dict in `frameworks.py`.
+2. Map every CWE in `CWE_TO_CONTROLS` that touches the new
+   framework.
+3. Map any category in `CATEGORY_TO_CONTROLS` that touches it.
+4. Add a test pinning the canonical CWEs (CWE-79, CWE-89,
+   CWE-798) hit the new framework's catalog.
+
+The anti-rot test `test_every_cwe_mapped_control_exists_in_catalog`
+catches typos in either side automatically.
+
+### 4b.8. Wrapper requests from §4b
+
+Cross-referenced in §14.6.
+
+- **Compliance tab** — single tab in the wrapper showing the
+  per-framework summary from `compliance_evidence.json`. Each
+  framework gets a card with `fail / warn / info / pass /
+  untested` counts.
+- **Per-control drill-down** — click a control → list of
+  finding IDs that hit it (from `control.finding_ids`). Auditor
+  trace: control → findings → fix.
+- **`untested` coverage-gap surfacing** — render untested
+  controls in a separate section: "These SOC 2 / ISO 27001 /
+  PCI / ASVS controls aren't validated by strix; you need
+  other tooling for them." This is the most actionable signal
+  for compliance teams.
+- **Framework picker in onboarding** — let the customer choose
+  which frameworks to include during setup; pass to
+  `emit_compliance_evidence(frameworks=[...])`. Default: all
+  4. Customers in regulated verticals (PCI for payments;
+  HIPAA when shipped) want the option to filter.
+- **Auditor-export button** — generates a polished
+  framework-specific PDF from the JSON artifact. Engine
+  produces structured data; wrapper does the prose
+  generation (per §3.1's split). NOT engine work.
+- **Risk-register integration** — `verdict=fail` controls
+  feed the wrapper's risk register. Engine emits; wrapper
+  manages the lifecycle (accept-risk / mitigate / etc.).
+
+---
+
+## 5. Phase 6 — SCA + Supply Chain (highest customer-value next phase)
+
+**Status:** 6.1 / 6.2 / 6.3 / 6.4 v1 / 6.5 / 6.6 / 6.7 landed in
+**PR #219** (2026-05-10). Function-level reachability (6.4 v2) is
+explicitly deferred — see deferral note below.
+
+**Phase 6.4 (reachability) shipped as v1**: import-level only.
+`scan_sca_lockfiles` now classifies every vulnerable package as
+`direct_import` / `transitive_only` / `unused` / `unknown` based
+on whether app source files reference the package by name.
+Severity demotes -1 tier for `transitive_only`, -2 for `unused`;
+`direct_import` and `unknown` are no-ops. KEV / EPSS≥0.5 override
+demotion (the threat is real even if the local import graph
+doesn't reflect it). The headline efficiency claim — "30-60% noise
+reduction on the high tier for real repos" — is measured by
+`benchmarks/per_target/fixtures/code/sca-reachability/`, which
+plants a 3-direct/3-unused split and asserts the filtered
+high-count drops from 4 → 1.
+
+**Phase 6.6 (malicious detection) shipped**: typosquat detection
+(Levenshtein ≤ 2 against curated popular-package corpora for npm
++ pypi), `hasInstallScript` flagging on npm packages (medium for
+direct, high for transitive — transitive code at install time is
+the documented vector for `event-stream`-style attacks), and
+missing-license signal. Emits `category="malicious_dependency"`.
+Out of scope for v1 (would need npm/pypi registry API):
+recently-published-with-high-downloads, maintainer-history checks,
+network-call patterns at install time.
+
+**Phase 6.7 (license compliance) shipped**: SPDX classification
+into permissive / weak_copyleft / copyleft /
+commercial_restricted / unknown. Default policy flags copyleft
+(GPL/AGPL/SSPL) + commercial-restricted (BUSL/Elastic) + unknown
+as `license_violation` findings. AGPL specifically calls out the
+SaaS distribution problem in the rationale. `tool_metadata.
+licenses.by_family` exposes the full inventory (not just
+violations) so wrappers can render SOC 2 OPS-3 license-pie
+charts without re-classifying. Compound expressions
+(`(MIT OR Apache-2.0)`) take the most-restrictive family —
+conservative engineering default for auditor sign-off.
+
+**6.4 v2 — deferred**. Function-level reachability (call-graph
+from the specific vulnerable function to a real application entry
+point) is in the same complexity class as building a small
+Semgrep: needs proper AST parsing for JS/TS + Python, type/scope
+resolution, dataflow tracking, and a path-finding pass through
+the call graph. Multi-week project, not a Phase-6 sub-item.
+Tracked as a separate roadmap entry rather than shipped as a
+half-baked v2 — when it lands it'll be the "Endor Labs reachability"
+parity feature on its own.
+
+**Goal**: detect dependency-CVE risk in `package-lock.json` / `requirements.txt`
+/ `Cargo.lock` / `Gemfile.lock` / `composer.lock`.
+
+### Why first
+- ~70% of disclosed CVEs in modern web apps are dependency-driven.
+- Vibe-coded apps have 600+ transitive deps on average.
+- We have the threat-intel daemon (PR #217) — SCA is the natural next step
+  that closes the loop ("we know about CVE-X, you're using vulnerable-pkg-Y").
+- Competitors (Snyk, Socket.dev, Endor Labs) make this their flagship feature.
+
+### Items
+
+#### 6.1. Lockfile parsers (`strix/sca/parsers/`) — **shipped in #219**
+- `parse_package_lock(path)` — npm v1/v2/v3 + yarn.lock + pnpm-lock.yaml
+- `parse_requirements(path)` — `requirements*.txt` + `Pipfile.lock` + `poetry.lock` + `uv.lock`
+- `parse_cargo_lock(path)` — `Cargo.lock`
+- `parse_gemfile_lock(path)` — `Gemfile.lock`
+- `parse_composer_lock(path)` — `composer.lock`
+- `parse_go_sum(path)` — `go.sum`
+
+Each returns `[(ecosystem, name, version, dev_only_bool), ...]`. ~600 LOC each;
+12 ecosystems = ~3,500 LOC total over the phase.
+
+#### 6.2. Vulnerability matching pipeline (`strix/sca/match.py`) — **shipped in #219**
+- Takes `(ecosystem, name, version)` from a parser
+- Queries the threat-intel cache (PR #217) for matching CVEs
+- Adds GitHub Security Advisories DB (Phase 6.5) for ecosystem-specific data
+  the NVD doesn't have
+- Returns `[CVERecord with version-pattern matched, source]`
+
+#### 6.3. SCA specialist (`scan_sca_lockfiles`) — **shipped in #219**
+LLM-facing tool:
+```
+scan_sca_lockfiles(
+    repo_path,
+    only_kev=False,
+    min_epss=0.0,
+    only_runtime_deps=True,
+    auto_emit_findings=True,
+)
+```
+Walks `repo_path` for lockfiles, parses, matches, emits one finding per
+matching CVE.
+
+#### 6.4. Reachability analysis (Endor Labs differentiator) — **v1 shipped in #219; v2 explicitly deferred**
+Use existing `taint_analysis` + `build_code_map` to filter SCA findings:
+"you have CVE-2024-X in package P, but your code never calls the vulnerable
+function." Drops CVSS by ~2 for unreachable, raises severity for reachable.
+~1,200 LOC.
+
+#### 6.5. GitHub Security Advisories ingester — **shipped in #219**
+GHSA's GraphQL API has per-ecosystem advisory data NVD lacks. Daily polling
+into the threat-intel cache. ~600 LOC.
+
+#### 6.6. Malicious package detection (Socket.dev angle) — **v1 shipped in #219**
+Heuristic + LLM-driven:
+- Postinstall scripts that fetch external resources
+- Packages with no GitHub repo / no maintainer history
+- Recently-published packages with high download counts
+- Typosquat candidates (Levenshtein distance 1–2 from popular packages)
+- Network-call patterns ("does this package exfil to a non-listed domain?")
+~900 LOC.
+
+#### 6.7. License compliance — **shipped in #219**
+Parse package metadata, flag GPL/AGPL/copyleft/commercial-restricted licenses
+in proprietary code. Maps to OPS-3 for SOC 2. ~400 LOC.
+
+### Deliverables
+- 12 ecosystem lockfile parsers
+- `sca_inventory.json` artifact
+- `scan_sca_lockfiles` LLM tool
+- Reachability filter integration
+- GHSA ingester
+- Malicious package heuristics
+- License compliance check
+
+### Phase effort
+~8,000 LOC across ~10 PRs over 4–6 weeks.
+
+### Success criteria
+- 90%+ recall on a curated test fixture of known-vulnerable lockfiles
+- Reachability filter reduces false positives by ≥40% on real customer repos
+- Same-day awareness of new GHSA advisories
+
+### Wrapper dependency
+
+**Onboarding (existing ask):**
+- Wrapper's onboarding flow needs to ingest a repo path or git URL → triggers
+  this phase's pipeline. See `AISecurityEngineerUX.md` Phase A.
+
+**New requests from PR #219** (cross-referenced in §14.6):
+- **Reachability badge UI** — render `[reachability=...]` titles
+  with collapsible default for `unused` / `transitive_only`.
+- **`malicious_dependency` category UI** — separate inbox
+  section; subtype-specific iconography (typosquat / install-
+  script / known-malicious / no-license).
+- **License compliance tab** — pie chart from
+  `tool_metadata.licenses.by_family`; auto-rotate-credential
+  CTA for `info_disclosure` license findings; three policy
+  checkboxes (`license_allow_copyleft` / `_unknown` /
+  `_weak_copyleft`).
+- **`only_reachable=True` checkbox** for zero-noise dep-CVE
+  view. Engine default is False (demote-but-emit); the toggle
+  flips to suppress.
+- **OSSF malicious feed indicator** — `tool_metadata.malicious
+  .by_indicator.known_malicious` count; show "OSSF feed last
+  refreshed Xh ago" from `feed_meta.ossf_malicious`
+  cache row.
+
+---
+
+## 5a. Cross-cutting: dynamic refresh contract
+
+> **Why this is its own section, not a phase.** Every phase ships
+> a mix of *static* logic (regexes, AST patterns, scoring math)
+> and *dynamic* signals (CVE feeds, malicious-package advisories,
+> popular-package corpora). The static parts only update via a
+> code change; the dynamic parts update via a cron / scheduled
+> refresh job. Mixing them up is how a security tool goes stale
+> without anyone noticing — a "live" CVE feed paired with a
+> 2-year-old hardcoded corpus.
+>
+> This section names which components are dynamic, where they
+> refresh from, and what's still static. New phases must declare
+> their refresh status against this contract.
+>
+> Shipped in PR #219 as part of Phase 6.6 + Phase 7 follow-up.
+
+### 5a.1. Components and their refresh source
+
+**Phase 6 — SCA**:
+
+| Component | Refresh | Source |
+|---|---|---|
+| KEV catalog | Daily | CISA — `feeds/kev.py` |
+| EPSS scores | Daily | FIRST.org — `feeds/epss.py` |
+| NVD CVE 2.0 | Hourly window | NIST — `feeds/nvd.py` |
+| GHSA per-ecosystem | Hourly window | GitHub GraphQL — `feeds/ghsa.py` |
+| **Popular-package corpus** (typosquat target list) | **Daily** | **`feeds/popular_packages.py`** — anvaka npm gist + hugovk pypi top-packages JSON |
+| **OSSF malicious-packages** (`MAL-*` advisories) | **Daily** | **`feeds/ossf_malicious.py`** — OSV.dev per-ecosystem bulk export |
+| Reachability detector (import regexes) | Static | Code change |
+| License classifier (SPDX map) | Static | Code change |
+| Lockfile parsers | Static | Code change |
+
+**Phase 7 — SAST**:
+
+| Component | Refresh | Source |
+|---|---|---|
+| Semgrep registry packs (`p/owasp-top-ten`, `p/javascript`, ...) | Continuous (server-side) | `semgrep --update` via `strix/sast/refresh.py` |
+| Bundled `vibe_coded/` rules | Static | Code change |
+| Severity calibration logic | Static | Code change |
+| SARIF mapping | Static | Code change |
+
+### 5a.2. The refresh CLI surface
+
+```bash
+# Full refresh — daily cron entry-point.
+python -m strix.threat_intel.refresh                    # all CVE/intel feeds
+python -m strix.threat_intel.refresh --only popular,ossf-malicious  # SCA-only
+python -m strix.sast.refresh                            # Semgrep registry packs
+
+# Status (run any time; doesn't hit network).
+python -m strix.threat_intel.refresh --status
+python -m strix.sast.refresh --status
+```
+
+A typical production cron schedule:
+
+```
+0 1 * * *  python -m strix.threat_intel.refresh              # 1am UTC daily
+30 1 * * *  python -m strix.sast.refresh                     # 1:30am UTC
+```
+
+### 5a.3. Failure modes and fallbacks
+
+Every dynamic feed has a documented **fallback when refresh
+fails**. The principle: when the network is broken, fall back to
+the last-known-good cache + hardcoded baselines, not silence.
+
+| Component | Fallback when refresh fails |
+|---|---|
+| Popular-package corpus | Hardcoded set baked in `malicious.py` (small but covers top-100 npm + top-50 pypi) |
+| OSSF malicious-packages | Cache stays at last successful poll; matches surfaced from yesterday's data |
+| KEV / EPSS / NVD / GHSA | Cache stays at last successful poll; new CVEs since the last poll missed but old matches still surface |
+| Semgrep registry | Local pack cache stays at last `semgrep --update`; new rules since then missed |
+| Bundled rules / static logic | N/A — these don't update without a code change |
+
+The dynamic-refresh feeds use **per-ecosystem error isolation**:
+if the npm bulk 503s and pypi succeeds, the pypi rows still
+commit. Status returns `partial`. This avoids the "one DNS
+hiccup wipes the cache" failure mode.
+
+### 5a.4. What still needs to be dynamic (open follow-ups)
+
+* **Recently-published-with-high-downloads detection** — needs
+  a feed pulling weekly publish dates from npm / pypi registry.
+* **Maintainer-history checks** (no GitHub repo / one-commit
+  history) — needs the per-package metadata API.
+* **Network-call patterns at install time** — needs
+  Socket.dev's static-analysis feed or our own ingester.
+* **`strix-rules` community SAST corpus** — bundled rules are
+  static today. A `feeds/strix_rules.py` that pulls from a
+  daily-updated GitHub repo would mirror the SCA pattern and
+  let community-contributed rules update without strix releases.
+
+### 5a.5. The contract for new phases
+
+When a new phase ships a signal-detection component, declare its
+refresh status against the table above. Three valid choices:
+
+1. **Static** — code change to update. Document explicitly so
+   reviewers know to re-evaluate the corpus on schedule.
+2. **Dynamic via existing feed** — pulls from an established
+   feed (CVE, GHSA, OSV). Add a fallback when the feed is empty.
+3. **Dynamic via new feed** — register in
+   `strix/threat_intel/feeds/__init__.py` AND
+   `strix/threat_intel/refresh.py::_FEEDS`. Required: status
+   reporting (via `record_feed_status`), error isolation,
+   fallback policy.
+
+### 5a.6. Wrapper requests from §5a
+
+Cross-referenced in §14.6.
+
+- **Cron / sidecar setup in onboarding** — wrapper provisions
+  the threat-intel daemon (`python -m strix.threat_intel
+  .refresh` daily + `python -m strix.threat_intel.streaming`
+  long-running). Customers shouldn't have to wire this
+  themselves.
+- **Feed staleness indicator** — read `feed_meta` cache table;
+  show "KEV last updated 4h ago / GHSA last updated 2h ago"
+  on the dashboard. Red badge when last-polled > 24h.
+- **Real-time intel banner** — when `event_stream.jsonl` has
+  recent `kev_added` events, surface them in a top-banner
+  "X new KEV-listed CVEs match your dependencies" with click-
+  through to the relevant SCA findings.
+- **Daemon liveness** — `feed_polled` events at 5-min cadence
+  prove the streaming daemon is alive. Wrapper's status page
+  shows green/red based on most-recent event timestamp.
+- **Per-feed fallback messaging** — when a feed returns
+  `status=error`, the wrapper renders "Feed X is currently
+  unavailable; using last-known-good cache from Yh ago" rather
+  than implying total failure.
+
+---
+
+## 6. Phase 7 — Real SAST (semantic code review)
+
+**Status:** 7.1 / 7.2 / 7.3 / 7.4 v1 / 7.5 landed in **PR #219**
+(2026-05-10). Function-level call-graph reachability (7.4 v2) is
+the only Phase 7 item deferred — same multi-week call-graph
+blocker as 6.4 v2.
+
+**Goal**: pre-PR code-review-grade analysis of source files.
+
+### Why
+- Snyk Code, Semgrep, GitHub CodeQL all do this. Customer expectation.
+- Vibe-coded apps especially benefit because AI-generated auth/crypto/injection
+  patterns are the top vuln source after deps.
+
+### Items
+
+#### 7.1. Semgrep wrapper (`strix/sast/semgrep_runner.py`) — **shipped in #219**
+- Shell out to `semgrep` (preferred) OR pure-Python rule interpreter
+- Use Semgrep's official rule registry (1000+ rules) + `p/owasp-top-ten` pack
+- Per-language coverage: JS/TS/Python/Go/Java/PHP/Ruby/C#/Kotlin/Swift
+- Daily rule-pack refresh via `semgrep --update`
+- **v1 ships graceful degradation**: when Semgrep isn't on PATH,
+  `scan_sast` returns `status="partial"` with a clear install hint
+  rather than erroring the scan.
+
+#### 7.2. Custom rule library for vibe-coded patterns — **shipped in #219 (39 rules)**
+Rules specific to AI-generated code:
+- Mass-assignment in Express handlers (`req.body` → DB without allowlist)
+- Missing authz check on Next.js Server Actions
+- Hardcoded JWT secrets in `next.config.js`
+- React `dangerouslySetInnerHTML` from user input
+- Vercel function with overly-permissive CORS
+- AI-prompt-injection in LLM endpoint code
+
+**Shipped 39 rules** across 6 categories (Express, Python /
+Django / Flask, generic injection, React / Next.js, LLM / AI
+features, crypto). See
+`strix/sast/rules/vibe_coded/README.md` for the full table.
+Adding more rules is a rule-only PR (drop YAML files in the
+dir; no engine changes needed) — the 50+ target is a soft
+ceiling, not a gate.
+
+#### 7.3. Diff-aware mode — **shipped in #219**
+For PR-time scanning, only run rules on files changed in the diff:
+```
+sast_scan(repo_path, since_commit="main", until_commit="HEAD")
+```
+~400 LOC.
+
+#### 7.4. Severity calibration — **v1 shipped in #219**
+Cross-reference SAST findings with reachability + entry-point analysis:
+- A SQLi sink in a private helper called only by tests → low
+- A SQLi sink reachable from a public HTTP route → critical
+
+**v1** uses file-level proximity to `code_map.json` route handlers
+(route-reachable file → +1 tier) plus test-file demote (-1 tier).
+Function-level call-graph (proper "is this function transitively
+called from a route?") is the same blocker as Phase 6.4 v2 — both
+need the same call-graph machinery.
+
+#### 7.5. SARIF output — **shipped in #219**
+Industry-standard format. Required for GitHub Code Scanning integration.
+~300 LOC. Pure mapping work; orthogonal to the analysis engine.
+
+**Shipped**: `scan_sast` accepts an optional `sarif_output_path=`
+argument and writes a SARIF 2.1.0 document with all findings.
+SARIF `level` reflects the post-7.4 calibrated severity (NOT
+the raw Semgrep value), so dashboards see post-Phase-7.4
+numbers. Per-result `properties.calibration` carries the
+breadcrumb explaining WHY a severity changed. URIs normalised
+to repo-relative paths via `originalUriBaseIds[%SRCROOT%]` so
+GitHub Code Scanning renders file links correctly.
+
+Out of scope for v1 (SARIF spec extensions; the minimal output
+stays valid as these land):
+  * `codeFlows` arrays (need taint tracing → 6.4 v2 / 7.4 v2)
+  * `fixes[]` autofix descriptors (Phase 12)
+  * `runs[].invocations[]` runtime details
+
+### Deliverables
+- Semgrep runner specialist
+- 50+ custom Semgrep rules for vibe-coded patterns
+- Diff-aware execution
+- SARIF output
+- Severity calibration via reachability
+
+### Phase effort
+~5,000 LOC across ~6 PRs.
+
+### Success criteria
+- Detection on a curated repo of intentionally-bad AI-generated patterns
+- <10% false-positive rate (calibrated against customer feedback in wrapper)
+
+### Wrapper dependency
+
+**Existing ask:**
+- PR-comment bot (Phase A) uses `sast_findings.json` artifact for inline
+  comments. **Update**: SARIF 2.1.0 output is the production artifact
+  (Phase 7.5 shipped); the wrapper integrates with GitHub Code
+  Scanning natively rather than parsing markdown.
+
+**New requests from PR #219** (cross-referenced in §14.6):
+- **GitHub Code Scanning integration** — wrapper opts into SARIF
+  output by passing `scan_sast(sarif_output_path=...)`. Path
+  defaults to alongside `vulnerabilities.json`. Calibrated
+  severity in SARIF `level`; calibration breadcrumb in
+  `properties.calibration` (so reviewers see WHY a finding's
+  severity changed).
+- **"Install Semgrep" CTA** — when
+  `tool_metadata.engine_available=False`, surface install
+  instructions inline rather than failing the scan.
+- **PR-mode indicator** — `tool_metadata.diff_scope.applied=
+  True` triggers a "PR mode: scanned N changed files" badge.
+- **Calibration counts** — `tool_metadata.calibration.{bumped,
+  demoted,unchanged}` powers a "we filtered N noise findings"
+  metric.
+- **Daily SAST refresh cron** — `python -m strix.sast.refresh`
+  runs `semgrep --update`. Wrapper-side cron / sidecar.
+
+---
+
+## 7. Phase 8 — AI / LLM feature security
+
+**Goal**: probe LLM-backed endpoints for prompt injection, jailbreak,
+indirect injection via uploads, tool-call abuse.
+
+### Why
+- Vibe-coded apps frequently ship LLM features (chat, search, agents).
+- Lakera / Protect AI / HiddenLayer dominate this niche but charge enterprise prices.
+- Zero current coverage in strix.
+- This is genuinely novel; differentiates us.
+
+### Items
+
+#### 8.1. LLM-feature detection
+Heuristic to identify endpoints backed by an LLM:
+- Streaming SSE responses with token-by-token output
+- Response shape: `{"completion": "..."}` / `{"choices": [...]}`
+- Headers: `X-Anthropic-*`, `OpenAI-*`, `cf-ray`-with-AI-flag
+- Latency profile: variable per request (model inference) vs static (cache)
+~500 LOC.
+
+#### 8.2. Direct prompt injection (`scan_prompt_injection`)
+- Probe with payloads from `garak` corpus (NVIDIA's open LLM-attack library)
+- Detect when system-prompt content leaks into response
+- Detect jailbreak success markers ("DAN", "Sure, here's how to...")
+- Detect tool-call leakage ("```python\nimport requests\n...```")
+~1,200 LOC + integration with `garak`.
+
+#### 8.3. Indirect prompt injection
+- Upload poisoned doc / image / SVG with hidden instructions
+- Probe RAG-backed search endpoints with adversarial doc URLs
+- Detect when assistant follows attacker-uploaded instruction
+~800 LOC.
+
+#### 8.4. Tool-call / agent abuse
+- When the LLM has tool-calling, probe for unauthorized tool invocation
+- Detect when assistant calls `delete_user(id=victim_id)` from chat input
+- Test for confused-deputy attacks (assistant runs commands on behalf of attacker)
+~700 LOC.
+
+#### 8.5. Training-data extraction
+- Probe with prompts known to extract memorized training data
+- Detect PII / customer-data leakage through inversion attacks
+- Coordinate with the customer's compliance posture
+~600 LOC.
+
+#### 8.6. Output validation testing
+- When LLM output is fed back into the app (DOM, DB, shell), check for
+  XSS / SQLi / RCE via crafted prompts
+- This is "prompt → output → second-stage exploit" chain
+~500 LOC.
+
+### Deliverables
+- 5 new specialists (`scan_prompt_injection`, `scan_indirect_injection`,
+  `scan_llm_tool_abuse`, `scan_training_data_extraction`,
+  `scan_llm_output_validation`)
+- LLM-feature auto-detection
+- `garak` integration for the prompt corpus
+
+### Phase effort
+~5,500 LOC across ~6 PRs.
+
+### Success criteria
+- Detection on intentionally-vulnerable LLM testbeds (Gandalf, PortSwigger
+  AI labs)
+- Coverage of OWASP LLM Top 10 (2024) categories LLM01–LLM10
+
+### Wrapper dependency
+- Compliance dashboard needs LLM-feature findings tagged for AI-act / GDPR /
+  EU AI Regulation evidence (Phase C).
+
+---
+
+## 8. Phase 9 — Real-time intelligence + behavioural detection
+
+**Status:** 9.1 (poll-mode daemon) / 9.2 / 9.3 / 9.5 / 9.6 landed
+in **PR #219** (2026-05-10). State-machine workflow discovery
+(9.4) and the GHSA webhook subscriber + RSS / Bluesky firehose
+(9.1 full) are deferred to follow-up PRs.
+
+**Goal**: same-hour awareness of new CVEs/exploits + drift detection on
+deployed apps.
+
+### Why
+- Daily cron isn't real-time. KEV updates can take hours to surface.
+- Behavioural detection catches novel bugs no signature has yet.
+
+### Items
+
+#### 9.1. Push-feed daemon (`strix/threat_intel/streaming/`) — **lite shipped in #219; full deferred**
+Replaces the daily cron with:
+- Webhook subscriber for GHSA (push notifications via GitHub App) — **deferred** (needs deployment infra + webhook endpoint)
+- 5-minute polling of CISA KEV (lightweight JSON feed) — **shipped**
+- RSS subscriptions: HackerOne Hacktivity, exploit-db, vendor advisories — **deferred** (needs moderation layer)
+- Bluesky firehose for `#infosec` keyword + curated researcher allow-list — **deferred** (needs auth + rate-limit handling)
+- `event_stream.jsonl` ring buffer the agent subscribes to mid-scan — **shipped**
+
+**Shipped in #219**: poll-mode daemon (`python -m strix.threat_intel
+.streaming`) that runs `poll_kev` every 5 minutes and emits
+`kev_added` / `feed_polled` events to a bounded `event_stream
+.jsonl` ring buffer. Atomic rotation when the buffer overflows.
+Per-iteration error isolation — a failed poll emits a
+`feed_polled` liveness event rather than crashing the daemon.
+
+Defer rationale for the full v1: webhook / RSS / Bluesky each
+need separate auth + endpoint infrastructure that's out of
+strix's deployment footprint. Poll-mode covers the highest-
+churn feed (KEV) and gets us 95% of the time-to-detection win.
+
+#### 9.2. Per-endpoint behavioural baselines (`strix/baselines/`) — **shipped in #219**
+- For every recon-discovered endpoint, capture:
+  - 5-sample latency distribution (p50, p99)
+  - Response status, headers, content-type
+  - Body length distribution + JSON shape (key set)
+  - Auth-state delta (anon vs authenticated) — **partial** (we record both anon + auth as separate rows; structured delta is a follow-up that needs `multi_role_auth` integration)
+- Persist to `behavioural_baselines.jsonl`
+
+**Shipped in #219**: `EndpointBaseline` dataclass + JSONL store
+(append-only, last-line-wins on read, corruption-tolerant) +
+`capture_baseline()` with caller-injected probe fn for test
+parity. Robust to probe failures: baselines record the
+surviving N samples; zero-success captures produce
+`samples=0` so the diff layer treats as "indeterminate" rather
+than asserting stability.
+
+#### 9.3. Anomaly-diff specialist (`scan_response_anomaly`) — **shipped in #219**
+- Diffs probe response against baseline
+- Anomaly classes: status-flip, length-outlier, latency-outlier (>3σ),
+  new-keys-in-json, error-string-presence, header-set-change
+- Used by every other specialist as a complementary signal
+
+**Shipped in #219**: `scan_response_anomaly` LLM specialist that
+diffs single probes OR corpora of probes against the captured
+baseline. Per-class severity grading (status-flip / error-string
+= high; length / new-keys / latency = medium; header-change =
+low; aggregate = max). Both single-probe + corpus modes; corpus
+mode also runs Phase 9.6 shape clustering. KEV / EPSS-style
+overrides don't apply (these are pattern-match findings, not
+advisory matches).
+
+#### 9.4. State-machine workflow discovery — **deferred to follow-up PR**
+- Crawl auth + state-change endpoints, infer state machine
+- Probe transitions: skip-step, backward, cross-tenant
+- Persist to `workflow_graph.json`
+~1,500 LOC. Deferred — needs proper graph construction +
+transition-probe orchestration; multi-week project.
+
+#### 9.5. Timing oracle specialist (`scan_timing_oracle`) — **shipped in #219**
+- 50-sample timing-sensitive probes per param
+- Statistical fit (boxplot, KDE)
+- Detects blind injection / padding oracles / TOCTOU
+
+**Shipped in #219**: `scan_timing_oracle` LLM specialist with
+50-sample-per-payload statistical comparison. Pure-Python
+non-parametric test (Mann-Whitney-style rank-sum + median
+separation) — no scipy dep. Both gates must trigger for a
+"distinct" verdict (median sep > 1.5× pooled IQR AND rank-sum
+effect size > 0.7) — single-signal verdicts FP too often at
+N=50 on noisy networks. Caller supplies `payload_pairs` of
+parameterless `control_send_fn` / `suspect_send_fn` callables.
+
+#### 9.6. Response-shape clustering — **shipped in #219**
+- Group probe responses by shape (status × length-bucket × content-type ×
+  body-fingerprint)
+- Outliers signal novel behaviour
+- Pairs with mutation fuzzer (Phase 13.5)
+
+**Shipped in #219**: `fingerprint_response()` + `find_shape_outliers
+()` as a support module under `scan_response_anomaly`. Body-key-
+hash for JSON (shape-only, value-independent); first-512-byte
+hash for non-JSON. Outliers: clusters of size ≤ 1 across a
+corpus of size ≥ 5. Pairs cleanly with the mutation fuzzer
+when it lands (Phase 13.5).
+
+### Deliverables
+- Streaming threat-intel daemon
+- 4 new specialists (anomaly-diff, workflow-discovery, timing-oracle, shape-clustering)
+- `event_stream.jsonl` + `behavioural_baselines.jsonl` artifacts
+
+### Phase effort
+~5,500 LOC across ~7 PRs.
+
+### Success criteria
+- Time-from-CVE-disclosure-to-detection < 1h (currently ~24h)
+- Anomaly diff catches at least 3 manifest items without static-payload help
+- Workflow discovery generates ≥10 transition probes per typical multi-page app
+
+### Wrapper dependency
+
+Cross-referenced in §14.6.
+
+- **Behavioural tab** — render `category=anomaly` findings in
+  a dedicated tab with per-class iconography (`status_flip` /
+  `error_string_present` / `latency_outlier_3sigma` /
+  `new_keys_in_json` / `header_set_change` / `shape_outlier`).
+- **Endpoint reference panel** — for each baseline'd endpoint,
+  show the captured profile (status distribution, latency
+  p50/p99, body-length p50/p99, JSON keys) as the "what's
+  normal here" context next to anomaly findings.
+- **Real-time KEV banner** — subscribe to `event_stream.jsonl`
+  via tail-since-timestamp; surface new KEV listings in a top
+  banner (covered in §5a.6 above).
+- **Daemon-liveness indicator** — `feed_polled` events at
+  5-min cadence prove the streaming daemon is alive; wrapper
+  shows green/red based on most-recent event.
+- **Timing-oracle confidence badge** — render
+  `tool_metadata.distinct_count / pairs_analysed` as
+  "statistical confidence" alongside the finding. The blind-
+  injection signal is statistical, not deterministic; the
+  wrapper should communicate that.
+- **Mutation-fuzzer corpus view** — `tool_metadata.shape_outliers`
+  + `outlier_indices` from `scan_response_anomaly` highlights
+  outlier responses in the probe-history viewer.
+
+---
+
+## 9. Phase 10 — AI-native specialist class (LLM-fallback)
+
+**Goal**: when static specialists return 0 findings on strong-signal endpoints,
+escalate to bounded LLM-driven probe generation.
+
+### Why
+- Application-specific bypasses (Juice Shop's `/redirect` allowlist trick)
+  aren't in any static corpus
+- Senior pentesters reason about response shape and adapt; we can too
+- This is the wedge that distinguishes an AI security engineer from a scanner
+
+### Items
+
+#### 10.1. LLM-fallback infrastructure
+- Cached system-prompt registry (Phase 2 in workitem.md, never built)
+- Bounded inner-LLM tool subset (Phase 1 B.9 in workitem.md)
+- Cost cap per fallback call ($0.05 default)
+- Output coercion to SpecialistResult schema
+~1,000 LOC.
+
+#### 10.2. `scan_xss_llm` (the proof point)
+- Triggered when `scan_xss` returns 0 findings on a clearly-reflective endpoint
+- Inner LLM:
+  1. Reads baseline_response, identifies reflection points
+  2. Generates 5 context-aware payloads (HTML attribute / JS string / URL / template)
+  3. Sends + observes via the bounded tool subset
+  4. Returns `SpecialistResult` with novel-payload findings
+- Cost target: $0.02–0.05 per fallback call
+~800 LOC + system prompt template.
+
+#### 10.3. `scan_sqli_llm`
+- Same pattern, DB-aware: reasons about Postgres/MySQL/MSSQL/SQLite
+  fingerprints, generates DB-specific payloads (xp_cmdshell, COPY FROM
+  PROGRAM, INTO OUTFILE)
+~700 LOC.
+
+#### 10.4. `scan_authz_logic_llm`
+- When scan_idor + scan_business_logic both miss
+- Inner LLM models likely auth invariants from the endpoint's behaviour,
+  designs probes that violate them
+- Highest-leverage on novel/business-logic bugs
+~900 LOC.
+
+#### 10.5. `scan_oauth_advanced_llm`
+- jku-spoof / kid-traversal / alg-confusion / mix-up attacks
+- All require reasoning over a captured JWT
+~700 LOC.
+
+#### 10.6. `scan_business_flow_llm`
+- Models multi-step workflows (cart → checkout → payment)
+- Probes invariant violations (negative price after coupon, double-spend
+  via parallel requests)
+~800 LOC.
+
+#### 10.7. `scan_code_review_llm` (when source available)
+- Reads auth middleware, crypto, deserialization sites with intent
+- Specifically: "find bug class X in this code, give me concrete file:line"
+- Pairs with Phase 7 SAST findings for false-positive triage
+~1,000 LOC.
+
+### Deliverables
+- 6 new LLM-driven specialists
+- Cached prompt registry (cost / cache-hit infrastructure)
+- Per-specialist cost telemetry
+
+### Phase effort
+~6,000 LOC across ~7 PRs.
+
+### Success criteria
+- Recall on Juice Shop ≥95% (vs current 88%)
+- Median fallback cost < $0.05/call
+- ≥20% of misses on real customer scans get a finding from LLM-fallback
+
+---
+
+## 10. Phase 11 — IaC / cloud posture
+
+**Status:** 11.1 (vibe-coded subset) / 11.3 v1 landed in
+**PR #219** (2026-05-10). Terraform / Pulumi / k8s parsers
+(11.1 enterprise scope), Checkov shell-out (11.2), cloud API
+integration (11.4), and container image scanning (11.5) are
+deferred to follow-up PRs.
+
+**Goal**: scan Terraform / CloudFormation / Pulumi / K8s manifests; audit
+Vercel / Cloudflare / Netlify configs.
+
+### Why
+- Vibe-coded apps deploy to edge platforms; misconfig is a top vuln source
+- Wiz/Snyk IaC dominate this market — but mostly enterprise-priced
+
+### Items
+
+#### 11.1. IaC parsers — **vibe-coded subset shipped in #219; enterprise deferred**
+- Terraform (HCL2 parser via `python-hcl2`) — **deferred** (enterprise scope)
+- CloudFormation (YAML/JSON) — **deferred** (enterprise scope)
+- Pulumi (Python/TypeScript AST) — **deferred** (enterprise scope)
+- Kubernetes manifests (YAML) — **deferred** (enterprise scope)
+- Docker Compose / Dockerfile — **shipped in #219**
+
+**Shipped in #219**: parsers for `vercel.json`, `netlify.toml`,
+`wrangler.toml`, `Dockerfile`, `docker-compose.yml` — the actual
+deploy surface for vibe-coded SaaS. Strategic call: Terraform /
+Pulumi / k8s are enterprise patterns that vibe-coded apps rarely
+write themselves.
+
+#### 11.2. Checkov rule integration — **deferred to follow-up PR**
+- Shell out to `checkov` (1,500+ rules) OR pure-Python equivalents
+- SOC 2 / CIS / NIST / HIPAA mapping built into Checkov rules
+- Auto-fix suggestions when present
+~1,000 LOC.
+
+Defer rationale: heavy external dep (`checkov` is ~80MB). The
+v1 native rule pack covers the highest-impact patterns; Checkov
+adds SOC 2 / CIS / NIST mapping which is more relevant after
+the wrapper's compliance dashboard work (Phase A in
+AISecurityEngineerUX.md).
+
+#### 11.3. Edge-platform config audit — **shipped in #219 (22 rules)**
+- Vercel: parse `vercel.json` + project settings via API
+- Cloudflare Workers: `wrangler.toml` + KV bindings + service bindings
+- Netlify: `netlify.toml` + Edge Functions config
+- Specific to vibe-coded apps' deployment surface
+
+**Shipped in #219**: 22 native rules across 4 platforms.
+  * **Vercel (5)**: cors-wildcard-with-credentials, redirect-
+    external-host, cron-no-auth-marker, env-hardcoded-secret,
+    function-overly-large-max-duration.
+  * **Netlify (3)**: redirect-external-wildcard,
+    build-env-hardcoded-secret, csp-unsafe-inline-or-eval,
+    cors-wildcard-with-credentials.
+  * **Cloudflare (4)**: vars-hardcoded-secret, r2-public-binding,
+    route-overly-broad, kv-no-preview-id.
+  * **Dockerfile (5)**: no-user-directive, user-root,
+    latest-tag, env-hardcoded-secret, add-from-url.
+  * **docker-compose.yml (5)**: privileged-container,
+    host-network-mode, docker-socket-mount, db-port-exposed,
+    environment-hardcoded-secret.
+
+Cross-asset routing per §4a: IaC misconfig → DAST probe of the
+deployed URL. Lead-agent's cross-asset block now includes the
+specific chain (CORS-wildcard-with-credentials → cors_deep_check
+on the live URL; redirect-external → open_redirect_check; etc.).
+
+Project-settings-API integration (read live Vercel project
+config via `vc.token` etc.) is deferred — needs customer
+credentials, distinct workflow.
+
+#### 11.4. Cloud API integration (read-only) — **deferred to follow-up PR**
+- AWS: IAM policy review, S3 bucket policies, Security Group analysis
+- GCP: project IAM, GCS bucket ACL, Compute firewall
+- Azure: RBAC, storage account access policies
+- Authenticated via customer-supplied read-only credentials
+~3,000 LOC. Deferred — requires customer-credential ingestion
+flow (wrapper-side) before the engine can use it.
+
+#### 11.5. Container image scanning — **deferred to follow-up PR**
+- Wrap `trivy` or `grype` for image-CVE scanning
+- Map detected base-image OSes to threat-intel cache
+~800 LOC. Deferred — separate engine concern; reuses the
+existing threat-intel cache but doesn't share the `iac/` module.
+
+### Deliverables
+- 5 IaC parsers
+- Checkov runner specialist
+- 3 edge-platform auditors (Vercel/Cloudflare/Netlify)
+- AWS/GCP/Azure read-only auditors
+- Trivy wrapper
+
+### Phase effort
+~8,000 LOC across ~9 PRs.
+
+### Success criteria
+- Coverage of CIS benchmarks for the 3 edge platforms
+- Detection on a curated misconfig fixture set
+- AWS IAM finding parity with Snyk IaC's reports
+
+### Wrapper dependency
+
+Cross-referenced in §14.6.
+
+- **Cloud-posture dashboard tile** — group IaC findings by
+  platform (`[iac:vercel]` / `[iac:netlify]` / `[iac:cloudflare]`
+  / `[iac:docker]`). One tile per platform with severity
+  rollup.
+- **Platform-specific iconography** — Vercel triangle /
+  Netlify diamond / Cloudflare orange / Docker blue. Each
+  finding card carries the platform badge.
+- **"Affects EVERY environment" warning** — IaC findings
+  apply to every env that shares the file (dev / staging /
+  prod). The wrapper should make this explicit in the finding
+  card so reviewers don't think it's per-env.
+- **Cloud API onboarding flag** (Phase 11.4 deferred) — when
+  customer connects AWS/GCP/Azure read-only creds, surface
+  "Cloud-posture scanning ON". Until 11.4 ships, render as
+  "Coming soon — file-based IaC scanning available now".
+- **Container image scanning** (Phase 11.5 deferred) — when
+  it ships, image findings will share the IaC dashboard tile.
+
+---
+
+## 11. Phase 12 — Auto-fix / remediation
+
+**Goal**: generate actual code patches, not just remediation paragraphs.
+
+### Why
+- Pixee built a $25M ARR business on this premise
+- "Apply Fix" buttons in PR-comment workflows close the loop on
+  detect → fix → ship
+- Differentiator vs Snyk/Aikido (who recommend, don't always fix)
+
+### Items
+
+#### 12.1. Codemod library
+- Per bug class: a parameterized codemod template
+  - SQLi → parameterized query rewrite
+  - XSS → output encoding insertion
+  - Hardcoded secret → env-var migration
+  - Missing authz → middleware insertion
+  - Open redirect → allowlist check insertion
+- Initial coverage: ~30 codemods
+~3,500 LOC.
+
+#### 12.2. AST-aware patch generation
+- Per language: parse, transform, re-emit
+- JS/TS via `tree-sitter` or `babel-parser`
+- Python via `libcst` or `ast`
+- Go via `go/ast`
+~2,500 LOC.
+
+#### 12.3. LLM-augmented patch fallback
+- When no codemod template matches, LLM generates a candidate patch
+- Confidence scoring (does the patch compile? does the test pass? does it
+  remove the SAST finding without introducing a new one?)
+- Bounded LLM call ($0.10 per patch)
+~1,500 LOC.
+
+#### 12.4. Patch validation pipeline
+- Each generated patch goes through:
+  1. Syntax check
+  2. Type-check (where applicable)
+  3. Re-run the SAST/SCA finding (must no longer fire)
+  4. Run existing test suite (must still pass)
+- Only patches passing all 4 gates surface to the customer
+~1,200 LOC.
+
+#### 12.5. Patch artifact format
+- `auto_fix_patches.json`: list of `{finding_id, patch_diff, confidence, validation_results}`
+- Wrapper consumes this to render "Apply Fix" PR-comment buttons
+~300 LOC.
+
+### Deliverables
+- 30+ codemods covering top OWASP categories
+- AST-aware generation for 5 languages
+- Patch validation pipeline
+- LLM-fallback for novel bug shapes
+
+### Phase effort
+~9,000 LOC across ~10 PRs.
+
+### Success criteria
+- 70% auto-fix rate on the canonical OWASP Top 10 test corpus
+- 95% of validated patches don't introduce regressions
+
+---
+
+## 12. Phase 13 — Continuous monitoring + long-term memory
+
+**Goal**: the engine gets better with every customer engagement.
+
+### Why
+- Senior engineer behaviour: remember what's worked, recognize patterns
+- Continuous monitoring catches regressions vs annual pentest
+- Phase 5.4 telemetry foundation is unused
+
+### Items
+
+#### 13.1. Per-customer engagement memory
+- `~/.strix/customers/<customer-id>/decision_log_archive.jsonl`
+- On scan start, lead seeds context from:
+  - Prior decision log (avoid re-discovery)
+  - Confirmed findings from last engagement
+  - Customer's threat-model preferences
+~800 LOC.
+
+#### 13.2. Cross-customer attack-pattern library (privacy-preserving)
+- Anonymized: "this auth-shape correlates with kid-traversal"
+- Features hashed, customer-identifying data stripped
+- Continuous learning: every scan contributes
+~1,200 LOC.
+
+#### 13.3. Active-learning consumer
+- Nightly job reads `specialist_telemetry.jsonl` + `specialist_misses.jsonl`
+- Identifies common-miss patterns
+- Generates new payload candidates via LLM
+- A/B tests on synthetic + benchmark targets
+- Persists winners into per-specialist `learned_payloads.json`
+~900 LOC.
+
+#### 13.4. Continuous scanning daemon
+- `strix watch <target> --schedule="*/30 * * * *"`
+- Re-runs specialists on schedule
+- Emits findings only on **delta** (regression detection)
+- Hooks into wrapper's alerting
+~700 LOC.
+
+#### 13.5. Mutation fuzzer with anomaly detection
+- AFL-style random mutations + response-shape clustering
+- Detects novel input handling bugs
+- Generic fallback when neither static nor LLM-driven probing fits
+~1,500 LOC.
+
+#### 13.6. Researcher-feed ingester
+- RSS / Bluesky firehose of curated security researchers
+- LLM summarization → indexed by attack-class keyword
+- Lead can search ("recent attack patterns affecting Express + JWT") to
+  pull historical analogs into its hypothesis-EV scoring
+~1,000 LOC.
+
+### Deliverables
+- Per-customer memory archive
+- Anonymized cross-customer pattern library
+- Active-learning nightly job
+- Continuous scanning daemon mode
+- Mutation fuzzer
+- Researcher-feed ingester
+
+### Phase effort
+~6,000 LOC across ~7 PRs.
+
+### Success criteria
+- Demonstrable improvement on benchmark recall after 30 days of telemetry
+  consumption
+- Continuous mode catches ≥80% of intentionally-introduced regressions in
+  staging-vs-production diff testing
+
+---
+
+## 13. Cross-cutting concerns
+
+### Testing & quality
+Every phase ships with:
+- Unit tests pinning detection + suppressions + wiring (~10–20 per specialist)
+- Integration test against a curated benchmark fixture
+- Performance regression tests (each new specialist adds <10% to scan time)
+- False-positive rate measurement on a known-clean corpus
+
+### Performance
+- Diff-aware mode for SAST + SCA + Secrets (Phase 6, 7, 12)
+- Parallel specialist dispatch (Phase 1.7, already shipped)
+- Specialist timeout budgets (per-tool `default_budget.max_wall_seconds`)
+- Cache warm-up on engine boot (threat-intel + nuclei corpus)
+
+### Telemetry
+Every artifact produced (`*.jsonl`, `*.json`) goes through the existing
+provenance log + Phase 5.4 telemetry stream so the wrapper can:
+- Show real-time scan progress
+- Render the engine's decision trace
+- Surface counter-examples for triage tuning
+
+### Security of the engine itself
+- No raw customer source code persisted outside `<run_dir>` (configurable)
+- Anonymized cross-customer pattern library (Phase 13.2) hashes features
+- All third-party feeds verified by signature where available
+- LLM calls scrubbed for customer-identifiable content before logging
+
+---
+
+## 14. Wrapper dependencies
+
+The wrapper consumes engine outputs. This section is the **artifact
+contract** between engine + wrapper. Every row tells the wrapper
+team what to subscribe to / render. Cross-referenced in
+[`AISecurityEngineerUX.md`](./AISecurityEngineerUX.md).
+
+### 14.1. Artifacts shipped (consumable today, post PR #219)
+
+| Source | Artifact | Format | Wrapper consumer |
+|---|---|---|---|
+| Tracer (existing) | `vulnerabilities.json` | JSON list of finding dicts | Findings inbox; primary feed |
+| Tracer (existing) | `vulnerabilities/*.md` | Markdown per finding | Detail panel rendering |
+| Phase 1.6 | `decision_log.jsonl` | JSONL events | Audit trail; "why did the agent do X?" |
+| Phase 1.7 | `code_map.json` | JSON | Repo dependency graph view |
+| Phase 5.3 | `specialist_misses.jsonl` | JSONL events | Active-learning loop / customer-side PR feedback |
+| Phase 5.4 | `specialist_telemetry.jsonl` | JSONL events | Cost dashboards; per-specialist hit-rates |
+| Phase 7.5 | SARIF 2.1.0 (opt-in via `scan_sast(sarif_output_path=...)`) | JSON | **GitHub Code Scanning native ingest** |
+| **§4a v2** | **`finding_chains.json`** | JSON | **Render N findings as 1 exploit chain** |
+| **§4b** | **`compliance_evidence.json`** | JSON | **SOC 2 / ISO 27001 / PCI / ASVS dashboards + auditor handoff** |
+| **§5a** | `popular_packages` cache table | sqlite | Feed-staleness indicator on dashboard |
+| **§5a** | `feed_meta` cache table | sqlite | Per-feed last-polled timestamp surfacing |
+| **Phase 9.1** | `event_stream.jsonl` | JSONL ring buffer | Real-time KEV-added alerts; daemon liveness |
+| **Phase 9.2** | `behavioural_baselines.jsonl` | JSONL | Anomaly-diff context; "what's normal for this endpoint" |
+
+### 14.2. Per-finding metadata the wrapper renders
+
+These ride on individual findings inside `vulnerabilities.json` —
+no separate artifact, but new fields the wrapper UI should
+surface:
+
+| Field | Source | UI request |
+|---|---|---|
+| `[reachability=direct_import\|transitive_only\|unused\|unknown]` in title | Phase 6.4 v1 | Demotion badge next to severity (e.g. "high → low [unused]"). When `unused` / `transitive_only`, render greyed-out by default with an "expand demoted" toggle. |
+| `[KEV — actively exploited]` in title | Phase 6.3 | Red urgent badge; pin to top of inbox. |
+| `[reachability=*]` + KEV both present | Phase 6.4 + KEV | KEV always wins — render at top with KEV badge; the demotion badge is informational. |
+| `category=malicious_dependency` + `subtype=typosquat\|install_script\|known_malicious\|no_license` | Phase 6.6 | Dedicated "Malicious dependency" section in inbox, separate from CVE findings. `known_malicious` (OSSF feed match) gets its own highest-priority block. |
+| `category=license_violation` + `family=copyleft\|commercial_restricted\|unknown\|weak_copyleft` | Phase 6.7 | License compliance tab; pie chart from `tool_metadata.licenses.by_family`. Auto-rotate-credential workflow for `info_disclosure` license findings. |
+| `category=finding_chain` + `chain_id` + `chain_type` | §4a v2 | Render chain as one card with N findings expandable below; chain-type-specific colour scheme (`sca_dast` red, `sast_dast` orange, etc.). |
+| `category=compliance_violation` | §4b | Compliance tab; one card per failed control with linked findings. |
+| `category=anomaly` + classes (`status_flip` / `error_string_present` / `latency_outlier_3sigma` / `new_keys_in_json` / `header_set_change`) | Phase 9.3 | "Behavioural" tab; per-class iconography. `error_string_present` + SQL classes → suggested SQLi pivot button. |
+| `[iac:vercel\|netlify\|cloudflare\|docker]` prefix in title | Phase 11.3 | Platform-specific iconography; group by deploy platform. |
+| `[chain:sca_dast\|sast_dast\|iac_dast\|...]` prefix in title | §4a v2 | Chain-type label badge. |
+
+### 14.3. New tool_metadata fields the wrapper should consume
+
+Each specialist's `tool_metadata` (in the `SpecialistResult`)
+carries dashboard-ready rollups:
+
+| Tool | Field | Wrapper view |
+|---|---|---|
+| `scan_sca_lockfiles` | `reachability.by_status` | "We filtered N noise findings via reachability" badge |
+| `scan_sca_lockfiles` | `reachability.suppressed` | When `only_reachable=True`, count of suppressed |
+| `scan_sca_lockfiles` | `malicious.by_indicator` | Typosquat / install-script / no-license counts |
+| `scan_sca_lockfiles` | `licenses.by_family` | License-pie chart; SOC 2 OPS-3 evidence |
+| `scan_sast` | `engine_available` | "Install Semgrep to enable SAST" CTA |
+| `scan_sast` | `diff_scope.applied` | "PR-mode: scanned 5 changed files" indicator |
+| `scan_sast` | `calibration.{bumped,demoted,unchanged}` | "We bumped X / demoted Y based on reachability" |
+| `scan_sast` | `sarif_output_path` | Link to SARIF download for GitHub Code Scanning |
+| `scan_iac` | `findings_by_platform` | Per-platform iconography in dashboard tiles |
+| `scan_response_anomaly` | `shape_outliers` + `outlier_indices` | Highlight the outlier responses in the probe-history viewer |
+| `scan_timing_oracle` | `distinct_count` / `pairs_analysed` | Statistical-confidence badge |
+| `correlate_findings` | `chains_path` + `by_chain_type` | Chain inbox + chain-type filter |
+| `emit_compliance_evidence` | `summary` per framework | SOC 2 / ISO / PCI / ASVS coverage tile |
+| `emit_compliance_evidence` | `evidence_path` | Auditor download link |
+
+### 14.4. Onboarding-flow assumptions (unchanged)
+
+The wrapper's customer-onboarding flow assumes:
+- **Repo URL + GitHub App token** → triggers Phase 6 lockfile
+  parser + Phase 7 SAST + Phase 11 IaC scan + §4b compliance
+  evidence emission.
+- **Customer's deployed URL** → triggers Phase 9 baseline +
+  recurring DAST.
+- **AWS/GCP/Azure read-only creds** → triggers Phase 11.4 cloud
+  posture (deferred; flag as "coming soon" in onboarding UI).
+- **Cron / daemon configuration** → §5a daily threat-intel
+  refresh (`python -m strix.threat_intel.refresh`) + Phase 9.1
+  5-min KEV poll (`python -m strix.threat_intel.streaming`).
+  Wrapper-side cron scheduler or sidecar container.
+
+### 14.5. Artifacts NOT yet shipped (still planned)
+
+| Phase | Artifact | Status |
+|---|---|---|
+| Phase 8 | `ai_feature_findings.json` | Phase parked per customer direction |
+| Phase 10 | `llm_fallback_invocations.jsonl` | Phase 10 not started |
+| Phase 11.4 | Cloud-API posture data | Deferred (needs credential ingestion flow) |
+| Phase 12 | `auto_fix_patches.json` | Phase 12 not started |
+| Phase 13 | `continuous_scan_deltas.jsonl` | Phase 13 not started |
+| §6.4 v2 / 7.4 v2 | function-level reachability | Deferred (call-graph engine work) |
+| `sca_inventory.json` | Standalone SBOM artifact | Currently embedded in vulnerabilities.json + tool_metadata; wrapper can derive |
+
+---
+
+## 14.6. PR #219 — consolidated wrapper changelog
+
+**Single review surface for the wrapper team.** Everything in
+this PR that touches the wrapper, in one list.
+
+### New artifacts to subscribe to / render
+
+1. **`finding_chains.json`** (§4a v2) — sits next to
+   `vulnerabilities.json`. Each chain has `chain_id`,
+   `finding_ids`, `severity` (max), `summary` (one-liner),
+   `categories[]`, `chain_type` (`sca_dast` / `sast_dast` /
+   `iac_dast` / `mixed`). Render as collapsible card grouping
+   N findings.
+2. **`compliance_evidence.json`** (§4b) — per-control verdict
+   (`fail` / `warn` / `info` / `pass` / `untested`) for SOC 2
+   / ISO 27001 / PCI DSS 4.0 / OWASP ASVS 4.0. Build the
+   compliance tab from this.
+3. **`event_stream.jsonl`** (Phase 9.1) — bounded ring buffer
+   (10k events, atomic rotation). Subscribe via tail-since-
+   timestamp. Events: `kev_added` (new CISA KEV listing) /
+   `feed_polled` (daemon liveness).
+4. **`behavioural_baselines.jsonl`** (Phase 9.2) — append-only,
+   last-line-wins per endpoint. Powers the "what's normal for
+   this endpoint" reference panel.
+5. **SARIF 2.1.0** (Phase 7.5) — opt-in via
+   `scan_sast(sarif_output_path=...)`. Calibrated severity in
+   `level` + breadcrumb in `properties.calibration`.
+   GitHub Code Scanning ingests this natively — see
+   `AISecurityEngineerUX.md` PR-comment-bot section.
+
+### New finding categories to add UI for
+
+| Category | Source | UI request |
+|---|---|---|
+| `malicious_dependency` | Phase 6.6 | Dedicated section in inbox; subtype-specific iconography |
+| `license_violation` | Phase 6.7 | License tab + auto-rotate-credential CTA for `info_disclosure` family |
+| `anomaly` | Phase 9.3 | Behavioural tab; per-anomaly-class iconography |
+| `finding_chain` | §4a v2 | Chain inbox |
+| `compliance_violation` | §4b | Compliance tab; per-control card |
+| IaC platform-prefixed (`[iac:vercel]`, `[iac:cloudflare]`, etc.) | Phase 11.3 | Group by deploy platform; platform-specific iconography |
+
+### New per-finding metadata to render
+
+* **Reachability badge** — title contains
+  `[reachability=direct_import\|transitive_only\|unused\|unknown]`.
+  Default-collapse `unused` / `transitive_only` with a toggle.
+  Show original-vs-calibrated severity.
+* **KEV badge** — title contains
+  `[KEV — actively exploited]`. Always render; KEV overrides
+  reachability demotion.
+* **Calibration breadcrumb** — SAST findings carry
+  `[calibrated:high→critical]` in title when severity changed
+  due to route-reachability or test-file demotion.
+* **Chain badge** — chain findings prefix `[chain:<chain_type>]`
+  e.g. `[chain:sca_dast]`.
+
+### New cron / daemon work for the wrapper
+
+* **Daily threat-intel refresh** — `python -m
+  strix.threat_intel.refresh` (KEV / EPSS / NVD / GHSA / OSSF
+  malicious / popular packages). Recommend 1am UTC.
+* **5-min KEV streaming daemon** — `python -m
+  strix.threat_intel.streaming`. Long-running process under
+  systemd / k8s / docker `restart: unless-stopped`. Wrapper
+  surfaces "real-time intel ON" indicator from the
+  `feed_polled` events.
+* **SAST registry refresh** — `python -m strix.sast.refresh`
+  (semgrep --update). Recommend 1:30am UTC after threat-intel.
+
+### New tool_metadata aggregates to surface
+
+* `tool_metadata.reachability.by_status` — pie/bar chart on
+  the SCA dashboard tile.
+* `tool_metadata.malicious.by_indicator` — typosquat /
+  install-script / no-license / known-malicious counts.
+* `tool_metadata.licenses.by_family` — license inventory pie
+  chart for SOC 2 OPS-3 evidence.
+* `tool_metadata.calibration.{bumped,demoted,unchanged}` (SAST)
+  — "we filtered N noise findings via reachability" badge.
+* `tool_metadata.diff_scope.applied` (SAST) — PR-mode
+  indicator.
+* `tool_metadata.summary` (compliance) — per-framework
+  verdict counts.
+
+### Lead-agent behavioural changes the wrapper should know about
+
+* **POST-SCAN STEPS** — every scan now ends with two extra
+  tool calls: `correlate_findings` then
+  `emit_compliance_evidence`. Wrapper should expect both
+  artifacts to exist after a scan completes; absence indicates
+  scan didn't finish cleanly.
+* **`category="lead"`** is the canonical agent category
+  (legacy `Root Agent` mapping unchanged).
+* **Dispatch guard** — `create_agent` is in the lead's
+  blocklist; it cannot spawn sub-agents. The wrapper's
+  agent-graph view collapses to a single root node.
+
+### Onboarding requests
+
+* **Compliance framework picker** — let the customer choose
+  SOC 2 / ISO 27001 / PCI DSS / OWASP ASVS during onboarding;
+  pass to `emit_compliance_evidence(frameworks=[...])` to
+  scope the artifact.
+* **Reachability default** — `with_reachability=True` is
+  engine default; wrapper UI toggle for "show all findings
+  including unused" (which sets the runtime view filter, not
+  the engine arg).
+* **`only_reachable=True` checkbox** for zero-noise dep-CVE
+  dashboards.
+* **License policy** — three checkboxes mapping to
+  `license_allow_copyleft` / `license_allow_unknown` /
+  `license_allow_weak_copyleft`. Default: copyleft + unknown
+  flagged, weak_copyleft allowed.
+
+### Scope clarifications (still wrapper-side, NOT engine)
+
+* Auditor-handover PDF generation
+* Customer attestation collection
+* Risk register management
+* Per-customer dashboard branding
+* SOC 2 trust portal
+* Bug-bounty triage UX
+* Multi-tenant isolation / SSO
+* Compliance policy templating
+
+---
+
+## 15. Out of scope
+
+Things this engine deliberately won't do:
+
+| Category | Why excluded |
+|---|---|
+| Mobile / firmware / IoT | Different target type; new infra; not relevant to vibe-coded SaaS apps |
+| Memory-corruption (CWE-787, etc.) | Binary-class; not a fit for the Python-based engine |
+| Compliance dashboard / customer trust pages / billing | These live in the wrapper |
+| Bug bounty triage UX / customer-facing findings views | Wrapper |
+| Auditor-handover PDF generation | Wrapper |
+| Multi-tenant isolation / SSO | Wrapper |
+| Symbolic execution / formal verification | Different research direction; consider after Phase 13 |
+| AI/ML model adversarial testing (FGSM, etc.) | Out of scope vs Lakera/Protect AI; we focus on application-level LLM features |
+
+---
+
+## 16. Suggested phase order + timeline
+
+| Sequence | Phase | Customer-value priority | Engineering risk |
+|---|---|---|---|
+| 1 | Phase 6 — SCA + Supply Chain | **highest** (dep CVEs are #1 vuln source) | low |
+| 2 | Phase 7 — Real SAST | high (table stakes) | low (Semgrep wrapper) |
+| 3 | Phase 8 — AI/LLM feature security | high (vibe-coded differentiator) | medium (novel area) |
+| 4 | Phase 11 — IaC / Cloud Posture | high (deploy-stage risk) | medium |
+| 5 | Phase 9 — Real-time intel + behavioural | medium (incremental) | medium |
+| 6 | Phase 12 — Auto-fix / remediation | high (closes the loop) | high (codemod quality) |
+| 7 | Phase 10 — AI-native LLM-fallback | medium (recall ceiling) | medium |
+| 8 | Phase 13 — Continuous + memory | medium (long-term moat) | low |
+
+**Total scope**: ~50,000 LOC across ~60 PRs.
+
+**Calendar estimate**: 6–9 months at current pace (1–2 PRs/week with full
+test coverage). Could be compressed to 3–4 months with multiple engineers.
+
+---
+
+## 17. Open questions
+
+1. **Build vs buy on SAST**: shipping our own rule engine vs vendoring Semgrep.
+   Latter is faster (Phase 7 ships in days not weeks) but creates a dep.
+2. **Auto-fix safety**: how much do we trust LLM-generated patches? Phase 12's
+   validation pipeline matters here; loosening it for speed would be a mistake.
+3. **Customer code privacy**: Phase 13.2 cross-customer pattern library needs
+   formal privacy review before any shared feature ingestion.
+4. **Real-time feeds vs reliability**: push feeds add reliability concerns
+   (webhook delivery failure, RSS rate limits). Daily fallback always.
+5. **LLM cost ceiling**: Phase 10's LLM-fallback specialists need a hard
+   per-customer cap to prevent runaway costs.
+6. **Engine ↔ wrapper API stability**: every artifact format above is a public
+   contract once the wrapper consumes it. Schema versioning matters.
+
+---
+
+## 18. Tracking
+
+- This doc is the strategic plan; the tactical sequence lives in `workitem.md`
+  (which should be updated after this is reviewed).
+- Each phase opens a tracking issue in the GitHub repo.
+- Engine releases should align with wrapper-side feature releases — the
+  wrapper PRs gate on engine artifacts being available.

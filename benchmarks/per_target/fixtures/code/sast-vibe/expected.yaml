@@ -1,0 +1,75 @@
+target_type: local_code
+target: src
+description: |
+  Phase 7 SAST benchmark — `handler.js` plants 8 vulnerable
+  patterns, each triggering one bundled `strix-*` rule. Pairs
+  with `code/sast-vibe-clean/` (eventually) for measuring false-
+  positive rate against equivalent-shaped clean code.
+
+  Pre-condition: `semgrep` must be installed (the runner exits
+  early with `partial` when it isn't).
+
+expected_findings:
+  - id: sast-hardcoded-jwt-secret
+    category: info_disclosure
+    cwe: CWE-798
+    file: handler.js
+    line: 12
+    severity: high
+    must_find: true
+
+  - id: sast-permissive-cors
+    category: misconfig
+    cwe: CWE-1004
+    file: handler.js
+    line: 16
+    severity: medium
+    must_find: true
+
+  - id: sast-sql-string-concat
+    category: sqli
+    cwe: CWE-89
+    file: handler.js
+    line: 21
+    severity: high
+    must_find: true
+
+  - id: sast-path-traversal
+    category: path_traversal
+    cwe: CWE-22
+    file: handler.js
+    line: 27
+    severity: high
+    must_find: true
+
+  - id: sast-eval-user-input
+    category: cmd_injection
+    cwe: CWE-94
+    file: handler.js
+    line: 35
+    severity: high
+    must_find: true
+
+  - id: sast-ssrf-user-url
+    category: ssrf
+    cwe: CWE-918
+    file: handler.js
+    line: 41
+    severity: high
+    must_find: true
+
+  - id: sast-mass-assignment
+    category: mass_assignment
+    cwe: CWE-915
+    file: handler.js
+    line: 48
+    severity: high
+    must_find: true
+
+  - id: sast-insecure-random
+    category: crypto
+    cwe: CWE-338
+    file: handler.js
+    line: 54
+    severity: medium
+    must_find: true

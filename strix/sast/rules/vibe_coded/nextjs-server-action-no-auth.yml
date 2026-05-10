@@ -1,0 +1,56 @@
+rules:
+  - id: strix-nextjs-server-action-no-auth
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Next.js Server Action mutates state without an authentication
+      check. Any unauthenticated visitor can call `'use server'`
+      functions by submitting a form. AI-generated Next.js apps
+      frequently miss this — server actions look like local
+      functions in the editor but are publicly invocable.
+      Add an `await auth()` / `getServerSession()` check at the
+      top of the action, OR move the action to a route handler
+      with explicit middleware.
+    metadata:
+      cwe: "CWE-862"
+      owasp: "A01:2021"
+      category: authz
+      confidence: MEDIUM
+      vibe_pattern: true
+    patterns:
+      - pattern: |
+          "use server";
+          ...
+          export async function $FN(...) {
+            ...
+            $DB.$OP(...);
+            ...
+          }
+      - pattern-not: |
+          "use server";
+          ...
+          export async function $FN(...) {
+            ...
+            await auth(...);
+            ...
+            $DB.$OP(...);
+            ...
+          }
+      - pattern-not: |
+          "use server";
+          ...
+          export async function $FN(...) {
+            ...
+            await getServerSession(...);
+            ...
+            $DB.$OP(...);
+            ...
+          }
+      - pattern-not: |
+          "use server";
+          ...
+          export async function $FN(...) {
+            ...
+            const $S = await auth(...);
+            ...
+          }

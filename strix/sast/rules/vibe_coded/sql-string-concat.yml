@@ -1,0 +1,33 @@
+rules:
+  - id: strix-sql-string-concat-user-input
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      SQL query built by string concatenation / template-literal
+      with user input — classic SQL injection. Use parameterised
+      queries: `$1, $2` placeholders for `pg`, `?` for `sqlite3`,
+      or an ORM's safe builder. AI assistants frequently emit
+      this pattern when asked for "a quick query".
+    metadata:
+      cwe: "CWE-89"
+      owasp: "A03:2021"
+      category: sqli
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          $DB.query(`...${$REQ.body.$X}...`)
+      - pattern: |
+          $DB.query(`...${$REQ.query.$X}...`)
+      - pattern: |
+          $DB.query(`...${$REQ.params.$X}...`)
+      - pattern: |
+          $DB.query("..." + $REQ.body.$X + "...")
+      - pattern: |
+          $DB.query("..." + $REQ.query.$X + "...")
+      - pattern: |
+          $DB.execute(f"...{$REQ.$X}...")
+      - pattern: |
+          $CUR.execute("..." + $REQ + "...")
+      - pattern: |
+          $CUR.execute(f"...{$REQ}...")

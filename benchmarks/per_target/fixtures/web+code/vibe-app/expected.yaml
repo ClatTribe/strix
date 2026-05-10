@@ -1,0 +1,116 @@
+# Paired-asset benchmark: same vibe-coded SaaS scanned as URL + repo
+# in a single strix run. Validates the §4a single-lead asset-aware
+# planning + cross-asset correlation work shipped in PR #219.
+#
+# Manifest shape uses the new `additional_targets:` list (see
+# runner.py::resolve_targets). Primary target is the deployed URL;
+# the secondary is the source checkout. Strix CLI receives both via
+# repeated `-t` flags; LeadAgent unions the catalogs across
+# `web_application` + `local_code`.
+
+target_type: web_application
+target: http://localhost:3030
+additional_targets:
+  - type: local_code
+    target: src
+
+description: |
+  Tiny Express app with two cross-asset vuln pairs:
+
+    * lodash@4.17.20 — CVE-2020-8203 (prototype pollution).
+      SCA from package-lock.json + DAST via `/api/merge`
+      consuming `req.body` into `_.merge()`.
+
+    * ejs@3.1.6 — CVE-2022-29078 (template-injection RCE).
+      SCA from package-lock.json + DAST via `/api/render?tmpl=`
+      passing user input straight to `ejs.render()`.
+
+  Plus a hardcoded Stripe key in `app.js` for secret-scan / SAST
+  coverage.
+
+  Recall semantics: the `must_find` entries are the minimum the
+  single-lead has to surface for the run to count as healthy. The
+  cross-asset ones are tagged `cross_asset: true` and need *both*
+  the SCA finding (matching package@version) AND the DAST finding
+  (matching endpoint + behaviour) to count. Either alone marks the
+  cross-asset entry as half-credit.
+
+docker:
+  compose_file: docker-compose.yml
+  wait_url: http://localhost:3030/
+  wait_timeout_seconds: 60
+
+expected_findings:
+  # ---- pure SCA (lockfile-only, no live URL needed) ----
+  - id: sca-lodash
+    category: vulnerable_dependency
+    cwe: CWE-1321
+    file: package-lock.json
+    severity: high
+    must_find: true
+    description: |
+      lodash@4.17.20 — prototype pollution (CVE-2020-8203).
+      Anchor: `scan_sca_lockfiles` on the local_code target.
+
+  - id: sca-ejs
+    category: vulnerable_dependency
+    cwe: CWE-94
+    file: package-lock.json
+    severity: critical
+    must_find: true
+    description: |
+      ejs@3.1.6 — template-injection RCE (CVE-2022-29078).
+      Anchor: `scan_sca_lockfiles` on the local_code target.
+
+  # ---- pure SAST / secret-scan (source-only) ----
+  - id: hardcoded-stripe-key
+    category: info_disclosure
+    cwe: CWE-798
+    file: app.js
+    line: 31
+    severity: high
+    must_find: true
+    description: |
+      Hardcoded credential pattern in source — synthetic
+      placeholder shaped like a high-entropy live secret.
+      Detected by `secrets_scan` or in-context analysis of the
+      JS source.
+
+  # ---- pure DAST (live URL, no source needed) ----
+  - id: dast-prototype-pollution-merge
+    category: deserialization     # closest CWE-1321 family alias in scoring
+    cwe: CWE-1321
+    endpoint: /api/merge
+    severity: high
+    must_find: true
+    cross_asset: true
+    description: |
+      Live exploit of the lodash _.merge sink — POST a body with
+      `__proto__` key, then GET /api/check returns polluted=true.
+      Cross-correlates with sca-lodash: same package version,
+      reachable from a runtime endpoint → severity stays high.
+
+  - id: dast-ejs-rce
+    category: cmd_injection
+    cwe: CWE-94
+    endpoint: /api/render
+    severity: critical
+    must_find: true
+    cross_asset: true
+    description: |
+      Live SSTI / RCE via `ejs.render(req.query.tmpl)`. Confirms
+      the ejs CVE is reachable at runtime, not just present in the
+      lockfile. Cross-correlates with sca-ejs.
+
+  # ---- soft / advisory (don't fail recall on these) ----
+  - id: sca-express-redirect
+    category: vulnerable_dependency
+    cwe: CWE-601
+    file: package-lock.json
+    severity: medium
+    must_find: false
+    description: |
+      express@4.16.0 — open-redirect via untrusted host header
+      (advisory CVE-2024-29041). Listed but not gated on; the
+      threat-intel cache may not have backfilled this advisory
+      yet depending on which feeds have run.

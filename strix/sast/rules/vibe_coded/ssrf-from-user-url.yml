@@ -1,0 +1,36 @@
+rules:
+  - id: strix-ssrf-from-user-url
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      HTTP request URL is built directly from user input. An
+      attacker can target the cloud metadata service
+      (169.254.169.254), internal services (10.x.x.x), or
+      arbitrary hosts. Validate the URL against an allowlist of
+      hosts before fetching, OR use a network policy that blocks
+      egress to private IP ranges.
+    metadata:
+      cwe: "CWE-918"
+      owasp: "A10:2021"
+      category: ssrf
+      confidence: MEDIUM
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          fetch($REQ.body.$X, ...)
+      - pattern: |
+          fetch($REQ.query.$X, ...)
+      - pattern: |
+          axios.get($REQ.body.$X, ...)
+      - pattern: |
+          axios.post($REQ.query.$X, ...)
+      - pattern: |
+          axios($REQ.$X.$Y, ...)
+      - pattern: |
+          requests.get($REQ.$X)
+      - pattern: |
+          requests.post($REQ.$X, ...)
+      - pattern: |
+          urllib.request.urlopen($REQ.$X)
+      - pattern: |
+          httpx.get($REQ.$X)

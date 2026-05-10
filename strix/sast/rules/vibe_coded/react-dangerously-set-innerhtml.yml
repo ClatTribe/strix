@@ -1,0 +1,26 @@
+rules:
+  - id: strix-react-dangerously-set-innerhtml-user-input
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      `dangerouslySetInnerHTML` consumes user-controlled input
+      directly. Stored / reflected XSS — the user's payload
+      renders as HTML. Sanitise via DOMPurify before assigning,
+      or render the value as a child instead of `innerHTML`.
+    metadata:
+      cwe: "CWE-79"
+      owasp: "A03:2021"
+      category: xss
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          <$EL dangerouslySetInnerHTML={{__html: $REQ.body.$X}} />
+      - pattern: |
+          <$EL dangerouslySetInnerHTML={{__html: $REQ.query.$X}} />
+      - pattern: |
+          <$EL dangerouslySetInnerHTML={{__html: $REQ.params.$X}} />
+      - pattern: |
+          <$EL dangerouslySetInnerHTML={{__html: searchParams.get($X)}} />
+      - pattern: |
+          <$EL dangerouslySetInnerHTML={{__html: props.$X}} />
