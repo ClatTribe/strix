@@ -1,0 +1,24 @@
+id: apache-flink-unauth-fixture
+info:
+  name: Apache Flink Unauthenticated Access (fixture)
+  author: pdteam
+  severity: critical
+  description: Apache Flink dashboard reachable without authentication.
+  reference:
+    - https://flink.apache.org
+  classification:
+    cve-id: CVE-2020-17519
+    cwe-id: CWE-552
+  tags: cve,flink,apache,exposure
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/jobmanager/logs"
+    matchers-condition: and
+    matchers:
+      - type: word
+        words:
+          - "Apache Flink"
+      - type: status
+        status:
+          - 200

