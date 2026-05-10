@@ -5,16 +5,25 @@ threat-intel cache). This module covers UNKNOWN-malicious — packages
 that aren't in any CVE feed yet but exhibit patterns associated with
 supply-chain attacks:
 
-  1. **Typosquats** — installed package name is 1–2 character edits
+  1. **Known-malicious match** (NEW — §6a dynamic refresh) — package
+     name + version matches an entry in the OSSF malicious-packages
+     feed (MAL-* advisories ingested via
+     `strix/threat_intel/feeds/ossf_malicious.py`). High-confidence
+     hard-fail finding — these are confirmed malicious, not
+     pattern-matched.
+  2. **Typosquats** — installed package name is 1–2 character edits
      from a high-popularity package name. The classic dependency-
      confusion / typosquat vector (`reqeusts` for `requests`,
-     `lodahs` for `lodash`).
-  2. **Install scripts on direct deps** — npm packages that run
+     `lodahs` for `lodash`). Popular corpus is read from the
+     threat-intel cache (refreshed daily by
+     `strix/threat_intel/feeds/popular_packages.py`); falls back to
+     a small hardcoded set when the cache is empty.
+  3. **Install scripts on direct deps** — npm packages that run
      code during `npm install` via `postinstall` / `preinstall` /
      `install`. Not malicious by itself (legitimate native modules
      use these), but every public supply-chain attack of the last
      5 years used one. Flag for human review.
-  3. **No license field** — distributors with no SPDX license
+  4. **No license field** — distributors with no SPDX license
      metadata. Suspicious by absence; legitimate published packages
      declare a license. Lower-severity finding by itself, useful
      when correlated with other signals.
@@ -119,6 +128,10 @@ _POPULAR_PYPI_PACKAGES: frozenset[str] = frozenset({
 INDICATOR_TYPOSQUAT = "typosquat"
 INDICATOR_INSTALL_SCRIPT = "install_script"
 INDICATOR_NO_LICENSE = "no_license"
+# §6a dynamic-refresh: confirmed-malicious advisory match. Distinct
+# from heuristic indicators above — this is "OSSF said so", not "we
+# guessed from a name shape".
+INDICATOR_KNOWN_MALICIOUS = "known_malicious"
 
 
 @dataclass
@@ -189,6 +202,38 @@ def _levenshtein(a: str, b: str, *, max_d: int = 2) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_corpus(ecosystem: str) -> frozenset[str]:
+    """Resolve the popular-package corpus for `ecosystem`.
+
+    §6a dynamic-refresh: prefer the daily-refreshed cache
+    (populated by `feeds/popular_packages.py`). When the cache is
+    empty (first-run / refresh failed), fall back to the
+    hardcoded set baked in v1 so the detector doesn't go silent.
+
+    Cache reads are cheap but not free; the corpus is fetched
+    once per Package classified. Larger callers (`analyse_packages`)
+    naturally batch — no need for a module-level cache here.
+    """
+    eco = ecosystem.lower()
+    try:
+        from strix.threat_intel import cache as ti_cache
+
+        cached = ti_cache.fetch_popular_packages(eco, limit=1000)
+        if cached:
+            return frozenset(cached)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "popular-package cache lookup failed for %s: %s",
+            eco, e,
+        )
+    # Fallback to the v1 hardcoded set.
+    if eco == "npm":
+        return _POPULAR_NPM_PACKAGES
+    if eco == "pypi":
+        return _POPULAR_PYPI_PACKAGES
+    return frozenset()
+
+
 def _detect_typosquat(pkg: Package) -> MaliciousIndicator | None:
     """Flag a package whose name is 1–2 edits from a popular
     package's name (and isn't itself a popular package).
@@ -205,11 +250,10 @@ def _detect_typosquat(pkg: Package) -> MaliciousIndicator | None:
     if not name or len(name) < 4 or name.startswith("@"):
         return None
     eco = (pkg.ecosystem or "").lower()
-    if eco == "npm":
-        corpus = _POPULAR_NPM_PACKAGES
-    elif eco == "pypi":
-        corpus = _POPULAR_PYPI_PACKAGES
-    else:
+    if eco not in ("npm", "pypi"):
+        return None
+    corpus = _resolve_corpus(eco)
+    if not corpus:
         return None
     # If name IS popular, no squat (it's the real package).
     if name in corpus:
@@ -295,6 +339,78 @@ def _detect_install_script(pkg: Package) -> MaliciousIndicator | None:
     )
 
 
+def _detect_known_malicious(pkg: Package) -> MaliciousIndicator | None:
+    """§6a dynamic-refresh: hit the OSSF malicious-packages cache
+    for an exact (ecosystem, name) match.
+
+    Severity is `critical` — these advisories list confirmed
+    malicious packages, not heuristic candidates. When the cache
+    contains a matching `affected_versions` list and the installed
+    version isn't on it, we still flag (the package was malicious
+    at SOME version; downgrading might not have purged the
+    rugpull).
+
+    Empty cache → no signal, no finding. The dynamic-refresh CLI
+    populates this; if it never runs, this detector silently
+    returns None and only the heuristics above fire.
+    """
+    eco = (pkg.ecosystem or "").lower()
+    name = (pkg.name or "").lower().strip()
+    if not eco or not name:
+        return None
+    try:
+        from strix.threat_intel import cache as ti_cache
+
+        rows = ti_cache.fetch_malicious_packages(eco, name)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("malicious-package cache lookup failed: %s", e)
+        return None
+    if not rows:
+        return None
+    # First match wins (most-recent by detected_at).
+    row = rows[0]
+    advisory_id = row.get("advisory_id") or "MAL-?"
+    summary = (row.get("summary") or "").strip()[:300]
+    detected = row.get("detected_at") or "(unknown)"
+    affected = row.get("affected_versions") or []
+    version_match = (
+        not affected           # empty list = ALL versions affected
+        or pkg.version in affected
+    )
+    if not version_match:
+        # Detected at SOME version, but not necessarily this one.
+        # Downgrade to high severity (still concerning — the package
+        # was rugpulled at some point) but flag the version mismatch
+        # in the rationale.
+        sev = "high"
+        version_note = (
+            f"Currently-installed version {pkg.version} is not in "
+            f"the advisory's affected list ({', '.join(affected[:5])}...) "
+            f"— BUT the package was malicious at some version; "
+            f"audit the maintainer + dep history before keeping it."
+        )
+    else:
+        sev = "critical"
+        version_note = (
+            f"This installed version is in the advisory's affected list."
+        )
+    return MaliciousIndicator(
+        indicator=INDICATOR_KNOWN_MALICIOUS,
+        severity=sev,
+        confidence=0.95,
+        rationale=(
+            f"Package `{eco}:{name}@{pkg.version}` matches OSSF "
+            f"malicious-packages advisory `{advisory_id}` "
+            f"(detected {detected}). {summary} {version_note}"
+        ),
+        extra={
+            "advisory_id": advisory_id,
+            "detected_at": detected,
+            "affected_versions": affected,
+        },
+    )
+
+
 def _detect_no_license(pkg: Package) -> MaliciousIndicator | None:
     """Flag packages with no license metadata.
 
@@ -336,6 +452,10 @@ def _detect_no_license(pkg: Package) -> MaliciousIndicator | None:
 
 
 _DETECTORS = [
+    # Highest-confidence first — known_malicious is a hard advisory
+    # match, not a heuristic. Order doesn't change behaviour
+    # (each detector runs independently) but documents intent.
+    _detect_known_malicious,
     _detect_typosquat,
     _detect_install_script,
     _detect_no_license,

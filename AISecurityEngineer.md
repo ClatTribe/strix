@@ -368,6 +368,117 @@ in proprietary code. Maps to OPS-3 for SOC 2. ~400 LOC.
 
 ---
 
+## 5a. Cross-cutting: dynamic refresh contract
+
+> **Why this is its own section, not a phase.** Every phase ships
+> a mix of *static* logic (regexes, AST patterns, scoring math)
+> and *dynamic* signals (CVE feeds, malicious-package advisories,
+> popular-package corpora). The static parts only update via a
+> code change; the dynamic parts update via a cron / scheduled
+> refresh job. Mixing them up is how a security tool goes stale
+> without anyone noticing — a "live" CVE feed paired with a
+> 2-year-old hardcoded corpus.
+>
+> This section names which components are dynamic, where they
+> refresh from, and what's still static. New phases must declare
+> their refresh status against this contract.
+>
+> Shipped in PR #219 as part of Phase 6.6 + Phase 7 follow-up.
+
+### 5a.1. Components and their refresh source
+
+**Phase 6 — SCA**:
+
+| Component | Refresh | Source |
+|---|---|---|
+| KEV catalog | Daily | CISA — `feeds/kev.py` |
+| EPSS scores | Daily | FIRST.org — `feeds/epss.py` |
+| NVD CVE 2.0 | Hourly window | NIST — `feeds/nvd.py` |
+| GHSA per-ecosystem | Hourly window | GitHub GraphQL — `feeds/ghsa.py` |
+| **Popular-package corpus** (typosquat target list) | **Daily** | **`feeds/popular_packages.py`** — anvaka npm gist + hugovk pypi top-packages JSON |
+| **OSSF malicious-packages** (`MAL-*` advisories) | **Daily** | **`feeds/ossf_malicious.py`** — OSV.dev per-ecosystem bulk export |
+| Reachability detector (import regexes) | Static | Code change |
+| License classifier (SPDX map) | Static | Code change |
+| Lockfile parsers | Static | Code change |
+
+**Phase 7 — SAST**:
+
+| Component | Refresh | Source |
+|---|---|---|
+| Semgrep registry packs (`p/owasp-top-ten`, `p/javascript`, ...) | Continuous (server-side) | `semgrep --update` via `strix/sast/refresh.py` |
+| Bundled `vibe_coded/` rules | Static | Code change |
+| Severity calibration logic | Static | Code change |
+| SARIF mapping | Static | Code change |
+
+### 5a.2. The refresh CLI surface
+
+```bash
+# Full refresh — daily cron entry-point.
+python -m strix.threat_intel.refresh                    # all CVE/intel feeds
+python -m strix.threat_intel.refresh --only popular,ossf-malicious  # SCA-only
+python -m strix.sast.refresh                            # Semgrep registry packs
+
+# Status (run any time; doesn't hit network).
+python -m strix.threat_intel.refresh --status
+python -m strix.sast.refresh --status
+```
+
+A typical production cron schedule:
+
+```
+0 1 * * *  python -m strix.threat_intel.refresh              # 1am UTC daily
+30 1 * * *  python -m strix.sast.refresh                     # 1:30am UTC
+```
+
+### 5a.3. Failure modes and fallbacks
+
+Every dynamic feed has a documented **fallback when refresh
+fails**. The principle: when the network is broken, fall back to
+the last-known-good cache + hardcoded baselines, not silence.
+
+| Component | Fallback when refresh fails |
+|---|---|
+| Popular-package corpus | Hardcoded set baked in `malicious.py` (small but covers top-100 npm + top-50 pypi) |
+| OSSF malicious-packages | Cache stays at last successful poll; matches surfaced from yesterday's data |
+| KEV / EPSS / NVD / GHSA | Cache stays at last successful poll; new CVEs since the last poll missed but old matches still surface |
+| Semgrep registry | Local pack cache stays at last `semgrep --update`; new rules since then missed |
+| Bundled rules / static logic | N/A — these don't update without a code change |
+
+The dynamic-refresh feeds use **per-ecosystem error isolation**:
+if the npm bulk 503s and pypi succeeds, the pypi rows still
+commit. Status returns `partial`. This avoids the "one DNS
+hiccup wipes the cache" failure mode.
+
+### 5a.4. What still needs to be dynamic (open follow-ups)
+
+* **Recently-published-with-high-downloads detection** — needs
+  a feed pulling weekly publish dates from npm / pypi registry.
+* **Maintainer-history checks** (no GitHub repo / one-commit
+  history) — needs the per-package metadata API.
+* **Network-call patterns at install time** — needs
+  Socket.dev's static-analysis feed or our own ingester.
+* **`strix-rules` community SAST corpus** — bundled rules are
+  static today. A `feeds/strix_rules.py` that pulls from a
+  daily-updated GitHub repo would mirror the SCA pattern and
+  let community-contributed rules update without strix releases.
+
+### 5a.5. The contract for new phases
+
+When a new phase ships a signal-detection component, declare its
+refresh status against the table above. Three valid choices:
+
+1. **Static** — code change to update. Document explicitly so
+   reviewers know to re-evaluate the corpus on schedule.
+2. **Dynamic via existing feed** — pulls from an established
+   feed (CVE, GHSA, OSV). Add a fallback when the feed is empty.
+3. **Dynamic via new feed** — register in
+   `strix/threat_intel/feeds/__init__.py` AND
+   `strix/threat_intel/refresh.py::_FEEDS`. Required: status
+   reporting (via `record_feed_status`), error isolation,
+   fallback policy.
+
+---
+
 ## 6. Phase 7 — Real SAST (semantic code review)
 
 **Status:** 7.1 / 7.2 / 7.3 / 7.4 v1 / 7.5 landed in **PR #219**

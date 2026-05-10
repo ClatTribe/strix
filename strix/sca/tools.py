@@ -434,7 +434,11 @@ def scan_sca_lockfiles(
     # — typosquats and install-script flags are independent of CVE
     # match status, since the whole point is "this package isn't in
     # any CVE feed yet but smells like trouble").
-    malicious_stats = {"typosquat": 0, "install_script": 0, "no_license": 0}
+    malicious_stats = {
+        "typosquat": 0, "install_script": 0, "no_license": 0,
+        # §6a dynamic-refresh: known_malicious from OSSF feed.
+        "known_malicious": 0,
+    }
     if with_malicious_detection:
         try:
             from strix.sca.malicious import (

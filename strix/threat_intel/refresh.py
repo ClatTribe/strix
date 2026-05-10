@@ -27,6 +27,8 @@ from strix.threat_intel.feeds.epss import poll_epss
 from strix.threat_intel.feeds.ghsa import poll_ghsa
 from strix.threat_intel.feeds.kev import poll_kev
 from strix.threat_intel.feeds.nvd import poll_nvd_recent
+from strix.threat_intel.feeds.ossf_malicious import poll_ossf_malicious
+from strix.threat_intel.feeds.popular_packages import poll_popular_packages
 from strix.threat_intel.lookup import cache_status
 
 
@@ -35,6 +37,8 @@ _FEEDS = {
     "epss": "FIRST.org EPSS scores",
     "nvd": "NIST NVD CVE 2.0 (recent window)",
     "ghsa": "GitHub Security Advisories (per-ecosystem)",
+    "popular": "Top-N popular packages (npm + pypi) — typosquat corpus",
+    "ossf-malicious": "OSSF malicious-packages (MAL-* via OSV bulk)",
 }
 
 
@@ -86,6 +90,24 @@ def main(argv: list[str] | None = None) -> int:
         "--ghsa-days",
         type=int, default=30,
         help="GHSA recent-window in days (default 30; 365 for backfill).",
+    )
+    parser.add_argument(
+        "--popular-top-n",
+        type=int, default=1000,
+        help=(
+            "Number of popular packages to pull per ecosystem "
+            "(default 1000). The typosquat detector compares "
+            "against this corpus."
+        ),
+    )
+    parser.add_argument(
+        "--ossf-max-per-ecosystem",
+        type=int, default=None,
+        help=(
+            "Cap rows ingested per ecosystem from the OSSF "
+            "malicious feed (default: no cap). Defensive — the "
+            "npm bulk has thousands of MAL- entries."
+        ),
     )
     parser.add_argument(
         "--epss-all",
@@ -165,6 +187,27 @@ def main(argv: list[str] | None = None) -> int:
         if r["status"] != "ok":
             overall_ok = False
             print(f"  error: {r.get('error')}", file=sys.stderr)
+
+    if "popular" in requested:
+        print(f"[refresh] polling popular-packages (top {args.popular_top_n}) ...")
+        r = poll_popular_packages(top_n=args.popular_top_n)
+        results["popular"] = r
+        print(f"  popular: status={r['status']} ingested={r.get('ingested')}")
+        if r["status"] not in ("ok", "partial"):
+            overall_ok = False
+            print(f"  error: {r.get('errors')}", file=sys.stderr)
+
+    if "ossf-malicious" in requested:
+        print("[refresh] polling OSSF malicious-packages ...")
+        r = poll_ossf_malicious(
+            max_per_ecosystem=args.ossf_max_per_ecosystem,
+        )
+        results["ossf-malicious"] = r
+        print(f"  ossf-malicious: status={r['status']} "
+              f"ingested={r.get('ingested')}")
+        if r["status"] not in ("ok", "partial"):
+            overall_ok = False
+            print(f"  error: {r.get('errors')}", file=sys.stderr)
 
     print()
     print("=== summary ===")

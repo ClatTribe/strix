@@ -101,6 +101,40 @@ CREATE TABLE IF NOT EXISTS feed_meta (
     error TEXT,
     record_count INTEGER NOT NULL DEFAULT 0
 );
+
+-- Phase 6.6 dynamic refresh: top-N popular packages per ecosystem.
+-- Refreshed daily by `feeds/popular_packages.py` (anvaka npm gist
+-- + hugovk pypi top-packages JSON). The malicious-package
+-- typosquat detector reads from this table; if empty (cache not
+-- yet refreshed), it falls back to a small hardcoded corpus.
+CREATE TABLE IF NOT EXISTS popular_packages (
+    ecosystem TEXT NOT NULL,     -- 'npm' | 'pypi' | ...
+    name TEXT NOT NULL,           -- lowercased canonical package name
+    rank INTEGER,                 -- 1 = most-downloaded; null when source
+                                  -- doesn't supply ordering
+    PRIMARY KEY (ecosystem, name)
+);
+CREATE INDEX IF NOT EXISTS ix_popular_packages_eco ON popular_packages(ecosystem);
+
+-- Phase 6.6 dynamic refresh: known-malicious packages.
+-- Refreshed daily by `feeds/ossf_malicious.py` from OSV.dev's
+-- per-ecosystem bulk export, filtered to MAL-* advisories
+-- (the OSSF malicious-packages namespace). Hit at scan time
+-- to flag installed packages that are confirmed malicious —
+-- distinct from "vulnerable but legitimate" (that's the cves
+-- table).
+CREATE TABLE IF NOT EXISTS malicious_packages (
+    ecosystem TEXT NOT NULL,     -- 'npm' | 'pypi' | ...
+    name TEXT NOT NULL,           -- lowercased canonical package name
+    advisory_id TEXT NOT NULL,    -- e.g. 'MAL-2023-0001' (OSV id)
+    summary TEXT,
+    detected_at TEXT,             -- ISO-8601 timestamp of malicious detection
+    severity TEXT,                -- 'critical' | 'high' | 'medium' (default: critical)
+    affected_versions TEXT,       -- JSON list; empty = ALL versions
+    PRIMARY KEY (ecosystem, name, advisory_id)
+);
+CREATE INDEX IF NOT EXISTS ix_malicious_packages_lookup
+    ON malicious_packages(ecosystem, name);
 """
 
 
@@ -377,6 +411,176 @@ def upsert_epss_scores(scores: Iterable[tuple[str, float]]) -> int:
             logger.warning("upsert_epss_scores failed: %s", e, exc_info=True)
             raise
     return n
+
+
+def upsert_popular_packages(
+    records: Iterable[tuple[str, str, int | None]],
+    *,
+    replace_ecosystem: str | None = None,
+) -> int:
+    """Upsert popular-package rankings.
+
+    Args:
+        records: iterable of (ecosystem, name, rank) tuples.
+            `rank` may be None when the source doesn't supply ordering.
+        replace_ecosystem: when set, DELETE all existing rows for that
+            ecosystem before inserting. Used by the daily feed to keep
+            the corpus fresh — yesterday's "top 500" gets fully
+            replaced rather than merged so packages that drop off
+            the list don't linger forever.
+
+    Returns count upserted.
+    """
+    n = 0
+    with connect() as conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN")
+        try:
+            if replace_ecosystem:
+                cur.execute(
+                    "DELETE FROM popular_packages WHERE ecosystem=?",
+                    (replace_ecosystem.lower(),),
+                )
+            for eco, name, rank in records:
+                if not isinstance(eco, str) or not isinstance(name, str):
+                    continue
+                eco_norm = eco.strip().lower()
+                name_norm = name.strip().lower()
+                if not eco_norm or not name_norm:
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO popular_packages (ecosystem, name, rank)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(ecosystem, name) DO UPDATE SET
+                        rank = excluded.rank
+                    """,
+                    (eco_norm, name_norm,
+                     int(rank) if isinstance(rank, int) else None),
+                )
+                n += 1
+            cur.execute("COMMIT")
+        except Exception as e:  # noqa: BLE001
+            cur.execute("ROLLBACK")
+            logger.warning("upsert_popular_packages failed: %s", e, exc_info=True)
+            raise
+    return n
+
+
+def fetch_popular_packages(
+    ecosystem: str, *, limit: int = 1000,
+) -> set[str]:
+    """Return a set of canonical (lowercased) package names for the
+    given ecosystem. Used by `malicious.py::_detect_typosquat` as
+    the corpus to compare against. Returns empty set when the cache
+    isn't populated — caller falls back to the small hardcoded
+    corpus."""
+    with connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT name FROM popular_packages
+            WHERE ecosystem = ?
+            ORDER BY rank IS NULL, rank
+            LIMIT ?
+            """,
+            (ecosystem.strip().lower(), int(limit)),
+        )
+        return {r["name"] for r in cur.fetchall()}
+
+
+def upsert_malicious_packages(records: Iterable[dict[str, Any]]) -> int:
+    """Upsert known-malicious package advisories.
+
+    Each record:
+        {ecosystem, name, advisory_id, summary?, detected_at?,
+         severity?, affected_versions?}
+
+    `severity` defaults to "critical" (the OSSF feed only lists
+    confirmed-malicious packages — not "suspicious"; severity
+    isn't graduated like CVE). `affected_versions` is a list;
+    empty / None means "all versions".
+    """
+    n = 0
+    with connect() as conn:
+        cur = conn.cursor()
+        cur.execute("BEGIN")
+        try:
+            for r in records:
+                if not isinstance(r, dict):
+                    continue
+                eco = (r.get("ecosystem") or "").strip().lower()
+                name = (r.get("name") or "").strip().lower()
+                advisory_id = (r.get("advisory_id") or "").strip()
+                if not eco or not name or not advisory_id:
+                    continue
+                versions_raw = r.get("affected_versions") or []
+                if isinstance(versions_raw, list):
+                    versions_json = json.dumps(versions_raw)
+                else:
+                    versions_json = json.dumps([])
+                cur.execute(
+                    """
+                    INSERT INTO malicious_packages
+                        (ecosystem, name, advisory_id, summary,
+                         detected_at, severity, affected_versions)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(ecosystem, name, advisory_id) DO UPDATE SET
+                        summary = excluded.summary,
+                        detected_at = excluded.detected_at,
+                        severity = excluded.severity,
+                        affected_versions = excluded.affected_versions
+                    """,
+                    (
+                        eco, name, advisory_id,
+                        (r.get("summary") or "")[:2048],
+                        r.get("detected_at"),
+                        (r.get("severity") or "critical").lower(),
+                        versions_json,
+                    ),
+                )
+                n += 1
+            cur.execute("COMMIT")
+        except Exception as e:  # noqa: BLE001
+            cur.execute("ROLLBACK")
+            logger.warning("upsert_malicious_packages failed: %s", e, exc_info=True)
+            raise
+    return n
+
+
+def fetch_malicious_packages(
+    ecosystem: str, name: str,
+) -> list[dict[str, Any]]:
+    """Return all malicious-package advisories matching
+    (ecosystem, name). Empty list when no entries — meaning we
+    have NO evidence the package is malicious (NOT a guarantee
+    of safety; the cache may be stale or the malicious feed may
+    not yet cover this ecosystem).
+
+    Caller checks the returned `affected_versions` against the
+    actual installed version: empty list = all versions affected.
+    """
+    if not ecosystem or not name:
+        return []
+    with connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT * FROM malicious_packages
+            WHERE ecosystem = ? AND name = ?
+            ORDER BY detected_at DESC
+            """,
+            (ecosystem.strip().lower(), name.strip().lower()),
+        )
+        out: list[dict[str, Any]] = []
+        for row in cur.fetchall():
+            d = dict(row)
+            try:
+                d["affected_versions"] = json.loads(d["affected_versions"] or "[]")
+            except Exception:  # noqa: BLE001
+                d["affected_versions"] = []
+            out.append(d)
+        return out
 
 
 def record_feed_status(
