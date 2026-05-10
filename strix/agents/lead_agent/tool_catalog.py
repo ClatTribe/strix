@@ -86,6 +86,10 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # targets when the repo is co-located with the deployed URL
         # (typical vibe-coded SaaS workflow).
         "scan_sca_lockfiles",
+        # Phase 7 — SAST. Same co-location rationale as scan_sca_lockfiles:
+        # web-app target with a checked-in repo means we can flag
+        # source-level bugs that DAST might miss.
+        "scan_sast",
         # Recon
         "fingerprint_tech_stack", "bfs_crawl",
         "well_known_harvest", "webapp_recon_pipeline",
@@ -116,6 +120,10 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # Phase 6 — SCA / supply-chain (npm/pypi/cargo/ruby/composer/go)
         # backed by threat-intel cache (KEV / EPSS / NVD / GHSA).
         "scan_sca_lockfiles",
+        # Phase 7 — semgrep-driven SAST with vibe-coded rule pack +
+        # OWASP-Top-Ten registry pack. Severity-calibrated against
+        # code_map routes + test-file demote.
+        "scan_sast",
         # File primitives
         "terminal_execute",
         # Threat-intel for code targets
@@ -126,6 +134,7 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "build_code_map", "taint_analysis", "score_reachability",
         "secrets_scan", "sbom_extract",
         "scan_sca_lockfiles",  # Phase 6 — SCA
+        "scan_sast",            # Phase 7 — SAST
         "terminal_execute",
         "lookup_known_cves", "lookup_cve_by_id",
     }),

@@ -38,6 +38,8 @@ from .nuclei_runner import *  # noqa: F403  # community-corpus runner
 # SCA / supply-chain analysis (Phase 6) — registers
 # `scan_sca_lockfiles`.
 from strix.sca import tools as _sca_tools  # noqa: F401, E402
+# SAST / semgrep-driven static analysis (Phase 7) — registers `scan_sast`.
+from strix.sast import tools as _sast_tools  # noqa: F401, E402
 from .thinking import *  # noqa: F403
 from .todo import *  # noqa: F403
 from .web_search import *  # noqa: F403

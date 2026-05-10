@@ -1,0 +1,35 @@
+rules:
+  - id: strix-path-traversal-from-params
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      File path built directly from a request parameter and passed
+      to `fs.readFile` / `open()` / similar. An attacker can
+      include `../../etc/passwd` to read arbitrary files. Use
+      `path.basename()` to strip directory components, OR validate
+      against an explicit allowlist of permitted filenames.
+    metadata:
+      cwe: "CWE-22"
+      owasp: "A01:2021"
+      category: path_traversal
+      confidence: MEDIUM
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          fs.readFile($REQ.params.$X, ...)
+      - pattern: |
+          fs.readFile($REQ.query.$X, ...)
+      - pattern: |
+          fs.readFileSync($REQ.params.$X, ...)
+      - pattern: |
+          fs.readFileSync($REQ.query.$X, ...)
+      - pattern: |
+          fs.createReadStream($REQ.$X.$Y, ...)
+      - pattern: |
+          open($REQ.params.$X, ...)
+      - pattern: |
+          open($REQ.query.$X, ...)
+      - pattern: |
+          send_file($REQ.$X)
+      - pattern: |
+          send_from_directory($DIR, $REQ.$X)

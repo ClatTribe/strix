@@ -370,6 +370,9 @@ in proprietary code. Maps to OPS-3 for SOC 2. ~400 LOC.
 
 ## 6. Phase 7 — Real SAST (semantic code review)
 
+**Status:** 7.1 / 7.2 v1 / 7.3 / 7.4 v1 landed in **PR #219**
+(2026-05-10). Full 50+ rule corpus and SARIF output deferred.
+
 **Goal**: pre-PR code-review-grade analysis of source files.
 
 ### Why
@@ -379,13 +382,16 @@ in proprietary code. Maps to OPS-3 for SOC 2. ~400 LOC.
 
 ### Items
 
-#### 7.1. Semgrep wrapper (`strix/sast/semgrep_runner.py`)
+#### 7.1. Semgrep wrapper (`strix/sast/semgrep_runner.py`) — **shipped in #219**
 - Shell out to `semgrep` (preferred) OR pure-Python rule interpreter
 - Use Semgrep's official rule registry (1000+ rules) + `p/owasp-top-ten` pack
 - Per-language coverage: JS/TS/Python/Go/Java/PHP/Ruby/C#/Kotlin/Swift
 - Daily rule-pack refresh via `semgrep --update`
+- **v1 ships graceful degradation**: when Semgrep isn't on PATH,
+  `scan_sast` returns `status="partial"` with a clear install hint
+  rather than erroring the scan.
 
-#### 7.2. Custom rule library for vibe-coded patterns
+#### 7.2. Custom rule library for vibe-coded patterns — **v1 (9 rules) shipped in #219; full 50+ corpus deferred**
 Rules specific to AI-generated code:
 - Mass-assignment in Express handlers (`req.body` → DB without allowlist)
 - Missing authz check on Next.js Server Actions
@@ -394,24 +400,31 @@ Rules specific to AI-generated code:
 - Vercel function with overly-permissive CORS
 - AI-prompt-injection in LLM endpoint code
 
-~50–100 custom rules = ~3,000 LOC.
+~50–100 custom rules = ~3,000 LOC. **v1 ships 9 anchor rules**
+covering the highest-impact patterns; expansion to 50+ is a
+rule-only follow-up PR (no engine changes needed).
 
-#### 7.3. Diff-aware mode
+#### 7.3. Diff-aware mode — **shipped in #219**
 For PR-time scanning, only run rules on files changed in the diff:
 ```
 sast_scan(repo_path, since_commit="main", until_commit="HEAD")
 ```
 ~400 LOC.
 
-#### 7.4. Severity calibration
+#### 7.4. Severity calibration — **v1 shipped in #219**
 Cross-reference SAST findings with reachability + entry-point analysis:
 - A SQLi sink in a private helper called only by tests → low
 - A SQLi sink reachable from a public HTTP route → critical
-~600 LOC.
 
-#### 7.5. SARIF output
+**v1** uses file-level proximity to `code_map.json` route handlers
+(route-reachable file → +1 tier) plus test-file demote (-1 tier).
+Function-level call-graph (proper "is this function transitively
+called from a route?") is the same blocker as Phase 6.4 v2 — both
+need the same call-graph machinery.
+
+#### 7.5. SARIF output — **deferred to follow-up PR**
 Industry-standard format. Required for GitHub Code Scanning integration.
-~300 LOC.
+~300 LOC. Pure mapping work; orthogonal to the analysis engine.
 
 ### Deliverables
 - Semgrep runner specialist

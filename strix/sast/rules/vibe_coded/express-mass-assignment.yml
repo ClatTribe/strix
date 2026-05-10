@@ -1,0 +1,23 @@
+rules:
+  - id: strix-express-mass-assignment
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Mass assignment: `req.body` flows directly into a model
+      create/update without an allowlist. AI-generated Express
+      handlers commonly do this. Pick the allowed fields explicitly
+      (e.g. `_.pick(req.body, ['name','email'])`) before passing
+      to the ORM, or filter out admin-only fields.
+    metadata:
+      cwe: "CWE-915"
+      owasp: "A04:2021"
+      category: mass_assignment
+      confidence: HIGH
+      vibe_pattern: true
+    patterns:
+      - pattern-either:
+          - pattern: $MODEL.create(req.body)
+          - pattern: $MODEL.create(req.body, ...)
+          - pattern: $MODEL.update(req.body)
+          - pattern: new $MODEL(req.body)
+          - pattern: $OBJ.save(req.body)
