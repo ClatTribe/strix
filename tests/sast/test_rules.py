@@ -46,6 +46,19 @@ def test_corpus_has_at_least_eight_rules() -> None:
     assert len(rules) >= 8, [n for n, _ in rules]
 
 
+def test_corpus_grew_to_at_least_30_rules() -> None:
+    """Phase 7.2 corpus expansion — went from 9 anchors to 30+
+    rules covering Express / Python / React-Next.js / LLM /
+    crypto / file handling. Anti-rot: if someone deletes a swathe
+    of rule files, this catches it before the regression hits
+    customers."""
+    rules = list(_load_rules())
+    assert len(rules) >= 30, (
+        f"corpus has shrunk to {len(rules)} rules; expected >=30 "
+        f"after Phase 7.2 expansion"
+    )
+
+
 def test_rule_ids_are_unique() -> None:
     """Duplicate IDs cause Semgrep to silently drop one of the
     rules. Pin uniqueness across the whole corpus."""

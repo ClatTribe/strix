@@ -306,3 +306,77 @@ def test_scan_sast_not_in_pure_network_catalogs() -> None:
     for tt in ("domain", "ip_address"):
         cat = get_lead_tool_catalog(target_types=[tt])
         assert "scan_sast" not in cat, tt
+
+
+# ---------------------------------------------------------------------------
+# SARIF output (Phase 7.5)
+# ---------------------------------------------------------------------------
+
+
+def test_scan_sast_writes_sarif_when_path_given(tmp_path: Path) -> None:
+    """`sarif_output_path=` argument should produce a valid SARIF
+    JSON file at the supplied path."""
+    import json
+    repo = _make_repo(tmp_path)
+    sarif_out = tmp_path / "report.sarif"
+
+    fake = SemgrepResult(
+        status="ok",
+        findings=[_fake_finding(rule_id="strix-sql")],
+        files_scanned=1, rules_run=10,
+    )
+    with patch("strix.sast.tools.is_semgrep_available", return_value=True), \
+         patch("strix.sast.tools.run_semgrep", return_value=fake):
+        result = scan_sast(
+            repo_path=str(repo),
+            sarif_output_path=str(sarif_out),
+        )
+    assert result["status"] == "ok"
+    assert result["tool_metadata"]["sarif_output_path"] == str(sarif_out.resolve())
+    assert sarif_out.exists()
+    doc = json.loads(sarif_out.read_text())
+    assert doc["version"] == "2.1.0"
+    assert len(doc["runs"][0]["results"]) == 1
+
+
+def test_scan_sast_no_sarif_path_means_no_file(tmp_path: Path) -> None:
+    """Default behaviour: no SARIF written, metadata key is None."""
+    repo = _make_repo(tmp_path)
+    fake = SemgrepResult(status="ok", findings=[_fake_finding()], files_scanned=1)
+    with patch("strix.sast.tools.is_semgrep_available", return_value=True), \
+         patch("strix.sast.tools.run_semgrep", return_value=fake):
+        result = scan_sast(repo_path=str(repo))
+    assert result["tool_metadata"]["sarif_output_path"] is None
+
+
+def test_scan_sast_sarif_uses_calibrated_severity(tmp_path: Path) -> None:
+    """SARIF should reflect post-7.4 severities, not raw Semgrep
+    output. Test: a finding in a route-handler file (high → critical
+    bump) should appear in SARIF as `level=error` AND
+    `properties.severity=critical`."""
+    import json
+    repo = _make_repo(tmp_path)
+    code_map = {
+        "schema_version": 1,
+        "routes": [{"file": "src/handler.js"}],
+    }
+    (repo / "code_map.json").write_text(json.dumps(code_map))
+
+    sarif_out = tmp_path / "report.sarif"
+    fake = SemgrepResult(
+        status="ok",
+        findings=[_fake_finding(file="src/handler.js", severity="high")],
+        files_scanned=1,
+    )
+    with patch("strix.sast.tools.is_semgrep_available", return_value=True), \
+         patch("strix.sast.tools.run_semgrep", return_value=fake):
+        scan_sast(repo_path=str(repo), sarif_output_path=str(sarif_out))
+
+    doc = json.loads(sarif_out.read_text())
+    res = doc["runs"][0]["results"][0]
+    # Calibrated severity = critical → SARIF level = error.
+    assert res["level"] == "error"
+    assert res["properties"]["severity"] == "critical"
+    # Calibration breadcrumb attached.
+    assert "calibration" in res["properties"]
+    assert "route" in res["properties"]["calibration"].lower()

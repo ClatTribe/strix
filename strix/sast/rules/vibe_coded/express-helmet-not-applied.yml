@@ -1,0 +1,30 @@
+rules:
+  - id: strix-express-helmet-not-applied
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      Express app instantiated but `helmet()` middleware is never
+      registered. Helmet sets a baseline of secure HTTP headers
+      (Content-Security-Policy, X-Frame-Options, etc.). AI-generated
+      Express scaffolds usually omit it. Add `app.use(helmet())`
+      near the top of the middleware chain.
+    metadata:
+      cwe: "CWE-1004"
+      owasp: "A05:2021"
+      category: misconfig
+      confidence: LOW
+      vibe_pattern: true
+    patterns:
+      - pattern: |
+          const $APP = express()
+          ...
+      - pattern-not: |
+          const $APP = express()
+          ...
+          $APP.use(helmet(...))
+          ...
+      - pattern-not: |
+          const $APP = express()
+          ...
+          $APP.use(helmet())
+          ...

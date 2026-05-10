@@ -1,0 +1,29 @@
+rules:
+  - id: strix-express-raw-body-no-size-limit
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      `express.json()` / `express.urlencoded()` middleware registered
+      without a size limit. Default Express body limit is 100KB but
+      AI-generated apps often pass through arbitrarily-large bodies
+      (especially with `bodyParser.raw` or `limit: '50mb'` for
+      "uploads"). Combined with synchronous parsing, large bodies
+      enable DoS via memory exhaustion. Set `limit: '1mb'` (or
+      smaller) on body-parsers used outside upload-specific routes.
+    metadata:
+      cwe: "CWE-400"
+      owasp: "A04:2021"
+      category: misconfig
+      confidence: MEDIUM
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          $APP.use(express.json({limit: "$L"}))
+      - pattern: |
+          $APP.use(bodyParser.json({limit: "$L"}))
+      - pattern: |
+          $APP.use(bodyParser.raw({limit: "$L"}))
+      - pattern: |
+          $APP.use(bodyParser.urlencoded({extended: $E, limit: "$L"}))
+    metadata-regex:
+      $L: ^([5-9][0-9]*|[1-9][0-9]{2,})mb$

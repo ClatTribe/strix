@@ -1,0 +1,22 @@
+rules:
+  - id: strix-python-yaml-load-unsafe
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `yaml.load()` without a safe loader executes arbitrary
+      Python via `!!python/object` tags — RCE on untrusted YAML.
+      Use `yaml.safe_load()` (or pass `Loader=yaml.SafeLoader`)
+      which only handles standard YAML types. AI-generated
+      config-loading code copies `yaml.load(f)` from old tutorials
+      that predate the safe-by-default change.
+    metadata:
+      cwe: "CWE-502"
+      owasp: "A08:2021"
+      category: deserialization
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: yaml.load($X)
+      - pattern: yaml.load($X, Loader=yaml.Loader)
+      - pattern: yaml.load($X, Loader=yaml.FullLoader)
+      - pattern: yaml.load($X, Loader=yaml.UnsafeLoader)

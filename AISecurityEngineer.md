@@ -370,8 +370,10 @@ in proprietary code. Maps to OPS-3 for SOC 2. ~400 LOC.
 
 ## 6. Phase 7 — Real SAST (semantic code review)
 
-**Status:** 7.1 / 7.2 v1 / 7.3 / 7.4 v1 landed in **PR #219**
-(2026-05-10). Full 50+ rule corpus and SARIF output deferred.
+**Status:** 7.1 / 7.2 / 7.3 / 7.4 v1 / 7.5 landed in **PR #219**
+(2026-05-10). Function-level call-graph reachability (7.4 v2) is
+the only Phase 7 item deferred — same multi-week call-graph
+blocker as 6.4 v2.
 
 **Goal**: pre-PR code-review-grade analysis of source files.
 
@@ -391,7 +393,7 @@ in proprietary code. Maps to OPS-3 for SOC 2. ~400 LOC.
   `scan_sast` returns `status="partial"` with a clear install hint
   rather than erroring the scan.
 
-#### 7.2. Custom rule library for vibe-coded patterns — **v1 (9 rules) shipped in #219; full 50+ corpus deferred**
+#### 7.2. Custom rule library for vibe-coded patterns — **shipped in #219 (39 rules)**
 Rules specific to AI-generated code:
 - Mass-assignment in Express handlers (`req.body` → DB without allowlist)
 - Missing authz check on Next.js Server Actions
@@ -400,9 +402,13 @@ Rules specific to AI-generated code:
 - Vercel function with overly-permissive CORS
 - AI-prompt-injection in LLM endpoint code
 
-~50–100 custom rules = ~3,000 LOC. **v1 ships 9 anchor rules**
-covering the highest-impact patterns; expansion to 50+ is a
-rule-only follow-up PR (no engine changes needed).
+**Shipped 39 rules** across 6 categories (Express, Python /
+Django / Flask, generic injection, React / Next.js, LLM / AI
+features, crypto). See
+`strix/sast/rules/vibe_coded/README.md` for the full table.
+Adding more rules is a rule-only PR (drop YAML files in the
+dir; no engine changes needed) — the 50+ target is a soft
+ceiling, not a gate.
 
 #### 7.3. Diff-aware mode — **shipped in #219**
 For PR-time scanning, only run rules on files changed in the diff:
@@ -422,9 +428,24 @@ Function-level call-graph (proper "is this function transitively
 called from a route?") is the same blocker as Phase 6.4 v2 — both
 need the same call-graph machinery.
 
-#### 7.5. SARIF output — **deferred to follow-up PR**
+#### 7.5. SARIF output — **shipped in #219**
 Industry-standard format. Required for GitHub Code Scanning integration.
 ~300 LOC. Pure mapping work; orthogonal to the analysis engine.
+
+**Shipped**: `scan_sast` accepts an optional `sarif_output_path=`
+argument and writes a SARIF 2.1.0 document with all findings.
+SARIF `level` reflects the post-7.4 calibrated severity (NOT
+the raw Semgrep value), so dashboards see post-Phase-7.4
+numbers. Per-result `properties.calibration` carries the
+breadcrumb explaining WHY a severity changed. URIs normalised
+to repo-relative paths via `originalUriBaseIds[%SRCROOT%]` so
+GitHub Code Scanning renders file links correctly.
+
+Out of scope for v1 (SARIF spec extensions; the minimal output
+stays valid as these land):
+  * `codeFlows` arrays (need taint tracing → 6.4 v2 / 7.4 v2)
+  * `fixes[]` autofix descriptors (Phase 12)
+  * `runs[].invocations[]` runtime details
 
 ### Deliverables
 - Semgrep runner specialist

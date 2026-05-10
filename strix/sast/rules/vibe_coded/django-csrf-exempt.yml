@@ -1,0 +1,27 @@
+rules:
+  - id: strix-django-csrf-exempt
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `@csrf_exempt` decorator disables CSRF protection on a view
+      that accepts state-changing requests. AI-generated Django
+      apps add this when CSRF tokens "don't work" without
+      diagnosing the root cause. Re-enable CSRF and pass the
+      token in the form / AJAX request, OR validate the request
+      origin explicitly if this view is genuinely cross-origin
+      (e.g. a webhook).
+    metadata:
+      cwe: "CWE-352"
+      owasp: "A01:2021"
+      category: csrf
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          @csrf_exempt
+          def $FN(...):
+            ...
+      - pattern: |
+          @method_decorator(csrf_exempt, ...)
+          class $CLS(...):
+            ...

@@ -139,6 +139,7 @@ def scan_sast(
     extra_configs: list[str] | None = None,
     timeout: int = 600,
     max_findings: int = 200,
+    sarif_output_path: str | None = None,
 ) -> SpecialistResult:
     """Run Semgrep on a repo with the strix vibe-coded rule pack
     and emit one finding per result.
@@ -156,6 +157,11 @@ def scan_sast(
         max_findings: hard cap on findings emitted (bound LLM
             context). When exceeded, severity-descending sort is
             applied so highest-priority findings keep their slot.
+        sarif_output_path: when set, write a SARIF 2.1.0 document
+            with all findings + calibration breadcrumbs to this
+            path (Phase 7.5). Required for GitHub Code Scanning
+            integration. Severity used in SARIF is the calibrated
+            severity, so dashboards see post-Phase-7.4 numbers.
 
     Findings are severity-calibrated:
       * Route-reachable file        → +1 tier (capped at critical)
@@ -322,6 +328,41 @@ def scan_sast(
             f"({f.severity}{'→' + sev if sev != f.severity else ''})"
         )
 
+    # ----- Phase 7.5: SARIF output -----
+    # Emit AFTER calibration so dashboard severities reflect post-
+    # 7.4 numbers, not raw Semgrep output. Calibration breadcrumbs
+    # attach via the (rule:file:line) key so consumers see WHY a
+    # severity changed.
+    sarif_path_written: str | None = None
+    if sarif_output_path:
+        try:
+            from strix.sast.sarif import write_sarif as _write_sarif
+
+            cal_notes = {
+                f"{f.rule_id}:{f.file}:{f.line_start}": rationale
+                for f, sev, rationale in annotated
+                if rationale and rationale != ""
+            }
+            # Promote each finding's calibrated severity into the
+            # SastFinding before writing SARIF, so SARIF's `level`
+            # reflects the post-Phase-7.4 value.
+            calibrated_findings = []
+            for f, sev, _rationale in annotated:
+                from dataclasses import replace
+                calibrated_findings.append(replace(f, severity=sev))
+            written = _write_sarif(
+                calibrated_findings,
+                sarif_output_path,
+                repo_path=repo_path,
+                calibration_notes=cal_notes,
+            )
+            sarif_path_written = str(written)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "sarif write failed for %s: %s",
+                sarif_output_path, e, exc_info=True,
+            )
+
     # SecurityContext + decision_log — same pattern as scan_sca_lockfiles.
     try:
         from strix.agents.security_context import record_endpoint
@@ -382,5 +423,6 @@ def scan_sast(
             "findings_total": len(result.findings),
             "findings_emitted_to_tracer": emitted_count,
             "calibration": calibrated_count,
+            "sarif_output_path": sarif_path_written,
         },
     )

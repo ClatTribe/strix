@@ -1,0 +1,47 @@
+rules:
+  - id: strix-llm-tool-call-shell
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: >-
+      LLM tool / function definition passes the model's output
+      to a shell. The model can be coerced (via prompt injection)
+      to construct an arbitrary shell command; that becomes RCE
+      under the LLM service's user. AI agents commonly expose
+      a "run_shell" tool for "convenience" — strip it from the
+      tool set, OR validate the command against an allowlist of
+      whitelisted binaries before exec.
+    metadata:
+      cwe: "CWE-78"
+      owasp: "A03:2021"
+      category: cmd_injection
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          function $FN($ARGS) {
+            ...
+            exec($ARGS.command, ...)
+            ...
+          }
+      - pattern: |
+          function $FN($ARGS) {
+            ...
+            exec($ARGS.cmd, ...)
+            ...
+          }
+      - pattern: |
+          def $FN($ARGS):
+              ...
+              subprocess.run($ARGS["command"], shell=True)
+              ...
+      - pattern: |
+          def $FN($ARGS):
+              ...
+              os.system($ARGS["cmd"])
+              ...
+      - pattern: |
+          @tool
+          def $FN($CMD: str) -> str:
+              ...
+              subprocess.run($CMD, shell=True)
+              ...

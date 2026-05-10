@@ -1,0 +1,23 @@
+rules:
+  - id: strix-jwt-verify-no-options
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: >-
+      `jwt.verify()` called without an `options` argument. Without
+      options, expiry isn't strictly enforced under all library
+      versions, and the algorithm is auto-detected from the token
+      header — making `none`-algorithm forgery possible on
+      vulnerable versions. Pass at minimum
+      `{algorithms: ['HS256']}` (or whatever your signing algorithm
+      is) and rely on the library's expiry check.
+    metadata:
+      cwe: "CWE-347"
+      owasp: "A02:2021"
+      category: jwt
+      confidence: MEDIUM
+      vibe_pattern: true
+    patterns:
+      - pattern: jwt.verify($T, $K)
+      - pattern-not: jwt.verify($T, $K, $OPTS)
+      - pattern-not: jwt.verify($T, $K, $OPTS, $CB)
+      - pattern-not: jwt.verify($T, $K, {...})

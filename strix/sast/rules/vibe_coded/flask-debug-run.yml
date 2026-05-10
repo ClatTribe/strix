@@ -1,0 +1,25 @@
+rules:
+  - id: strix-flask-debug-run
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `app.run(debug=True)` exposes the Werkzeug debugger console
+      on errors. The console accepts arbitrary Python — anyone
+      who can trigger an exception gets RCE on the server. AI-
+      generated Flask snippets enable this for "easier
+      development" and never remove it. Use
+      `app.run(debug=os.environ.get("FLASK_DEBUG") == "1")` and
+      keep the env var unset in production.
+    metadata:
+      cwe: "CWE-489"
+      owasp: "A05:2021"
+      category: misconfig
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          $APP.run(..., debug=True, ...)
+      - pattern: |
+          app.run(debug=True)
+      - pattern: |
+          $APP.run(host="0.0.0.0", debug=True)

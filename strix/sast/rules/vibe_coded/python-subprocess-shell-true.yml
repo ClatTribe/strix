@@ -1,0 +1,32 @@
+rules:
+  - id: strix-python-subprocess-shell-true
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `subprocess.run(..., shell=True)` invokes the shell which
+      interprets metacharacters in the command. If any part of
+      the command came from user input, this is command
+      injection. Pass the command as a list (`["ls", path]`),
+      keep `shell=False` (the default), and let the OS handle
+      argv splitting.
+    metadata:
+      cwe: "CWE-78"
+      owasp: "A03:2021"
+      category: cmd_injection
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          subprocess.run("..." + $REQ.$X, shell=True)
+      - pattern: |
+          subprocess.run(f"...{$REQ.$X}...", shell=True)
+      - pattern: |
+          subprocess.call("..." + $REQ.$X, shell=True)
+      - pattern: |
+          subprocess.Popen("..." + $REQ.$X, shell=True)
+      - pattern: |
+          os.system($REQ.$X)
+      - pattern: |
+          os.system("..." + $REQ.$X)
+      - pattern: |
+          os.popen($REQ.$X)

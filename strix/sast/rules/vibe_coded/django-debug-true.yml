@@ -1,0 +1,22 @@
+rules:
+  - id: strix-django-debug-true
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Django `DEBUG = True` at module scope. The debug page leaks
+      stack traces, settings, environment variables (including any
+      hardcoded secrets), and SQL queries. AI-generated Django
+      starter projects copy this from `startproject` and never
+      flip it. Read from environment instead:
+      `DEBUG = os.environ.get("DEBUG") == "1"`.
+    metadata:
+      cwe: "CWE-489"
+      owasp: "A05:2021"
+      category: misconfig
+      confidence: HIGH
+      vibe_pattern: true
+    patterns:
+      - pattern: |
+          DEBUG = True
+      - pattern-inside: |
+          $...

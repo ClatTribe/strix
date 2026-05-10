@@ -1,0 +1,28 @@
+rules:
+  - id: strix-python-pickle-untrusted
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `pickle.load()` / `pickle.loads()` on untrusted input is
+      RCE — the Python pickle format invokes arbitrary callables
+      on deserialisation. AI-generated code uses pickle for
+      "convenient" cross-process state without realising it's
+      effectively `eval()`. Use JSON for cross-trust-boundary
+      data; reserve pickle for same-process / same-trust caches.
+    metadata:
+      cwe: "CWE-502"
+      owasp: "A08:2021"
+      category: deserialization
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          pickle.load(request.$X)
+      - pattern: |
+          pickle.loads(request.$X)
+      - pattern: |
+          pickle.loads($REQ.body)
+      - pattern: |
+          pickle.loads(base64.b64decode(request.$X))
+      - pattern: |
+          cPickle.loads(request.$X)

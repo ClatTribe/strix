@@ -1,0 +1,31 @@
+rules:
+  - id: strix-flask-render-template-string-user
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `render_template_string()` consumes user input — server-side
+      template injection (SSTI) via Jinja2. Attacker submits
+      `{{ config }}` / `{% import os %}` and reads secrets / runs
+      shell commands. Use `render_template()` with a static
+      template file, OR pass user data through the `**context`
+      kwarg of `render_template_string` instead of into the
+      template source itself.
+    metadata:
+      cwe: "CWE-1336"
+      owasp: "A03:2021"
+      category: ssti
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          render_template_string(request.$X)
+      - pattern: |
+          render_template_string(request.args.get($X))
+      - pattern: |
+          render_template_string(request.form.get($X))
+      - pattern: |
+          render_template_string(request.values.get($X))
+      - pattern: |
+          render_template_string("..." + request.$X + "...")
+      - pattern: |
+          render_template_string(f"...{request.$X}...")

@@ -1,0 +1,31 @@
+rules:
+  - id: strix-xss-user-input-in-res-send
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      `res.send()` / `res.write()` echoes user input directly back
+      to the browser without escaping. If the response Content-Type
+      is HTML (the Express default for strings), this is reflected
+      XSS. Use `res.json()` for data, or escape via a templating
+      engine, or set Content-Type to `text/plain` explicitly.
+    metadata:
+      cwe: "CWE-79"
+      owasp: "A03:2021"
+      category: xss
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          res.send($REQ.body.$X)
+      - pattern: |
+          res.send($REQ.query.$X)
+      - pattern: |
+          res.send($REQ.params.$X)
+      - pattern: |
+          res.send(`...${$REQ.body.$X}...`)
+      - pattern: |
+          res.send(`...${$REQ.query.$X}...`)
+      - pattern: |
+          res.write($REQ.body.$X)
+      - pattern: |
+          res.end($REQ.body.$X)

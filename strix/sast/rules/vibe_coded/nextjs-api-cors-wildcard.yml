@@ -1,0 +1,29 @@
+rules:
+  - id: strix-nextjs-api-cors-wildcard
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      Next.js API route sets `Access-Control-Allow-Origin: *`.
+      Any site can read this endpoint's responses cross-origin
+      with the user's auth cookies attached. AI-generated
+      Next.js API handlers do this when a frontend dev hits
+      "CORS errors". Whitelist specific origins:
+      `res.setHeader('Access-Control-Allow-Origin',
+      'https://your-app.com')`.
+    metadata:
+      cwe: "CWE-1004"
+      owasp: "A05:2021"
+      category: misconfig
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          res.setHeader("Access-Control-Allow-Origin", "*")
+      - pattern: |
+          res.setHeader("access-control-allow-origin", "*")
+      - pattern: |
+          res.headers.set("Access-Control-Allow-Origin", "*")
+      - pattern: |
+          new NextResponse($BODY, {headers: {..., "Access-Control-Allow-Origin": "*", ...}})
+      - pattern: |
+          NextResponse.json($BODY, {headers: {..., "Access-Control-Allow-Origin": "*", ...}})

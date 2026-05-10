@@ -1,0 +1,22 @@
+rules:
+  - id: strix-express-session-cookie-insecure
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      `express-session` cookie configured without `secure: true` and
+      `httpOnly: true`. AI-generated session setups commonly leave
+      these off. The cookie can be intercepted on plain HTTP and
+      read from JavaScript respectively. Set both true in production.
+    metadata:
+      cwe: "CWE-614"
+      owasp: "A02:2021"
+      category: misconfig
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - pattern: |
+          session({..., cookie: {..., secure: false, ...}, ...})
+      - pattern: |
+          session({..., cookie: {..., httpOnly: false, ...}, ...})
+      - pattern: |
+          session({..., cookie: {sameSite: "none", ...}, ...})
