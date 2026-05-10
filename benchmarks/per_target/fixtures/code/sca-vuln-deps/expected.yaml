@@ -1,0 +1,103 @@
+target_type: local_code
+target: src
+description: |
+  SCA-focused fixture — a tiny "repo" with `package-lock.json` +
+  `requirements.txt` pinned to versions with widely-known CVEs.
+
+  Phase 6 (PR #219) ships `scan_sca_lockfiles`. This benchmark
+  pins the per-package CVE expectations so we can measure SCA
+  recall the same way we measure DAST recall.
+
+  Each `expected_findings[]` entry maps to one vulnerable package.
+  The `cve` field is illustrative — the matcher only requires
+  *some* CVE finding for that package@version. Recall is computed
+  by package name presence in any emitted finding's title.
+
+  Pre-condition: the threat-intel cache must contain GHSA / NVD
+  entries for these packages. Run
+  `python -m strix.threat_intel.refresh --feeds kev,epss,nvd,ghsa`
+  before running the benchmark, or seed the cache with the
+  fixtures in `tests/sca/test_match.py::_seed`.
+
+expected_findings:
+  # ---- npm ----
+  - id: npm-lodash
+    category: vulnerable_dependency
+    cwe: CWE-1321
+    file: package-lock.json
+    severity: high
+    must_find: true
+    description: |
+      lodash@4.17.20 — prototype pollution (CVE-2020-8203).
+      Patched in 4.17.21.
+
+  - id: npm-minimist
+    category: vulnerable_dependency
+    cwe: CWE-1321
+    file: package-lock.json
+    severity: high
+    must_find: true
+    description: |
+      minimist@1.2.5 — prototype pollution (CVE-2021-44906).
+      Patched in 1.2.6.
+
+  - id: npm-express
+    category: vulnerable_dependency
+    cwe: CWE-601
+    file: package-lock.json
+    severity: medium
+    must_find: false
+    description: |
+      express@4.16.0 — open-redirect via untrusted host header
+      (advisory GHSA-rv95-896h-c2vc / CVE-2024-29041).
+
+  - id: npm-ws
+    category: vulnerable_dependency
+    cwe: CWE-400
+    file: package-lock.json
+    severity: high
+    must_find: true
+    description: |
+      ws@5.2.2 — ReDoS in Sec-WebSocket-Protocol header
+      (CVE-2024-37890). Patched in 5.2.4.
+
+  # ---- pypi ----
+  - id: pypi-django
+    category: vulnerable_dependency
+    cwe: CWE-89
+    file: requirements.txt
+    severity: critical
+    must_find: true
+    description: |
+      django@2.2.0 — multiple CVEs across 2.2.x (e.g.
+      CVE-2019-19844 password-reset enum). Multiple patches.
+
+  - id: pypi-requests
+    category: vulnerable_dependency
+    cwe: CWE-200
+    file: requirements.txt
+    severity: medium
+    must_find: false
+    description: |
+      requests@2.19.0 — Authorization header leak on cross-host
+      redirect (CVE-2018-18074).
+
+  - id: pypi-pyyaml
+    category: vulnerable_dependency
+    cwe: CWE-502
+    file: requirements.txt
+    severity: critical
+    must_find: true
+    description: |
+      pyyaml@5.1 — yaml.load() arbitrary code execution
+      (CVE-2020-14343). Patched in 5.4.
+
+  - id: pypi-flask
+    category: vulnerable_dependency
+    cwe: CWE-200
+    file: requirements.txt
+    severity: high
+    must_find: false
+    description: |
+      flask@0.12.2 — Werkzeug debug-PIN unguarded
+      (multiple CVEs). Long-EOL release.

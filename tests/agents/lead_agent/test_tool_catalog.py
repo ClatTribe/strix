@@ -157,6 +157,67 @@ def test_is_tool_allowed_predicate() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase 6 — SCA specialist routing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "target_types",
+    [
+        ["repository"],
+        ["local_code"],
+        ["web_application"],          # co-located repo workflow
+        ["web_application", "repository"],   # paired DAST + SCA
+        ["web_application", "local_code"],   # paired DAST + SCA (local clone)
+    ],
+)
+def test_scan_sca_lockfiles_in_catalog_for_repo_capable_targets(
+    target_types: list[str],
+) -> None:
+    """`scan_sca_lockfiles` must be available whenever a repo-shaped
+    asset is in scope — and also when the target is web_application,
+    because vibe-coded apps are scanned with the deployed URL + the
+    co-located source checkout in the same run."""
+    catalog = get_lead_tool_catalog(target_types=target_types)
+    assert "scan_sca_lockfiles" in catalog
+
+
+def test_scan_sca_lockfiles_not_in_pure_network_catalogs() -> None:
+    """Pure network targets (domain / ip_address) should not pull in
+    SCA — there's no checkout to walk."""
+    for tt in ("domain", "ip_address"):
+        catalog = get_lead_tool_catalog(target_types=[tt])
+        assert "scan_sca_lockfiles" not in catalog, tt
+
+
+def test_threat_intel_lookup_in_core_for_dast_sca_correlation() -> None:
+    """Cross-asset correlation needs `lookup_known_cves` always
+    available — DAST may fingerprint a tech stack and pivot to
+    'what known CVEs apply?' regardless of target type."""
+    core = list_core_tools()
+    assert "lookup_known_cves" in core
+    assert "lookup_cve_by_id" in core
+
+
+def test_dast_and_sca_coexist_in_paired_catalog() -> None:
+    """The paired (web + repo) catalog must contain both DAST anchor
+    tools (specialists, browser, HTTP) and SCA tools — neither side
+    is silently dropped when the other is in scope."""
+    catalog = get_lead_tool_catalog(
+        target_types=["web_application", "repository"],
+    )
+    # DAST anchors
+    assert "scan_sqli" in catalog
+    assert "scan_xss" in catalog
+    assert "browser_action" in catalog
+    assert "send_request" in catalog
+    # SCA anchors
+    assert "scan_sca_lockfiles" in catalog
+    assert "build_code_map" in catalog
+    assert "taint_analysis" in catalog
+
+
 def test_is_tool_allowed_handles_invalid_input() -> None:
     """Defensive — non-string tool name returns False without raising."""
     assert not is_tool_allowed_for_lead(

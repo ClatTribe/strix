@@ -137,6 +137,110 @@ _LEAD_SYSTEM_PROMPT_ADDENDUM = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Asset-aware routing guidance.
+#
+# The lead's tool catalog is filtered per target type (see
+# `tool_catalog.py`). That stops the LLM from invoking irrelevant tools
+# but doesn't tell it *which* tools should anchor its plan for the
+# specific asset(s) in scope. The blurb below renders into the prompt's
+# `system_prompt_context["lead_asset_routing"]` slot — the StrixAgent
+# Jinja template surfaces it just below the architectural directives.
+#
+# Rules:
+#   * One short paragraph per asset class (web / repo / domain / ip).
+#   * When MULTIPLE asset classes are present, append a "cross-asset"
+#     block telling the lead to correlate findings (e.g., SCA on the
+#     repo informs DAST hypotheses on the URL).
+#   * No tool-call examples here — those live in the directives block
+#     above. This block is *what* not *how*.
+# ---------------------------------------------------------------------------
+
+
+_PER_ASSET_GUIDANCE: dict[str, str] = {
+    "web_application": (
+        "Web target: probe the live URL. Anchor on `webapp_recon_pipeline` "
+        "→ `fingerprint_tech_stack` → matching specialists "
+        "(scan_sqli / scan_xss / scan_idor / scan_ssrf / scan_auth_flow / "
+        "scan_business_logic / scan_oauth). Use HAR / Burp imports if the "
+        "user supplied them. Prioritise authenticated surfaces: business "
+        "logic + IDOR are usually the highest-impact bugs on a live app."
+    ),
+    "repository": (
+        "Repo target: anchor on `scan_sca_lockfiles` FIRST — it's "
+        "deterministic, cheap, and surfaces the #1 vuln class for modern "
+        "apps (vulnerable dependencies). Then `build_code_map` + "
+        "`taint_analysis` for SAST on user-input → sink flows, "
+        "`secrets_scan` for credentials, and `scan_misconfig` for "
+        "infra-as-code drift."
+    ),
+    "local_code": (
+        "Local code target: same play as `repository` — `scan_sca_lockfiles` "
+        "first for dependency CVEs, then SAST (`build_code_map` + "
+        "`taint_analysis`), then `secrets_scan`. Lockfile presence is "
+        "high-signal: if there's a `package-lock.json` / `requirements.txt` "
+        "/ `Cargo.lock` / `go.sum`, SCA findings nearly always precede "
+        "SAST findings in severity."
+    ),
+    "domain": (
+        "Domain target: anchor on `domain_recon_pipeline` → "
+        "`subdomain_enum_tool` → `subdomain_takeover_check`. Pivot to "
+        "web-app probes (`send_request` + specialists) on any subdomain "
+        "that returns 2xx with HTML."
+    ),
+    "ip_address": (
+        "IP target: enumerate exposed ports and services with "
+        "`terminal_execute` (nmap-style), then `tls_audit` and "
+        "`websocket_audit` on anything that speaks TLS / WS. Treat any "
+        "HTTP service found here as if it were a web_application target "
+        "and probe it with `send_request`."
+    ),
+}
+
+
+_CROSS_ASSET_BLOCK = (
+    "CROSS-ASSET CORRELATION. You have more than one asset in scope. "
+    "Treat findings on one asset as hypotheses on the others:\n"
+    "  * SCA finding on repo (`scan_sca_lockfiles`) names a vulnerable "
+    "dep with a known CVE class → probe the live URL for that class. "
+    "Example: `lodash@<4.17.21` → prototype-pollution → look for "
+    "client-side template injection / unsafe object merge endpoints.\n"
+    "  * SAST finding (`taint_analysis`) names a sink (e.g. `eval`, raw "
+    "SQL string) → confirm it's reachable from the live URL by probing "
+    "the matching endpoint with the relevant specialist.\n"
+    "  * DAST finding on URL (e.g. SQL error in response) → check the "
+    "repo for the offending file/sink and emit a follow-up code-level "
+    "finding so the wrapper has both the runtime evidence and the fix "
+    "location.\n"
+    "  * Same package surfaced by SCA *and* a DAST behaviour — bump "
+    "severity / confidence; it's a real exploit path, not just an "
+    "advisory match.\n"
+    "Cross-asset findings should reference both surfaces in "
+    "`description` + `technical_analysis` so reviewers see the chain."
+)
+
+
+def _build_asset_routing_block(target_types: set[str] | list[str]) -> str:
+    """Build the `lead_asset_routing` system-prompt slot from
+    `target_types`. Returns "" when target_types is empty (no
+    extra guidance needed)."""
+    if not target_types:
+        return ""
+    seen: list[str] = []
+    for tt in sorted(set(target_types)):
+        if not isinstance(tt, str):
+            continue
+        guidance = _PER_ASSET_GUIDANCE.get(tt.strip().lower())
+        if guidance:
+            seen.append(f"[{tt}] {guidance}")
+    if not seen:
+        return ""
+    out = "\n\n".join(seen)
+    if len(seen) > 1:
+        out += "\n\n" + _CROSS_ASSET_BLOCK
+    return out
+
+
 class LeadAgent(StrixAgent):
     """Single-lead architecture (roadmap §8.5 Phase 3).
 
@@ -199,6 +303,13 @@ class LeadAgent(StrixAgent):
         system_prompt_context["target_types"] = sorted(target_types)
         system_prompt_context["tool_catalog_allowlist"] = sorted(
             get_lead_tool_catalog(target_types=target_types)
+        )
+        # Asset-aware routing guidance — names which tools to anchor
+        # on per asset class, plus a cross-asset block when more than
+        # one class is in scope. Empty string when target_types is
+        # empty (the StrixAgent template treats it as no-op).
+        system_prompt_context["lead_asset_routing"] = (
+            _build_asset_routing_block(target_types)
         )
         system_prompt_context["tool_catalog_blocklist"] = sorted(
             list_blocked_tools()
