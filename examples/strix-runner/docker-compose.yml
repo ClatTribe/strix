@@ -1,0 +1,201 @@
+# Single-tenant strix-runner example.
+#
+# Spin up:
+#   docker compose up --build
+#
+# Submit a scan:
+#   curl -X POST localhost:8080/scans \
+#     -H "content-type: application/json" \
+#     -d '{"target":"https://demo.testfire.net","scan_mode":"quick"}'
+#
+# Check status:
+#   curl localhost:8080/scans/<scan_id>
+#
+# Read the README in this directory for the multi-tenant K8s
+# migration path.
+
+services:
+  # --- Broker -----------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    ports:
+      # Exposed for local debugging; remove for prod.
+      - "127.0.0.1:6379:6379"
+
+  # --- Threat-intel refresher (sidecar / cron) --------------------
+  #
+  # Pulls GHSA / NVD / KEV / OSSF / popular-package corpus into
+  # the shared SQLite cache, then exits. Re-run via `docker compose
+  # run refresher` on a 1–6 h cron, or wire it as a real
+  # K8s CronJob in production.
+  #
+  # Requires GITHUB_TOKEN for GHSA (60 req/h unauth is useless).
+  # Pass it through your shell env or a .env file (gitignored).
+  refresher:
+    build:
+      context: ../..               # strix repo root
+      dockerfile: examples/strix-runner/Dockerfile
+    profiles: ["refresh"]          # `docker compose --profile refresh up refresher`
+    environment:
+      STRIX_THREAT_INTEL_CACHE: /home/strix/cache/threat_intel.db
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      NVD_API_KEY:  ${NVD_API_KEY:-}
+    volumes:
+      - threat-intel-cache:/home/strix/cache
+    command:
+      - python
+      - -m
+      - strix.threat_intel.refresh
+      - --only
+      - kev,ghsa,nvd,popular,ossf-malicious
+      - --ghsa-days
+      - "365"
+      - --popular-top-n
+      - "1000"
+      - --verbose
+
+  # --- Worker pool ------------------------------------------------
+  #
+  # Pulls scan jobs off Redis and invokes the strix CLI as a
+  # subprocess. One scan = one subprocess; concurrency=2 means
+  # this worker handles 2 concurrent scans. For real load,
+  # scale this service up (`docker compose up --scale worker=N`)
+  # rather than bumping --concurrency past ~4 — each scan
+  # is heavy.
+  worker:
+    build:
+      context: ../..               # strix repo root
+      dockerfile: examples/strix-runner/Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      # Broker
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      # Strix runtime
+      STRIX_LLM: ${STRIX_LLM:-anthropic/claude-opus-4-5}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      STRIX_THREAT_INTEL_CACHE: /home/strix/cache/threat_intel.db
+      # Default sandbox mode is OFF (Option B in docs §6) — strix
+      # runs the agent loop directly in this container.
+      #
+      # To switch to Option A (DinD with a fork-built sandbox image),
+      # set STRIX_SANDBOX_MODE=true + STRIX_IMAGE=<your-image> in
+      # the calling shell or .env, and bring up the `sandbox` profile:
+      #
+      #   STRIX_SANDBOX_MODE=true \
+      #   STRIX_IMAGE=strix-sandbox:fork-4f3f93c \
+      #   docker compose --profile sandbox up
+      STRIX_SANDBOX_MODE: ${STRIX_SANDBOX_MODE:-false}
+      STRIX_IMAGE: ${STRIX_IMAGE:-ghcr.io/usestrix/strix-sandbox:0.1.13}
+      # Where this worker stages its run-dirs
+      STRIX_RUN_STORAGE: /home/strix/runs
+      # Default per-scan caps (override per-request)
+      STRIX_DEFAULT_MAX_COST_USD: "2.50"
+      STRIX_DEFAULT_MAX_INPUT_TOKENS: "1500000"
+    volumes:
+      # Shared threat-intel cache (RW for the refresher, RO for
+      # workers — docker-compose can't express that, but K8s
+      # absolutely should).
+      - threat-intel-cache:/home/strix/cache:ro
+      # Run artefacts. In production this is an S3 / EFS / FUSE
+      # mount keyed by tenant_id.
+      - run-artifacts:/home/strix/runs
+    command:
+      - celery
+      - -A
+      - worker
+      - worker
+      - --loglevel=info
+      - --concurrency=2
+
+  # --- Worker (Option A: DinD + custom sandbox image) -------------
+  #
+  # Alternative worker that runs WITH inner-sandbox mode, using a
+  # custom STRIX_IMAGE (typically a fork-built image like
+  # `strix-sandbox:fork-<sha>` per docs §6 "Fork-built sandbox
+  # images"). Bring this up via:
+  #
+  #   STRIX_SANDBOX_MODE=true \
+  #   STRIX_IMAGE=strix-sandbox:fork-4f3f93c \
+  #   docker compose --profile sandbox up worker-sandbox api redis
+  #
+  # The Docker socket mount gives this pod root-equivalent
+  # privileges on the host. Acceptable for local dev / single-
+  # tenant. For multi-tenant production: use sysbox runtime class
+  # (Option C in docs §6) instead of mounting the socket.
+  worker-sandbox:
+    profiles: ["sandbox"]
+    build:
+      context: ../..
+      dockerfile: examples/strix-runner/Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      STRIX_LLM: ${STRIX_LLM:-anthropic/claude-opus-4-5}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      STRIX_THREAT_INTEL_CACHE: /home/strix/cache/threat_intel.db
+      # Option A — inner sandbox ON, custom image.
+      STRIX_SANDBOX_MODE: "true"
+      STRIX_IMAGE: ${STRIX_IMAGE:-strix-sandbox:fork-latest}
+      STRIX_RUN_STORAGE: /home/strix/runs
+      STRIX_DEFAULT_MAX_COST_USD: "2.50"
+      STRIX_DEFAULT_MAX_INPUT_TOKENS: "1500000"
+    volumes:
+      - threat-intel-cache:/home/strix/cache:ro
+      - run-artifacts:/home/strix/runs
+      # Host Docker socket. Required for strix to spawn the inner
+      # sandbox container. **This is the security trade-off** —
+      # this pod can now drive the host Docker daemon. Multi-tenant
+      # deployments should use sysbox/Kata runtime class instead.
+      - /var/run/docker.sock:/var/run/docker.sock
+    command:
+      - celery
+      - -A
+      - worker
+      - worker
+      - --loglevel=info
+      - --concurrency=1
+
+  # --- Control plane (FastAPI) ------------------------------------
+  api:
+    build:
+      context: ../..
+      dockerfile: examples/strix-runner/Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      STRIX_RUN_STORAGE: /home/strix/runs
+    volumes:
+      - run-artifacts:/home/strix/runs:ro
+    ports:
+      - "8080:8080"
+    command:
+      - uvicorn
+      - api:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --workers
+      - "2"
+
+volumes:
+  # Shared threat-intel SQLite. In production: a CSI volume
+  # populated by the refresher CronJob, mounted RO into workers.
+  threat-intel-cache:
+  # Scan artefact storage. In production: S3 + a FUSE mount
+  # per pod, prefixed by <tenant_id>/<scan_id>/.
+  run-artifacts:
