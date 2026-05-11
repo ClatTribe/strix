@@ -183,9 +183,25 @@ def run_scan(
         "artefacts":    artefacts,
         "summary":      summary,
         "stderr_tail":  (proc.stderr or "")[-2000:] if proc.stderr else None,
+        # When strix detects a config problem (missing docker, bad
+        # LLM key, etc.) it prints the banner to stdout, not stderr.
+        # Capture both for diagnosis.
+        "stdout_tail":  (proc.stdout or "")[-2000:] if proc.stdout else None,
         "error":        None if status != "error" else
-                        (proc.stderr or "unknown error")[:500],
+                        _combined_error(proc.stdout, proc.stderr),
     }
+
+
+def _combined_error(stdout: str | None, stderr: str | None) -> str:
+    """Build a useful error message from whichever stream had content.
+    strix's startup-config errors go to stdout; runtime exceptions
+    typically to stderr. Either alone can be empty."""
+    parts = []
+    if stderr:
+        parts.append(f"stderr: {stderr[-400:].strip()}")
+    if stdout:
+        parts.append(f"stdout: {stdout[-400:].strip()}")
+    return " | ".join(parts) or "unknown error"
 
 
 # ---------------------------------------------------------------------------

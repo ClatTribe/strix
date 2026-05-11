@@ -20,24 +20,45 @@ FROM python:3.12-slim
 
 # --- System deps --------------------------------------------------
 #
-# git           — strix uses git for clones + diff-aware SAST
-# tini          — proper PID 1 (signal handling for Celery + uvicorn)
-# build-essential gcc — required by some transitive Python deps
-#                      (e.g. cffi → ssl; lxml). Removed after pip install.
+# git              — strix uses git for clones + diff-aware SAST
+# tini             — proper PID 1 (signal handling for Celery + uvicorn)
+# build-essential
+# gcc              — required by some transitive Python deps
+#                    (e.g. cffi → ssl; lxml). Removed after pip install.
+# curl             — used below to fetch the docker static CLI binary
 #
-# Docker CLI is intentionally NOT installed. This example uses
-# `STRIX_SANDBOX_MODE=false` (Option B in docs/wrapper-integration.md
-# §6) so strix runs the agent loop directly inside this container
-# rather than spawning a Docker-in-Docker sandbox. If you need
-# inner-sandbox mode, install `docker.io` and mount the host socket
-# (see compose file comments).
+# Note: Debian Bookworm's `docker.io` package ships the SERVER only
+# (`dockerd`, `docker-proxy`) — no `docker` client binary. Strix
+# checks for `docker` on PATH at startup via shutil.which("docker")
+# in strix/interface/main.py:191 (unconditional — fires even when
+# STRIX_SANDBOX_MODE=false), so we fetch the static client binary
+# from docker.com directly. ~50 MB. Multi-stage build would be
+# cleaner; OK for an example image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         tini \
         ca-certificates \
         build-essential \
         gcc \
+        curl \
     && rm -rf /var/lib/apt/lists/*
+
+# Static docker client CLI. Pinned to a known-good version; bump
+# alongside the strix sandbox image when needed.
+ARG DOCKER_CLI_VERSION=27.3.1
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64)  pkg_arch="x86_64" ;; \
+        aarch64) pkg_arch="aarch64" ;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://download.docker.com/linux/static/stable/${pkg_arch}/docker-${DOCKER_CLI_VERSION}.tgz" \
+        -o /tmp/docker.tgz; \
+    tar -xzf /tmp/docker.tgz -C /tmp; \
+    install -m 0755 /tmp/docker/docker /usr/local/bin/docker; \
+    rm -rf /tmp/docker /tmp/docker.tgz; \
+    docker --version
 
 # --- Python deps --------------------------------------------------
 #

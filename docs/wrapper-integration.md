@@ -143,7 +143,9 @@ The wrapper should treat **code 3 as a non-error** (capped successfully, partial
 | Var | Required | Default | Read at |
 |---|---|---|---|
 | `STRIX_LLM` | **yes** | — | `strix/config/config.py` |
-| `LLM_API_KEY` | yes (provider-dependent) | — | Read by litellm |
+| `LLM_API_KEY` | yes (provider-dependent) | — | Read by litellm via strix Config |
+| `ANTHROPIC_API_KEY` | **for Anthropic models** | — | litellm fallback (see below) |
+| `OPENAI_API_KEY` | **for OpenAI models** | — | litellm fallback (see below) |
 | `LLM_API_BASE` / `OPENAI_API_BASE` / `LITELLM_BASE_URL` / `OLLAMA_API_BASE` | no | — | Proxy / self-hosted LLM endpoints |
 | `STRIX_REASONING_EFFORT` | no | — | Anthropic reasoning-effort hint |
 | `STRIX_LLM_MAX_RETRIES` | no | — | Per-call retry cap |
@@ -151,10 +153,20 @@ The wrapper should treat **code 3 as a non-error** (capped successfully, partial
 | `STRIX_TOOL_CALL_FORMAT` | no | `xml` | `xml` or `native` |
 | `LLM_TIMEOUT` | no | — | Per-call timeout seconds |
 
-> Strix does **not** read `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
-> directly. The key flows through litellm via `LLM_API_KEY`. For
-> Anthropic: `STRIX_LLM=anthropic/claude-opus-4` +
-> `LLM_API_KEY=<sk-ant-…>`.
+> **Set BOTH `LLM_API_KEY` AND the provider-specific env var.**
+> Strix's Config layer reads `LLM_API_KEY`, but litellm's
+> per-provider adapters (Anthropic, OpenAI, etc.) also fall back to
+> `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` directly when the
+> configured key isn't threaded through the call path. Empirically
+> seen: `LLM_API_KEY` alone fails with
+> `litellm.AuthenticationError: Missing Anthropic API Key` on
+> Anthropic models. Safest pattern is to set both to the same value:
+>
+> ```bash
+> STRIX_LLM=anthropic/claude-opus-4
+> LLM_API_KEY=<sk-ant-…>
+> ANTHROPIC_API_KEY=<sk-ant-…>   # same value
+> ```
 
 ### Cost / budget
 
