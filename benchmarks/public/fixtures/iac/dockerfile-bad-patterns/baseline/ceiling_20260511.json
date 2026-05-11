@@ -1,0 +1,113 @@
+{
+  "fixture": "dockerfile-bad-patterns",
+  "asset_class": "iac",
+  "ran_at": "2026-05-11T14:34:04Z",
+  "duration_s": 0.961,
+  "engine_state": {
+    "engine": "iac-v1",
+    "files_scanned": 2,
+    "files_by_platform": {
+      "docker": 1,
+      "docker-compose": 1
+    },
+    "findings_by_platform": {
+      "docker": 4,
+      "docker-compose": 5
+    },
+    "critical_count": 3,
+    "high_count": 3
+  },
+  "raw_counts": {
+    "total_findings": 9,
+    "by_category": {
+      "info_disclosure": 2,
+      "misconfig": 7
+    },
+    "by_severity": {
+      "critical": 3,
+      "high": 3,
+      "medium": 2,
+      "low": 1
+    },
+    "by_file": {
+      "Dockerfile": 4,
+      "docker-compose.yml": 5
+    }
+  },
+  "ground_truth": {
+    "expected_total": 9,
+    "must_find_total": 9,
+    "matched": [
+      {
+        "id": "docker-latest-tag",
+        "must_find": true,
+        "expected_category": "misconfig",
+        "expected_file": "Dockerfile",
+        "matched_finding_count": 3
+      },
+      {
+        "id": "docker-add-from-url",
+        "must_find": true,
+        "expected_category": "misconfig",
+        "expected_file": "Dockerfile",
+        "matched_finding_count": 3
+      },
+      {
+        "id": "docker-env-hardcoded-secret",
+        "must_find": true,
+        "expected_category": "info_disclosure",
+        "expected_file": "Dockerfile",
+        "matched_finding_count": 1
+      },
+      {
+        "id": "docker-user-root",
+        "must_find": true,
+        "expected_category": "misconfig",
+        "expected_file": "Dockerfile",
+        "matched_finding_count": 3
+      },
+      {
+        "id": "compose-privileged-container",
+        "must_find": true,
+        "expected_category": "misconfig",
+        "expected_file": "docker-compose.yml",
+        "matched_finding_count": 4
+      },
+      {
+        "id": "compose-host-network-mode",
+        "must_find": true,
+        "expected_category": "misconfig",
+        "expected_file": "docker-compose.yml",
+        "matched_finding_count": 4
+      },
+      {
+        "id": "compose-docker-socket-mount",
+        "must_find": true,
+        "expected_category": "misconfig",
+        "expected_file": "docker-compose.yml",
+        "matched_finding_count": 4
+      },
+      {
+        "id": "compose-environment-hardcoded-secret",
+        "must_find": true,
+        "expected_category": "info_disclosure",
+        "expected_file": "docker-compose.yml",
+        "matched_finding_count": 1
+      },
+      {
+        "id": "compose-db-port-exposed",
+        "must_find": true,
+        "expected_category": "misconfig",
+        "expected_file": "docker-compose.yml",
+        "matched_finding_count": 4
+      }
+    ],
+    "missed": [],
+    "must_find_matched": 9,
+    "must_find_missed": 0,
+    "recall_all": 1.0,
+    "recall_must_find": 1.0
+  },
+  "tool_status": "ok",
+  "tool_error": null
+}

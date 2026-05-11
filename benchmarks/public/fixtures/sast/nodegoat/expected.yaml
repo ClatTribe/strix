@@ -1,0 +1,100 @@
+target_type: local_code
+target: ../../sca/nodegoat/src
+description: |
+  OWASP NodeGoat — SAST view. Re-uses the same NodeGoat clone as
+  the SCA fixture (../../sca/nodegoat/src), but scored against the
+  source-code vulnerability list rather than the lockfile CVE list.
+
+  Run `bash ../../sca/nodegoat/setup.sh` first to fetch the clone.
+
+  NodeGoat's app/routes/* + server.js + views/* deliberately
+  embed OWASP-Top-10-style bugs (eval-with-user-input, open
+  redirect, missing helmet, insecure cookie settings, plaintext
+  HTTP links in tutorial pages). This benchmark scores recall on
+  those documented bugs.
+
+  Tool: `scan_sast(repo_path=...)`, which wraps Semgrep + strix's
+  39-rule vibe-coded pack + `p/owasp-top-ten`. Pre-condition:
+  Semgrep must be installed (`pip install semgrep`). Without it,
+  the tool returns `engine_available: false` and 0 findings.
+  This is the FLOOR; CEILING is the seeded-with-Semgrep run.
+
+  Comparable commercial numbers: GitHub CodeQL, Snyk Code,
+  SonarQube, Checkmarx all support JS — each publishes vague
+  "we catch the OWASP Top 10" claims rather than per-fixture
+  numbers, so we measure recall on a small hand-picked set of
+  high-confidence findings.
+
+# ------------------------------------------------------------------
+# High-confidence ground truth — well-known NodeGoat A1/A3/A5/A10
+# bugs that any decent JS SAST should catch. Match criterion:
+# (category, file) — line number is informational only.
+# ------------------------------------------------------------------
+expected_findings:
+  - id: nodegoat-sast-eval-injection
+    category: cmd_injection
+    cwe: CWE-94
+    file: app/routes/contributions.js
+    severity: high
+    must_find: true
+    description: |
+      eval() called on user-supplied input from POST /contributions
+      — A1 injection per NodeGoat docs. Triple-vulnerable (lines
+      32, 33, 34). Strix rules: strix-eval-with-user-input +
+      Semgrep's javascript.lang.security.audit.code-string-concat.
+
+  - id: nodegoat-sast-open-redirect
+    category: open_redirect
+    cwe: CWE-601
+    file: app/routes/index.js
+    severity: medium
+    must_find: true
+    description: |
+      `res.redirect()` consumes the `?url=` query parameter
+      directly — A10 unvalidated redirect per NodeGoat docs.
+      Strix rule: strix-express-redirect-from-user-input.
+
+  - id: nodegoat-sast-helmet-missing
+    category: misconfig
+    cwe: CWE-1004
+    file: server.js
+    severity: medium
+    must_find: true
+    description: |
+      Express app boots without helmet() — missing security
+      headers (X-Frame-Options, X-Content-Type-Options, HSTS,
+      etc.). Strix rule: strix-express-helmet-not-applied.
+
+  - id: nodegoat-sast-insecure-cookie
+    category: sast
+    cwe: CWE-522
+    file: server.js
+    severity: medium
+    must_find: true
+    description: |
+      express-session configured without `secure: true` /
+      `httpOnly: true` cookie flags. Semgrep rule:
+      javascript.express.security.audit.express-cookie-settings.
+
+  - id: nodegoat-sast-plaintext-http
+    category: sast
+    cwe: CWE-319
+    file: app/views/tutorial/a2.html
+    severity: low
+    must_find: false
+    description: |
+      Plaintext HTTP link in tutorial markup. Low-signal — these
+      are documentation pages, not application surfaces. Included
+      to exercise the html.security.plaintext-http-link rule.
+
+# ------------------------------------------------------------------
+# Floor expectations — heuristic / engine-state checks that
+# fire regardless of recall.
+# ------------------------------------------------------------------
+expected_heuristic:
+  - id: nodegoat-sast-engine-available
+    category: tool_metadata
+    description: |
+      Run-state check: `tool_metadata.engine_available` should be
+      True. If False (Semgrep not on PATH), the run is a FLOOR
+      and all `must_find=true` expectations are blocked.

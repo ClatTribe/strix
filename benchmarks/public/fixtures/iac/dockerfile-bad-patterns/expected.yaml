@@ -1,0 +1,143 @@
+target_type: local_code
+target: src
+description: |
+  Synthetic deliberately-bad Dockerfile + docker-compose.yml,
+  planted to trigger every rule in strix's Docker IaC rule pack
+  (`strix/iac/rules/docker_rules.py`). Used as a recall benchmark
+  for the IaC scanner.
+
+  This is **not** a clone of an upstream public fixture. There
+  isn't a widely-published IaC benchmark covering strix's
+  current platforms (Docker / Vercel / Netlify / Cloudflare —
+  Terraform / k8s are deferred to Phase 11.3). TerraGoat /
+  KICS-test-repo / Checkov test fixtures will become available
+  comparison surfaces once Phase 11.2 lands Checkov integration.
+
+  Until then, this synthetic fixture serves as the recall
+  benchmark: every rule in the pack is exercised by one
+  expected finding below. A regression that drops a rule will
+  show up as a missed expected finding the next time the
+  benchmark runs.
+
+  All "secrets" in the fixture are well-known synthetic test
+  values (e.g. `AKIAIOSFODNN7EXAMPLE`) — they are pattern-shape
+  matchers, not real credentials.
+
+# ------------------------------------------------------------------
+# Recall ground-truth — one entry per rule in the Docker pack.
+# Match criterion: (category, file) — strix's IaC scanner emits
+# every Docker finding as `category=misconfig` except hardcoded
+# secrets which land in `info_disclosure`.
+# ------------------------------------------------------------------
+expected_findings:
+  - id: docker-latest-tag
+    category: misconfig
+    cwe: CWE-1104
+    file: Dockerfile
+    severity: low
+    must_find: true
+    description: |
+      `FROM node:latest` — non-pinned base image. Drift /
+      supply-chain risk. Rule: dockerfile-latest-tag.
+
+  - id: docker-add-from-url
+    category: misconfig
+    cwe: CWE-829
+    file: Dockerfile
+    severity: medium
+    must_find: true
+    description: |
+      `ADD https://example.com/setup.sh /tmp/setup.sh` — fetches
+      remote content during build (MITM, supply chain). Rule:
+      dockerfile-add-from-url.
+
+  - id: docker-env-hardcoded-secret
+    category: info_disclosure
+    cwe: CWE-798
+    file: Dockerfile
+    severity: critical
+    must_find: true
+    description: |
+      ENV with `AKIA…`-shaped AWS access key. Embedded
+      credentials are pulled from `docker history` /
+      `docker inspect`. Rule: dockerfile-env-hardcoded-secret.
+
+  - id: docker-user-root
+    category: misconfig
+    cwe: CWE-250
+    file: Dockerfile
+    severity: high
+    must_find: true
+    description: |
+      `USER root` — container runs privileged. Rule:
+      dockerfile-user-root.
+
+  # Note: `dockerfile_no_user_directive` is mutually exclusive
+  # with `dockerfile_user_root` (USER root IS a USER directive).
+  # A separate fixture would be needed to exercise the
+  # no-USER-at-all case. Not included here.
+
+  - id: compose-privileged-container
+    category: misconfig
+    cwe: CWE-250
+    file: docker-compose.yml
+    severity: high
+    must_find: true
+    description: |
+      Service `app` has `privileged: true` — container has
+      host-level capabilities. Rule: compose-privileged-container.
+
+  - id: compose-host-network-mode
+    category: misconfig
+    cwe: CWE-250
+    file: docker-compose.yml
+    severity: medium
+    must_find: true
+    description: |
+      Service `app` has `network_mode: host` — bypasses Docker
+      network isolation. Rule: compose-host-network-mode.
+
+  - id: compose-docker-socket-mount
+    category: misconfig
+    cwe: CWE-250
+    file: docker-compose.yml
+    severity: critical
+    must_find: true
+    description: |
+      Service `app` mounts `/var/run/docker.sock` — container
+      escape via Docker API. Rule: compose-docker-socket-mount.
+
+  - id: compose-environment-hardcoded-secret
+    category: info_disclosure
+    cwe: CWE-798
+    file: docker-compose.yml
+    severity: critical
+    must_find: true
+    description: |
+      Service `app` has `AWS_ACCESS_KEY_ID: AKIA…` in
+      `environment:`. Same risk as Dockerfile ENV — credentials
+      leak via `docker inspect`. Rule:
+      compose-environment-hardcoded-secret.
+
+  - id: compose-db-port-exposed
+    category: misconfig
+    cwe: CWE-668
+    file: docker-compose.yml
+    severity: high
+    must_find: true
+    description: |
+      Service `db` publishes Postgres port 5432 to the host —
+      DB reachable from outside the compose network. Rule:
+      compose-db-port-exposed.
+
+# ------------------------------------------------------------------
+# Engine-state checks.
+# ------------------------------------------------------------------
+expected_heuristic:
+  - id: iac-files-parsed
+    category: tool_metadata
+    description: |
+      `tool_metadata.files_scanned >= 2` — both Dockerfile and
+      docker-compose.yml must be parsed. If files_by_platform
+      doesn't contain both `docker` and `docker-compose`, the
+      parser path is broken.
