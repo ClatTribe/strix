@@ -1,0 +1,90 @@
+{
+  "fixture": "nodegoat",
+  "asset_class": "sast",
+  "ran_at": "2026-05-11T14:30:17Z",
+  "duration_s": 6.473,
+  "engine_state": {
+    "engine": "semgrep",
+    "engine_available": true,
+    "files_scanned": 75,
+    "diff_aware": false,
+    "config_paths": [
+      "/Users/ashish/Downloads/cowork/strix/strix/sast/rules/vibe_coded",
+      "p/owasp-top-ten"
+    ],
+    "rules_run": 0,
+    "calibration": {
+      "bumped": 0,
+      "demoted": 0,
+      "unchanged": 23
+    }
+  },
+  "raw_counts": {
+    "total_findings": 23,
+    "by_category": {
+      "sast": 14,
+      "cmd_injection": 3,
+      "open_redirect": 2,
+      "misconfig": 4
+    },
+    "by_severity": {
+      "high": 7,
+      "medium": 16
+    },
+    "by_file": {
+      "server.js": 10,
+      "app/routes/contributions.js": 6,
+      "app/views/tutorial/a2.html": 3,
+      "app/routes/index.js": 2,
+      "app/views/tutorial/a5.html": 2
+    }
+  },
+  "ground_truth": {
+    "expected_total": 5,
+    "must_find_total": 4,
+    "matched": [
+      {
+        "id": "nodegoat-sast-eval-injection",
+        "must_find": true,
+        "expected_category": "cmd_injection",
+        "expected_file": "app/routes/contributions.js",
+        "matched_finding_count": 3
+      },
+      {
+        "id": "nodegoat-sast-open-redirect",
+        "must_find": true,
+        "expected_category": "open_redirect",
+        "expected_file": "app/routes/index.js",
+        "matched_finding_count": 2
+      },
+      {
+        "id": "nodegoat-sast-helmet-missing",
+        "must_find": true,
+        "expected_category": "misconfig",
+        "expected_file": "server.js",
+        "matched_finding_count": 4
+      },
+      {
+        "id": "nodegoat-sast-insecure-cookie",
+        "must_find": true,
+        "expected_category": "sast",
+        "expected_file": "server.js",
+        "matched_finding_count": 6
+      },
+      {
+        "id": "nodegoat-sast-plaintext-http",
+        "must_find": false,
+        "expected_category": "sast",
+        "expected_file": "app/views/tutorial/a2.html",
+        "matched_finding_count": 3
+      }
+    ],
+    "missed": [],
+    "must_find_matched": 4,
+    "must_find_missed": 0,
+    "recall_all": 1.0,
+    "recall_must_find": 1.0
+  },
+  "tool_status": "partial",
+  "tool_error": null
+}

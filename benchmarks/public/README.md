@@ -37,21 +37,52 @@ DAST stays in `per_target/` — the agentic loop **is** the product
 there, and a direct-tool DAST benchmark wouldn't represent how
 strix actually runs.
 
+## Per-category coverage
+
+| Category | Public asset | Runner | Status | First captured baseline |
+|---|---|---|---|---|
+| **SAST**  | OWASP NodeGoat source (shared clone) | `run_sast_benchmark.py` | ✅ wired | CEILING — 100% recall_must_find (4/4), 23 findings, 6.5 s |
+| **SCA**   | OWASP NodeGoat lockfile (`package-lock.json`) | `run_sca_benchmark.py` | ✅ wired | FLOOR — 0% recall (cache empty), 629 findings, 1.3 s |
+| **IaC**   | Synthetic Dockerfile + docker-compose (`dockerfile-bad-patterns/`) | `run_iac_benchmark.py` | ✅ wired (synthetic placeholder; TerraGoat / KICS deferred to Phase 11.2/11.3) | CEILING — 100% recall_must_find (9/9), 0.96 s |
+| **DAST**  | OWASP Juice Shop (agentic, via `per_target/`) | `per_target/runner.py` | ✅ exists | see `per_target/baseline/juiceshop_*.json` |
+| Network / IP recon | — | — | not planned (no public comparable score) | — |
+| Domain recon       | — | — | not planned (needs controlled domain) | — |
+| LLM endpoints      | — | — | Phase 8 not shipped | — |
+
 ## Layout
 
 ```
 benchmarks/public/
 ├── README.md                       this file
-├── run_sca_benchmark.py            direct-tool SCA runner
+├── run_sca_benchmark.py            SCA runner    → scan_sca_lockfiles()
+├── run_sast_benchmark.py           SAST runner   → scan_sast()
+├── run_iac_benchmark.py            IaC runner    → scan_iac()
 └── fixtures/
-    └── sca/
-        └── nodegoat/               OWASP NodeGoat, pinned at c5cb68a
-            ├── README.md           Snyk comparison + methodology
-            ├── setup.sh            clones NodeGoat into ./src
-            ├── expected.yaml       8-CVE ground-truth list
-            ├── .gitignore          src/ is not committed
+    ├── dast/
+    │   └── README.md               pointer → per_target/juiceshop
+    ├── sast/
+    │   └── nodegoat/               OWASP NodeGoat source (re-uses sca/nodegoat/src)
+    │       ├── README.md
+    │       ├── expected.yaml       5 ground-truth SAST findings
+    │       └── baseline/
+    │           └── ceiling_*.json
+    ├── sca/
+    │   └── nodegoat/               OWASP NodeGoat, pinned @ c5cb68a
+    │       ├── README.md
+    │       ├── setup.sh            clone NodeGoat (idempotent)
+    │       ├── expected.yaml       8 direct-dep CVE expectations
+    │       ├── .gitignore
+    │       └── baseline/
+    │           └── floor_*.json
+    └── iac/
+        └── dockerfile-bad-patterns/   synthetic recall fixture
+            ├── README.md
+            ├── expected.yaml       9 IaC misconfig expectations
+            ├── src/
+            │   ├── Dockerfile      planted bad patterns
+            │   └── docker-compose.yml
             └── baseline/
-                └── floor_*.json    captured scan results
+                └── ceiling_*.json
 ```
 
 ## Quick start
@@ -97,15 +128,16 @@ include 307 packages with no SPDX field).
 
 | Lane | Fixture | Status |
 |---|---|---|
-| SCA  | OWASP NodeGoat | ✅ Wired (FLOOR captured) |
-| SCA  | Snyk's `goof`  | Planned — adds a denser direct-dep target |
-| SAST | OWASP Benchmark v1.2 (Java) | Planned — has official F-score table from Snyk / Checkmarx / Veracode / Semgrep |
-| SAST | NIST SARD Juliet (subset) | Planned — multi-language, broader langs than OWASP Benchmark |
-| DAST | DVWA            | Planned — runs via `per_target/` harness (agentic) |
-| IaC  | KICS test-repo  | Planned — Checkov / KICS publish numbers on it |
+| SCA  | OWASP NodeGoat | ✅ Wired (FLOOR captured; CEILING gated on `GITHUB_TOKEN` for GHSA seed) |
+| SAST | OWASP NodeGoat source | ✅ Wired (CEILING captured — 100% recall_must_find) |
+| IaC  | dockerfile-bad-patterns (synthetic) | ✅ Wired (CEILING — 100% recall_must_find) |
+| DAST | OWASP Juice Shop | ✅ Existing via `per_target/` |
+| SCA  | Snyk's `goof`  | Planned — denser direct-dep target |
+| SAST | OWASP Benchmark v1.2 (Java) | Planned — has official F-score table from Snyk / Checkmarx / Veracode / Semgrep; the **externally-defensible** academic number |
+| SAST | NIST SARD Juliet (subset) | Planned — multi-language, broader than OWASP Benchmark |
+| IaC  | TerraGoat / KICS test-repo | Gated on Phase 11.2 (Checkov) + 11.3 (Terraform parser) |
 
-Track these in the issues queue rather than this README — each is
-a separate PR.
+Each row above represents a separate PR.
 
 ## Reproducibility
 

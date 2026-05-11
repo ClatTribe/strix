@@ -1,0 +1,32 @@
+# Synthetic deliberately-bad docker-compose.yml for the strix
+# IaC benchmark. Every rule in strix/iac/rules/docker_rules.py
+# for the docker-compose section is intentionally violated below.
+
+version: "3.8"
+
+services:
+  # Bad #1 — privileged container (compose_privileged_container)
+  # Bad #2 — Docker socket mount (compose_docker_socket_mount)
+  # Bad #3 — host network mode (compose_host_network_mode)
+  # Bad #4 — hardcoded secret in env (compose_environment_hardcoded_secret)
+  app:
+    image: myapp:latest
+    privileged: true
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # Synthetic AWS-style key shape so the strix secret regex
+      # (`AKIA[A-Z0-9]{16}`) fires deterministically. Not a real
+      # credential — pattern only.
+      AWS_ACCESS_KEY_ID: AKIAIOSFODNN7EXAMPLE
+    ports:
+      - "8080:8080"
+
+  # Bad #5 — DB port exposed to host (compose_db_port_exposed_to_host)
+  db:
+    image: postgres:13
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: postgres
