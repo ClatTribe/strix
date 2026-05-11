@@ -260,8 +260,17 @@ def _emit_finding(
 
 @register_specialist_tool(
     category="xss-specialist",
-    llm=False,
-    default_budget={"cost_usd": 0.0, "max_wall_seconds": 60},
+    # Phase 3b — adaptive-retry inner-LLM enabled. When the
+    # first-pass procedural probe returns 0 findings the
+    # orchestrator engages a single LLM call to suggest adapted
+    # args (different param / method / body shape) and re-runs
+    # the procedural probe with those. Kill switch:
+    # STRIX_SPECIALIST_INNER_LLM_DISABLED=1.
+    llm=True,
+    system_prompt_path="tools/specialist/prompts/xss.md",
+    # `cost_usd` is the inner-LLM retry budget cap. ~$0.005 on
+    # Gemini Flash, ~$0.02 on Claude Sonnet per call.
+    default_budget={"cost_usd": 0.05, "max_wall_seconds": 90},
     sandbox_execution=False,  # host execution; proxy_manager handles host.docker.internal → 127.0.0.1 fallback
     provenance="framework",
     mitre_techniques=["T1059.007"],  # Command/Scripting: JavaScript

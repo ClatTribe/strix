@@ -330,8 +330,12 @@ def _emit_idor_finding(
 
 @register_specialist_tool(
     category="idor-specialist",
-    llm=False,
-    default_budget={"cost_usd": 0.0, "max_wall_seconds": 120},
+    # Phase 3b — adaptive-retry inner-LLM enabled. See scan_xss.py
+    # for the protocol; same kill switch
+    # (STRIX_SPECIALIST_INNER_LLM_DISABLED=1).
+    llm=True,
+    system_prompt_path="tools/specialist/prompts/idor.md",
+    default_budget={"cost_usd": 0.05, "max_wall_seconds": 150},
     sandbox_execution=False,
     provenance="framework",
     mitre_techniques=["T1078", "T1531"],

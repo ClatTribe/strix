@@ -250,7 +250,11 @@ def test_scan_xss_registered_in_specialist_registry() -> None:
 
     desc = get_specialist_descriptor("scan_xss")
     assert desc is not None
-    assert desc.llm is False
+    # Phase 3b — scan_xss now routes through the inner-LLM
+    # adaptive-retry orchestrator. Kill switch:
+    # STRIX_SPECIALIST_INNER_LLM_DISABLED=1.
+    assert desc.llm is True
+    assert desc.system_prompt_path == "tools/specialist/prompts/xss.md"
     assert desc.category == "xss-specialist"
 
 

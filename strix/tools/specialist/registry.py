@@ -202,7 +202,27 @@ def register_specialist_tool(  # noqa: PLR0913
             import time as _time
             started = _time.monotonic()
             try:
-                raw = func(*args, **kwargs)
+                if llm and _should_route_to_inner_llm():
+                    # Phase 3b — `llm=True` specialists route through
+                    # the inner-LLM orchestrator (one adaptive retry
+                    # when the first pass returns 0 findings). The
+                    # orchestrator handles its own fallback to
+                    # direct call on any internal failure, so this
+                    # path is safe-by-default. Kill switch:
+                    # STRIX_SPECIALIST_INNER_LLM_DISABLED=1.
+                    from strix.tools.specialist.llm_orchestrator import (
+                        run_inner_llm_specialist,
+                    )
+                    raw = run_inner_llm_specialist(
+                        procedural_func=func,
+                        specialist_name=func.__name__,
+                        category=category,
+                        system_prompt_path=system_prompt_path,
+                        default_budget=default_budget,
+                        task_args=kwargs,
+                    )
+                else:
+                    raw = func(*args, **kwargs)
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     "specialist-tool %s raised: %s",
@@ -319,6 +339,19 @@ def reset_registry_for_tests() -> None:
     """Test-only helper. Clears the module-level registry between
     test cases that register conflicting categories."""
     _SPECIALIST_REGISTRY.clear()
+
+
+def _should_route_to_inner_llm() -> bool:
+    """Phase 3b dispatch gate. Returns False when the kill-switch
+    env var is set, otherwise True.
+
+    Lives here (not in llm_orchestrator) so the decorator can
+    check it cheaply BEFORE importing the orchestrator module —
+    keeps the llm=False codepath import-free of any LLM machinery."""
+    import os
+    return os.environ.get(
+        "STRIX_SPECIALIST_INNER_LLM_DISABLED", ""
+    ).lower() not in ("1", "true", "yes", "on")
 
 
 # ---------------------------------------------------------------------------

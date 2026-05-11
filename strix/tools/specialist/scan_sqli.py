@@ -444,8 +444,12 @@ def _emit_finding(
 
 @register_specialist_tool(
     category="sqli-specialist",
-    llm=False,
-    default_budget={"cost_usd": 0.0, "max_wall_seconds": 90},
+    # Phase 3b — adaptive-retry inner-LLM enabled. See scan_xss.py
+    # for the protocol; same kill switch
+    # (STRIX_SPECIALIST_INNER_LLM_DISABLED=1).
+    llm=True,
+    system_prompt_path="tools/specialist/prompts/sqli.md",
+    default_budget={"cost_usd": 0.05, "max_wall_seconds": 120},
     sandbox_execution=False,  # host execution; proxy_manager handles host.docker.internal → 127.0.0.1 fallback
     provenance="framework",
     mitre_techniques=["T1190"],  # Exploit Public-Facing Application

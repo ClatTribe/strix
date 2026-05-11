@@ -365,7 +365,11 @@ def test_scan_idor_registered() -> None:
 
     desc = get_specialist_descriptor("scan_idor")
     assert desc is not None
-    assert desc.llm is False
+    # Phase 3b — scan_idor now routes through the inner-LLM
+    # adaptive-retry orchestrator. Kill switch:
+    # STRIX_SPECIALIST_INNER_LLM_DISABLED=1.
+    assert desc.llm is True
+    assert desc.system_prompt_path == "tools/specialist/prompts/idor.md"
     assert desc.category == "idor-specialist"
 
 
