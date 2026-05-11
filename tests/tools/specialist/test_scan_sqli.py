@@ -241,7 +241,11 @@ def test_scan_sqli_registered_in_specialist_registry() -> None:
 
     desc = get_specialist_descriptor("scan_sqli")
     assert desc is not None
-    assert desc.llm is False
+    # Phase 3b — scan_sqli now routes through the inner-LLM
+    # adaptive-retry orchestrator. Kill switch:
+    # STRIX_SPECIALIST_INNER_LLM_DISABLED=1.
+    assert desc.llm is True
+    assert desc.system_prompt_path == "tools/specialist/prompts/sqli.md"
     assert desc.category == "sqli-specialist"
 
 
