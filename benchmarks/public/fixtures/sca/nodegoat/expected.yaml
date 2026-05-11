@@ -1,0 +1,135 @@
+target_type: local_code
+target: src
+description: |
+  OWASP NodeGoat — a well-known intentionally-vulnerable Node.js
+  Express app. Pinned at commit c5cb68a (2023-06).
+
+  This is a SCA-focused benchmark — we run `scan_sca_lockfiles`
+  against NodeGoat's `package-lock.json` and score recall against
+  the direct-dependency CVE list below.
+
+  Pre-condition: the threat-intel cache should contain GHSA / NVD
+  entries for these advisories. Without a seeded cache, `vulnerable_
+  dependency` recall will be 0 and only heuristic categories
+  (malicious_dependency / license_violation) will fire. Seed via:
+
+      python -m strix.threat_intel.refresh --only ghsa,popular \
+        --ghsa-days 365 --popular-top-n 1000
+
+  (GHSA refresh requires `GITHUB_TOKEN` to clear the 60-req/h
+  unauth rate limit.)
+
+  Ground-truth scope: we list direct-dependency CVEs only. NodeGoat
+  ships ~1,500 transitives; Snyk's published number on the full
+  tree is ~30 vulnerabilities. Direct-dep CVE recall is the cleanest
+  comparison surface because it isolates "did we catch the
+  developer-introduced vulnerable dep" from "did we walk the full
+  transitive graph".
+
+# ------------------------------------------------------------------
+# Direct-dep CVE expectations.
+#
+# `must_find=true` = high-confidence advisory exists in public DBs.
+# `must_find=false` = lower-confidence (old / disputed / advisory
+#                     only in some sources).
+# ------------------------------------------------------------------
+expected_findings:
+  - id: nodegoat-marked
+    category: vulnerable_dependency
+    cwe: CWE-79
+    file: package-lock.json
+    severity: high
+    must_find: true
+    description: |
+      marked@0.3.5 — ReDoS + XSS via crafted markdown
+      (CVE-2022-21680, CVE-2022-21681, GHSA-rrrm-qjm4-v8hf).
+      Patched in 4.0.10+. NodeGoat pins 0.3.5 — 7 years stale.
+
+  - id: nodegoat-underscore
+    category: vulnerable_dependency
+    cwe: CWE-94
+    file: package-lock.json
+    severity: high
+    must_find: true
+    description: |
+      underscore@1.9.1 — arbitrary code execution via _.template
+      (CVE-2021-23358, GHSA-cf4h-3jhx-xvhq). Patched in 1.12.1.
+
+  - id: nodegoat-mongodb
+    category: vulnerable_dependency
+    cwe: CWE-1321
+    file: package-lock.json
+    severity: high
+    must_find: true
+    description: |
+      mongodb@2.2.36 — driver-level prototype pollution + EOL 2.x
+      line. Multiple advisories across 2.x. Upgrade to 4.x.
+
+  - id: nodegoat-swig
+    category: vulnerable_dependency
+    cwe: CWE-1104
+    file: package-lock.json
+    severity: medium
+    must_find: true
+    description: |
+      swig@1.4.2 — abandoned template engine, last release 2014.
+      Known SSTI surface. Snyk flags as malicious-package /
+      unmaintained. Replace with eta / nunjucks.
+
+  - id: nodegoat-express
+    category: vulnerable_dependency
+    cwe: CWE-601
+    file: package-lock.json
+    severity: medium
+    must_find: true
+    description: |
+      express@4.16.4 — open-redirect via untrusted host header
+      (GHSA-rv95-896h-c2vc / CVE-2024-29041) + qs prototype
+      pollution in the dep chain. Patched in 4.19.2.
+
+  - id: nodegoat-body-parser
+    category: vulnerable_dependency
+    cwe: CWE-405
+    file: package-lock.json
+    severity: medium
+    must_find: false
+    description: |
+      body-parser@1.18.3 — DoS via crafted JSON
+      (GHSA-qwcr-r2fm-qrc7 / CVE-2024-45590). Patched in 1.20.3.
+
+  - id: nodegoat-consolidate
+    category: vulnerable_dependency
+    cwe: CWE-1104
+    file: package-lock.json
+    severity: medium
+    must_find: false
+    description: |
+      consolidate@0.14.5 — historic SSTI via template-string
+      injection across multiple template engines. Patched in
+      0.16.0+.
+
+  - id: nodegoat-bcrypt-nodejs
+    category: vulnerable_dependency
+    cwe: CWE-327
+    file: package-lock.json
+    severity: low
+    must_find: false
+    description: |
+      bcrypt-nodejs@0.0.3 — abandoned, pure-JS bcrypt
+      implementation. Not a CVE per se, but Snyk flags
+      unmaintained. Replace with bcryptjs.
+
+# ------------------------------------------------------------------
+# Heuristic-only expectations (fire even with empty cache).
+# These exercise the `malicious_dependency` and `license_violation`
+# categories so the FLOOR baseline is non-zero.
+# ------------------------------------------------------------------
+expected_heuristic:
+  - id: nodegoat-license-coverage
+    category: license_inventory
+    description: |
+      Every package in the lockfile must be classified into a
+      license family (permissive / copyleft / commercial_restricted
+      / unknown). NodeGoat has ~1,091 packages; coverage should be
+      ≥ 95% (some transitives have no SPDX field — that's OK,
+      they land in "unknown").
