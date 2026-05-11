@@ -81,6 +81,13 @@ services:
       # Strix runtime
       STRIX_LLM: ${STRIX_LLM:-anthropic/claude-opus-4-5}
       LLM_API_KEY: ${LLM_API_KEY:-}
+      # Per-provider fallbacks litellm reads directly when
+      # LLM_API_KEY isn't threaded through (see worker-sandbox
+      # below for the full table).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       STRIX_THREAT_INTEL_CACHE: /home/strix/cache/threat_intel.db
       # Default sandbox mode is OFF (Option B in docs §6) — strix
       # runs the agent loop directly in this container.
@@ -157,12 +164,18 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       STRIX_LLM: ${STRIX_LLM:-anthropic/claude-opus-4-5}
       LLM_API_KEY: ${LLM_API_KEY:-}
-      # litellm's Anthropic adapter ALSO looks for ANTHROPIC_API_KEY
-      # directly as a fallback — `LLM_API_KEY` alone isn't always
-      # threaded through to the underlying call site. Pass both to
-      # avoid the "Missing Anthropic API Key" failure path.
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-${LLM_API_KEY:-}}
+      # Each litellm provider falls back to its OWN canonical env var
+      # when strix's LLM_API_KEY isn't threaded through the call path.
+      # Pass through whichever you're using; harmless when unset.
+      #   Anthropic models (anthropic/…)        → ANTHROPIC_API_KEY
+      #   OpenAI / Azure (openai/…)             → OPENAI_API_KEY
+      #   Google AI Studio (gemini/…)           → GEMINI_API_KEY
+      #   Anthropic via AWS Bedrock             → AWS_* creds (not modelled here)
+      #   Vertex AI (vertex_ai/…)               → GOOGLE_APPLICATION_CREDENTIALS
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       STRIX_THREAT_INTEL_CACHE: /home/strix/cache/threat_intel.db
       # Option A — inner sandbox ON, custom image.
       STRIX_SANDBOX_MODE: "true"
