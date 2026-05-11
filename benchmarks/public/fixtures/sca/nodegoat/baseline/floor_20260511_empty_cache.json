@@ -1,0 +1,103 @@
+{
+  "fixture": "nodegoat",
+  "ran_at": "2026-05-11T14:14:57Z",
+  "duration_s": 1.318,
+  "cache_state": {
+    "kev_cves_in_cache": 1590,
+    "ghsa_seeded": false,
+    "popular_seeded": false,
+    "ossf_malicious_seeded": false,
+    "kev_seeded": true,
+    "feed_meta": {
+      "ghsa": {
+        "status": "error",
+        "records": null,
+        "last_polled": "2026-05-11T14:09:58.130918+00:00"
+      },
+      "kev": {
+        "status": "ok",
+        "records": null,
+        "last_polled": "2026-05-10T05:25:31.143692+00:00"
+      }
+    }
+  },
+  "raw_counts": {
+    "total_findings": 629,
+    "by_category": {
+      "malicious_dependency": 322,
+      "license_violation": 307
+    },
+    "by_severity": {
+      "low": 307,
+      "medium": 321,
+      "high": 1
+    },
+    "packages_scanned": 1091
+  },
+  "ground_truth": {
+    "expected_total": 8,
+    "must_find_total": 5,
+    "matched": [],
+    "missed": [
+      {
+        "id": "nodegoat-marked",
+        "must_find": true,
+        "expected_category": "vulnerable_dependency"
+      },
+      {
+        "id": "nodegoat-underscore",
+        "must_find": true,
+        "expected_category": "vulnerable_dependency"
+      },
+      {
+        "id": "nodegoat-mongodb",
+        "must_find": true,
+        "expected_category": "vulnerable_dependency"
+      },
+      {
+        "id": "nodegoat-swig",
+        "must_find": true,
+        "expected_category": "vulnerable_dependency"
+      },
+      {
+        "id": "nodegoat-express",
+        "must_find": true,
+        "expected_category": "vulnerable_dependency"
+      },
+      {
+        "id": "nodegoat-body-parser",
+        "must_find": false,
+        "expected_category": "vulnerable_dependency"
+      },
+      {
+        "id": "nodegoat-consolidate",
+        "must_find": false,
+        "expected_category": "vulnerable_dependency"
+      },
+      {
+        "id": "nodegoat-bcrypt-nodejs",
+        "must_find": false,
+        "expected_category": "vulnerable_dependency"
+      }
+    ],
+    "must_find_matched": 0,
+    "must_find_missed": 5,
+    "recall_all": 0.0,
+    "recall_must_find": 0.0
+  },
+  "heuristic": {
+    "by_family": {
+      "permissive": 322,
+      "weak_copyleft": 0,
+      "copyleft": 0,
+      "commercial_restricted": 1,
+      "unknown": 768
+    },
+    "by_indicator": {
+      "typosquat": 14,
+      "install_script": 1,
+      "no_license": 307,
+      "known_malicious": 0
+    }
+  }
+}

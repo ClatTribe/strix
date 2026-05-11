@@ -1,0 +1,4 @@
+# The pinned NodeGoat clone is fetched on-demand via setup.sh; don't
+# commit a copy. Reproducibility comes from the pinned commit in
+# setup.sh, not from carrying the upstream source.
+src/
