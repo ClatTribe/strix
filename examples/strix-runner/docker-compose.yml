@@ -82,7 +82,18 @@ services:
       STRIX_LLM: ${STRIX_LLM:-anthropic/claude-opus-4-5}
       LLM_API_KEY: ${LLM_API_KEY:-}
       STRIX_THREAT_INTEL_CACHE: /home/strix/cache/threat_intel.db
-      STRIX_SANDBOX_MODE: "false"
+      # Default sandbox mode is OFF (Option B in docs §6) — strix
+      # runs the agent loop directly in this container.
+      #
+      # To switch to Option A (DinD with a fork-built sandbox image),
+      # set STRIX_SANDBOX_MODE=true + STRIX_IMAGE=<your-image> in
+      # the calling shell or .env, and bring up the `sandbox` profile:
+      #
+      #   STRIX_SANDBOX_MODE=true \
+      #   STRIX_IMAGE=strix-sandbox:fork-4f3f93c \
+      #   docker compose --profile sandbox up
+      STRIX_SANDBOX_MODE: ${STRIX_SANDBOX_MODE:-false}
+      STRIX_IMAGE: ${STRIX_IMAGE:-ghcr.io/usestrix/strix-sandbox:0.1.13}
       # Where this worker stages its run-dirs
       STRIX_RUN_STORAGE: /home/strix/runs
       # Default per-scan caps (override per-request)
@@ -103,6 +114,57 @@ services:
       - worker
       - --loglevel=info
       - --concurrency=2
+
+  # --- Worker (Option A: DinD + custom sandbox image) -------------
+  #
+  # Alternative worker that runs WITH inner-sandbox mode, using a
+  # custom STRIX_IMAGE (typically a fork-built image like
+  # `strix-sandbox:fork-<sha>` per docs §6 "Fork-built sandbox
+  # images"). Bring this up via:
+  #
+  #   STRIX_SANDBOX_MODE=true \
+  #   STRIX_IMAGE=strix-sandbox:fork-4f3f93c \
+  #   docker compose --profile sandbox up worker-sandbox api redis
+  #
+  # The Docker socket mount gives this pod root-equivalent
+  # privileges on the host. Acceptable for local dev / single-
+  # tenant. For multi-tenant production: use sysbox runtime class
+  # (Option C in docs §6) instead of mounting the socket.
+  worker-sandbox:
+    profiles: ["sandbox"]
+    build:
+      context: ../..
+      dockerfile: examples/strix-runner/Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      STRIX_LLM: ${STRIX_LLM:-anthropic/claude-opus-4-5}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      STRIX_THREAT_INTEL_CACHE: /home/strix/cache/threat_intel.db
+      # Option A — inner sandbox ON, custom image.
+      STRIX_SANDBOX_MODE: "true"
+      STRIX_IMAGE: ${STRIX_IMAGE:-strix-sandbox:fork-latest}
+      STRIX_RUN_STORAGE: /home/strix/runs
+      STRIX_DEFAULT_MAX_COST_USD: "2.50"
+      STRIX_DEFAULT_MAX_INPUT_TOKENS: "1500000"
+    volumes:
+      - threat-intel-cache:/home/strix/cache:ro
+      - run-artifacts:/home/strix/runs
+      # Host Docker socket. Required for strix to spawn the inner
+      # sandbox container. **This is the security trade-off** —
+      # this pod can now drive the host Docker daemon. Multi-tenant
+      # deployments should use sysbox/Kata runtime class instead.
+      - /var/run/docker.sock:/var/run/docker.sock
+    command:
+      - celery
+      - -A
+      - worker
+      - worker
+      - --loglevel=info
+      - --concurrency=1
 
   # --- Control plane (FastAPI) ------------------------------------
   api:

@@ -180,6 +180,10 @@ The wrapper should treat **code 3 as a non-error** (capped successfully, partial
 | Var | Default | Notes |
 |---|---|---|
 | `STRIX_SANDBOX_MODE` | `true` (DinD) | `false` to disable inner Docker sandbox — strix runs in-process. See §6. |
+| `STRIX_IMAGE` | `ghcr.io/usestrix/strix-sandbox:0.1.13` | Override the inner-sandbox image. **Use this for fork-built images** (e.g. `strix-sandbox:fork-<sha>`). See §6 "Fork-built sandbox images". |
+| `STRIX_RUNTIME_BACKEND` | `docker` | Runtime driver. `docker` today; other backends are reserved. |
+| `STRIX_SANDBOX_EXECUTION_TIMEOUT` | `120` | Seconds — inner-sandbox per-command timeout. |
+| `STRIX_SANDBOX_CONNECT_TIMEOUT` | `10` | Seconds — inner-sandbox bring-up timeout. |
 | `STRIX_PARALLEL_TOOL_DISPATCH` | `1` | Specialists run concurrently. Set to `0` for serial debugging. |
 | `STRIX_AGENT_ARCHITECTURE` | — | `single_lead` to opt into the single-lead architecture (per proposal doc). |
 | `STRIX_INHERIT_CONTEXT_DEFAULT` | — | Sub-agent context inheritance default. |
@@ -486,8 +490,63 @@ infrastructure investment. Most teams don't have it on day 1.
 | Real multi-tenant / untrusted DAST targets | sysbox runtimeClass (Option C), or Firecracker if you need VM-grade isolation. |
 
 The example in [`examples/strix-runner/`](../examples/strix-runner/)
-uses **Option B** because it's the cleanest single-tenant demo.
-Comments in the Dockerfile + compose file flag the upgrade path.
+ships with **two profiles**: the default uses Option B (no
+inner sandbox); a `--profile sandbox` variant wires Option A
+(DinD + custom `STRIX_IMAGE`). Switching between them is one
+env-var flip.
+
+### Fork-built sandbox images
+
+Production deployments typically build their own sandbox image
+rather than pulling `ghcr.io/usestrix/strix-sandbox:0.1.13`
+directly — pinned-fork builds, additional toolchain, internal
+registry, etc. The override knob is **`STRIX_IMAGE`**.
+
+Naming convention used in our internal builds:
+
+```
+strix-sandbox:fork-<short-sha-of-fork-tip>
+strix-sandbox:fork-latest                  # mutable alias
+```
+
+Wrapper-side usage:
+
+```yaml
+# K8s Pod spec
+env:
+  - name: STRIX_SANDBOX_MODE
+    value: "true"
+  - name: STRIX_IMAGE
+    value: "registry.internal/strix-sandbox:fork-4f3f93c"
+  # Mount Docker socket OR run with sysbox runtime class
+volumes:
+  - name: docker-sock
+    hostPath: { path: /var/run/docker.sock }
+volumeMounts:
+  - name: docker-sock
+    mountPath: /var/run/docker.sock
+```
+
+```bash
+# docker-compose
+STRIX_IMAGE=strix-sandbox:fork-4f3f93c \
+  docker compose --profile sandbox \
+  -f examples/strix-runner/docker-compose.yml up
+```
+
+Two pre-conditions for it to work:
+
+1. The image is available where the worker can `docker pull` it
+   (or it's already local — `docker images` shows the tag).
+2. The wrapper has Docker socket access (Option A) or is running
+   under a nested-isolation runtime (Option C). Plain
+   `STRIX_SANDBOX_MODE=true` without one of those will fail at
+   sandbox spawn.
+
+Pinning the fork SHA into the tag (rather than `:latest`) gives
+the wrapper a reproducible scan environment — re-running an old
+scan against the same fork-image tag produces the same agent
+behaviour modulo external feed drift.
 
 ---
 

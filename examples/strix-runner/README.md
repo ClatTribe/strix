@@ -193,14 +193,43 @@ Scan workers mount the same PVC `:readOnly`.
 
 ### Sandbox-mode escalation
 
-This example uses `STRIX_SANDBOX_MODE=false` for simplicity (no
-DinD, no privileged pods). For production multi-tenant, see
-`docs/wrapper-integration.md` §6:
+This example **defaults to** `STRIX_SANDBOX_MODE=false` for
+simplicity (no DinD, no privileged pods). To switch to inner-
+sandbox mode with a fork-built image (Option A in
+`docs/wrapper-integration.md` §6), the compose file ships a
+`sandbox` profile:
 
-- **Trust the K8s pod boundary** (this example) — viable for
-  trusted-multi-tenant or single-tenant deployments.
+```bash
+# Build your fork sandbox image first (in the strix repo root).
+# See docs/wrapper-integration.md §6 "Fork-built sandbox images".
+
+STRIX_SANDBOX_MODE=true \
+STRIX_IMAGE=strix-sandbox:fork-4f3f93c \
+docker compose --profile sandbox \
+  -f examples/strix-runner/docker-compose.yml \
+  up worker-sandbox api redis
+```
+
+The `worker-sandbox` service:
+- Sets `STRIX_SANDBOX_MODE=true` + `STRIX_IMAGE=$STRIX_IMAGE`
+- Mounts `/var/run/docker.sock` so strix can spawn the inner
+  sandbox container on the host Docker daemon
+- Runs at `--concurrency=1` (DinD overhead is real)
+
+**The Docker socket mount is the security trade-off.** This pod
+can now drive the host Docker daemon — fine for local dev /
+trusted single-tenant, not OK for multi-tenant production. The
+production fix is to drop the socket mount and use a
+nested-isolation runtime class (sysbox / Kata) so plain DinD
+just works.
+
+For production multi-tenant, see `docs/wrapper-integration.md` §6:
+
+- **Trust the K8s pod boundary** (this example default) — viable
+  for trusted-multi-tenant or single-tenant deployments.
 - **sysbox runtime class** — clean nested isolation; strix's
-  default sandbox mode "just works" inside the outer pod.
+  default sandbox mode "just works" inside the outer pod, no
+  socket mount needed.
 - **Firecracker microVM** (KubeVirt / Kata) — VM-grade isolation
   for high-risk DAST workloads.
 
@@ -215,8 +244,10 @@ DinD, no privileged pods). For production multi-tenant, see
   2; no per-tenant fair share
 - **Webhook callbacks** — clients have to poll `GET /scans/{id}`
 - **TLS termination** — uvicorn HTTP only
-- **Pre-pull of the strix sandbox image** — irrelevant because we
-  use `STRIX_SANDBOX_MODE=false`
+- **Pre-pull of the strix sandbox image** — the `sandbox` profile
+  expects the image to be locally available (built or pulled
+  ahead of time). For multi-tenant K8s, pull during the
+  worker pod's init-container.
 - **Streaming `event_stream.jsonl`** — only post-completion
   artefact reads
 
