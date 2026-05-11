@@ -27,13 +27,36 @@ Requires Docker + Docker Compose v2. From the **repo root** (not
 this directory — the build context is `../..`):
 
 ```bash
-# 1. (Optional but recommended) set your LLM key in .env
+# 1. (Optional but recommended) set your LLM key in .env. Pick ONE
+#    provider block below. **Set BOTH `LLM_API_KEY` and the
+#    provider-specific env var** to the same value — litellm's
+#    per-provider adapter falls back to its own canonical name,
+#    and strix's `LLM_API_KEY` alone isn't always threaded through.
+#    See docs/wrapper-integration.md §2 for the full provider table.
+
+# --- Anthropic ---
 cat > .env <<'EOF'
 STRIX_LLM=anthropic/claude-opus-4-5
 LLM_API_KEY=sk-ant-...
-# For the refresher (separate one-shot):
-GITHUB_TOKEN=ghp_...
+ANTHROPIC_API_KEY=sk-ant-...
+GITHUB_TOKEN=ghp_...     # for the threat-intel refresher
 EOF
+
+# --- Google AI Studio (Gemini) ---
+# cat > .env <<'EOF'
+# STRIX_LLM=gemini/gemini-2.5-flash
+# LLM_API_KEY=<your-google-ai-studio-key>
+# GEMINI_API_KEY=<your-google-ai-studio-key>
+# GITHUB_TOKEN=ghp_...
+# EOF
+
+# --- OpenAI ---
+# cat > .env <<'EOF'
+# STRIX_LLM=openai/gpt-4o
+# LLM_API_KEY=sk-...
+# OPENAI_API_KEY=sk-...
+# GITHUB_TOKEN=ghp_...
+# EOF
 
 # 2. Seed the threat-intel cache (one-shot; ~5–15 min)
 docker compose --profile refresh -f examples/strix-runner/docker-compose.yml up refresher

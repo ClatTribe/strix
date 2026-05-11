@@ -143,7 +143,12 @@ The wrapper should treat **code 3 as a non-error** (capped successfully, partial
 | Var | Required | Default | Read at |
 |---|---|---|---|
 | `STRIX_LLM` | **yes** | — | `strix/config/config.py` |
-| `LLM_API_KEY` | yes (provider-dependent) | — | Read by litellm |
+| `LLM_API_KEY` | yes (provider-dependent) | — | Read by litellm via strix Config |
+| `ANTHROPIC_API_KEY` | **for Anthropic models** | — | litellm fallback (see below) |
+| `OPENAI_API_KEY` | **for OpenAI models** | — | litellm fallback (see below) |
+| `GEMINI_API_KEY` | **for Google AI Studio models (`gemini/…`)** | — | litellm fallback (see below) |
+| `GOOGLE_API_KEY` | Vertex AI / alternate Gemini path | — | litellm fallback |
+| `GOOGLE_APPLICATION_CREDENTIALS` | for Vertex AI (`vertex_ai/…`) | — | service-account JSON path |
 | `LLM_API_BASE` / `OPENAI_API_BASE` / `LITELLM_BASE_URL` / `OLLAMA_API_BASE` | no | — | Proxy / self-hosted LLM endpoints |
 | `STRIX_REASONING_EFFORT` | no | — | Anthropic reasoning-effort hint |
 | `STRIX_LLM_MAX_RETRIES` | no | — | Per-call retry cap |
@@ -151,10 +156,40 @@ The wrapper should treat **code 3 as a non-error** (capped successfully, partial
 | `STRIX_TOOL_CALL_FORMAT` | no | `xml` | `xml` or `native` |
 | `LLM_TIMEOUT` | no | — | Per-call timeout seconds |
 
-> Strix does **not** read `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
-> directly. The key flows through litellm via `LLM_API_KEY`. For
-> Anthropic: `STRIX_LLM=anthropic/claude-opus-4` +
-> `LLM_API_KEY=<sk-ant-…>`.
+> **Set BOTH `LLM_API_KEY` AND the provider-specific env var.**
+> Strix's Config layer reads `LLM_API_KEY`, but litellm's
+> per-provider adapters also fall back to their own canonical env
+> var directly when the configured key isn't threaded through the
+> call path. Empirically seen: `LLM_API_KEY` alone fails with
+> `litellm.AuthenticationError: Missing <Provider> API Key`.
+> Safest pattern is to set both to the same value.
+>
+> Provider → env-var mapping:
+>
+> | Provider / model prefix | Provider env var |
+> |---|---|
+> | `anthropic/claude-…`            | `ANTHROPIC_API_KEY` |
+> | `openai/gpt-…` / Azure          | `OPENAI_API_KEY` |
+> | `gemini/gemini-…` (AI Studio)   | `GEMINI_API_KEY` |
+> | `vertex_ai/gemini-…` (Vertex)   | `GOOGLE_APPLICATION_CREDENTIALS` (service-account JSON) |
+> | `bedrock/…`                     | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` + `AWS_REGION_NAME` |
+> | `ollama/…`                      | none (set `OLLAMA_API_BASE`) |
+>
+> Example for Gemini 2.5 Flash via Google AI Studio:
+>
+> ```bash
+> STRIX_LLM=gemini/gemini-2.5-flash
+> LLM_API_KEY=<your-google-ai-studio-key>
+> GEMINI_API_KEY=<your-google-ai-studio-key>   # same value
+> ```
+>
+> Example for Anthropic:
+>
+> ```bash
+> STRIX_LLM=anthropic/claude-opus-4
+> LLM_API_KEY=<sk-ant-…>
+> ANTHROPIC_API_KEY=<sk-ant-…>   # same value
+> ```
 
 ### Cost / budget
 

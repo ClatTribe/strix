@@ -81,6 +81,13 @@ services:
       # Strix runtime
       STRIX_LLM: ${STRIX_LLM:-anthropic/claude-opus-4-5}
       LLM_API_KEY: ${LLM_API_KEY:-}
+      # Per-provider fallbacks litellm reads directly when
+      # LLM_API_KEY isn't threaded through (see worker-sandbox
+      # below for the full table).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       STRIX_THREAT_INTEL_CACHE: /home/strix/cache/threat_intel.db
       # Default sandbox mode is OFF (Option B in docs §6) — strix
       # runs the agent loop directly in this container.
@@ -94,6 +101,11 @@ services:
       #   docker compose --profile sandbox up
       STRIX_SANDBOX_MODE: ${STRIX_SANDBOX_MODE:-false}
       STRIX_IMAGE: ${STRIX_IMAGE:-ghcr.io/usestrix/strix-sandbox:0.1.13}
+      # Single-lead architecture is the testing default (per
+      # docs/wrapper-integration.md §6 + the 95%-idle wait_for_message
+      # incident in legacy mode). Override to `legacy` only when
+      # specifically testing the parent-spawns-N-specialists pattern.
+      STRIX_AGENT_ARCHITECTURE: ${STRIX_AGENT_ARCHITECTURE:-single-lead}
       # Where this worker stages its run-dirs
       STRIX_RUN_STORAGE: /home/strix/runs
       # Default per-scan caps (override per-request)
@@ -135,6 +147,15 @@ services:
     build:
       context: ../..
       dockerfile: examples/strix-runner/Dockerfile
+    # The sandbox profile mounts /var/run/docker.sock, which on most
+    # hosts is owned by root:root with mode 0660. The non-root `strix`
+    # user can't read it; running as root here is necessary for the
+    # DinD model to work. The socket mount itself already gives this
+    # container root-equivalent power on the host, so `user: root`
+    # does not worsen the trade-off — it just makes the failure mode
+    # explicit. Production multi-tenant should use sysbox / Kata
+    # runtime class instead, which lets the container stay non-root.
+    user: root
     depends_on:
       redis:
         condition: service_healthy
@@ -143,10 +164,23 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       STRIX_LLM: ${STRIX_LLM:-anthropic/claude-opus-4-5}
       LLM_API_KEY: ${LLM_API_KEY:-}
+      # Each litellm provider falls back to its OWN canonical env var
+      # when strix's LLM_API_KEY isn't threaded through the call path.
+      # Pass through whichever you're using; harmless when unset.
+      #   Anthropic models (anthropic/…)        → ANTHROPIC_API_KEY
+      #   OpenAI / Azure (openai/…)             → OPENAI_API_KEY
+      #   Google AI Studio (gemini/…)           → GEMINI_API_KEY
+      #   Anthropic via AWS Bedrock             → AWS_* creds (not modelled here)
+      #   Vertex AI (vertex_ai/…)               → GOOGLE_APPLICATION_CREDENTIALS
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       STRIX_THREAT_INTEL_CACHE: /home/strix/cache/threat_intel.db
       # Option A — inner sandbox ON, custom image.
       STRIX_SANDBOX_MODE: "true"
       STRIX_IMAGE: ${STRIX_IMAGE:-strix-sandbox:fork-latest}
+      STRIX_AGENT_ARCHITECTURE: ${STRIX_AGENT_ARCHITECTURE:-single-lead}
       STRIX_RUN_STORAGE: /home/strix/runs
       STRIX_DEFAULT_MAX_COST_USD: "2.50"
       STRIX_DEFAULT_MAX_INPUT_TOKENS: "1500000"
