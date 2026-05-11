@@ -203,12 +203,18 @@ RUN /app/.venv/bin/python -m playwright install chromium
 RUN uv pip install -r /home/pentester/tools/jwt_tool/requirements.txt && \
     ln -s /home/pentester/tools/jwt_tool/jwt_tool.py /home/pentester/.local/bin/jwt_tool
 
-COPY strix/__init__.py strix/
-COPY strix/config/ /app/strix/config/
-COPY strix/utils/ /app/strix/utils/
-COPY strix/telemetry/ /app/strix/telemetry/
-COPY strix/runtime/tool_server.py strix/runtime/__init__.py strix/runtime/runtime.py /app/strix/runtime/
-COPY strix/tools/ /app/strix/tools/
+# Copy the full strix package source into /app/strix/. Required because
+# strix/tools/__init__.py + strix/runtime/* import from many strix.* sub-
+# modules (sca, threat_intel, agents, compliance, iac, llm, prompts,
+# sast, finding_chains, baselines, skills). Python resolves these to
+# /app/strix/... before falling back to .venv site-packages, so partial
+# COPYs leave the runtime importing from a half-populated tree.
+#
+# Selective COPYs were the historical layout (config + utils + telemetry
+# + tools + a 3-file slice of runtime) but every new strix subdir
+# silently broke the sandbox at runtime — see the
+# "No module named 'strix.sca'" / "strix.threat_intel" incidents.
+COPY strix/ /app/strix/
 
 RUN echo 'export PATH="/home/pentester/go/bin:/home/pentester/.local/bin:/home/pentester/.npm-global/bin:$PATH"' >> /home/pentester/.bashrc && \
     echo 'export PATH="/home/pentester/go/bin:/home/pentester/.local/bin:/home/pentester/.npm-global/bin:$PATH"' >> /home/pentester/.profile
