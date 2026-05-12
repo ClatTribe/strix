@@ -29,6 +29,12 @@ from typing import Any, Iterable
 
 # Always-on tools — every target type sees these.
 _CORE_TOOLS: frozenset[str] = frozenset({
+    # Phase 3d / PR-α — workflow state-machine tools. The lead
+    # MUST be able to inspect/advance the workflow regardless of
+    # phase, so these live in the core (and are also marked
+    # phase-agnostic in workflow_state.py so phase filtering
+    # never strips them).
+    "workflow_status", "advance_workflow_phase",
     # Coordination + planning
     "open_hypothesis", "confirm_hypothesis", "dismiss_hypothesis",
     "list_active_hypotheses", "is_surface_under_investigation",
@@ -211,16 +217,23 @@ _BLOCKED_TOOLS: frozenset[str] = frozenset({
 def get_lead_tool_catalog(
     *,
     target_types: Iterable[str],
+    phase: str | None = None,
 ) -> set[str]:
     """Return the union of allowed tool names for the given target
-    types, intersected with the always-on core, minus the blocked
-    set.
+    types, optionally further filtered by the current workflow phase.
 
     Args:
         target_types: target-type strings (e.g. ['web_application',
             'repository']). When the run targets multiple types, the
             catalog is the union — the lead sees every tool needed
             for any of them.
+        phase: Phase 3d / PR-α — when set, the result is intersected
+            with the phase's allowed tool surface. When None (default),
+            no phase filtering — backwards-compatible with pre-3d
+            callers. The workflow's kill-switch
+            (STRIX_WORKFLOW_DISABLED=1) is honoured by callers
+            BEFORE they pass `phase` — they should pass None when
+            the kill-switch is set.
 
     Returns:
         A set of tool names. Tools NOT in this set should be omitted
@@ -233,6 +246,17 @@ def get_lead_tool_catalog(
             continue
         per_type = _TOOLS_BY_TARGET_TYPE.get(tt.strip().lower(), frozenset())
         allowed |= per_type
+
+    # Phase 3d / PR-α — intersect with phase's allowed surface.
+    if phase is not None:
+        from strix.agents.workflow_state import allowed_tools_for_phase
+
+        phase_allowed = allowed_tools_for_phase(phase)  # type: ignore[arg-type]
+        if phase_allowed:
+            # Keep core tools (workflow_status etc. live there) +
+            # tools the phase considers semantically appropriate.
+            allowed = (allowed & phase_allowed) | set(_CORE_TOOLS)
+
     # Always strip the blocked set last.
     return allowed - _BLOCKED_TOOLS
 
@@ -241,12 +265,16 @@ def is_tool_allowed_for_lead(
     tool_name: str,
     *,
     target_types: Iterable[str],
+    phase: str | None = None,
 ) -> bool:
     """Predicate variant. Returns True when the lead is allowed to
-    invoke `tool_name` given the run's target-type set."""
+    invoke `tool_name` given the run's target-type set + optional
+    workflow phase."""
     if not isinstance(tool_name, str):
         return False
-    return tool_name in get_lead_tool_catalog(target_types=target_types)
+    return tool_name in get_lead_tool_catalog(
+        target_types=target_types, phase=phase,
+    )
 
 
 def list_blocked_tools() -> set[str]:

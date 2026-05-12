@@ -3,6 +3,74 @@ from typing import Any
 from strix.tools.registry import register_tool
 
 
+def _check_workflow_phase(*, force: bool) -> dict[str, Any] | None:
+    """Phase 3d / PR-α — block `finish_scan` outside the `report`
+    phase.
+
+    The workflow state machine in `strix.agents.workflow_state`
+    tracks which phase the scan is in. `report` is the terminal
+    phase reachable only via explicit `advance_workflow_phase`
+    transition (or `force=True` here). Without this guard, the
+    lead could call `finish_scan` while still in `recon` /
+    `probe` / etc., bypassing the workflow entirely.
+
+    Honours `STRIX_WORKFLOW_DISABLED=1` — when the workflow is
+    opted out, this guard is a no-op.
+
+    Fails open on any internal error — never blocks finish_scan
+    due to a bug in the workflow subsystem.
+    """
+    if force:
+        return None
+    try:
+        from strix.agents.workflow_state import (
+            get_current_phase, is_workflow_disabled, snapshot,
+        )
+    except Exception:
+        return None
+
+    if is_workflow_disabled():
+        return None
+
+    try:
+        phase = get_current_phase()
+    except Exception:
+        return None
+
+    if phase == "report":
+        return None
+
+    # Build a hint-rich error so the lead knows what to do next.
+    try:
+        snap = snapshot()
+        next_actions = snap.get("next_recommended_actions") or []
+        gates = snap.get("gates") or {}
+    except Exception:
+        next_actions = []
+        gates = {}
+
+    return {
+        "success": False,
+        "error": "workflow_not_in_report_phase",
+        "message": (
+            f"Cannot finish_scan: workflow is in '{phase}' phase, "
+            f"not 'report'. The pentest workflow runs recon → "
+            f"auth_attempt (if login form found) → post_auth_recon "
+            f"(if auth captured) → probe → chain_correlation → "
+            f"report. Call `workflow_status()` for the structured "
+            f"snapshot of gates + recommended next actions. "
+            f"`advance_workflow_phase('report', reason='...')` "
+            f"transitions to the terminal phase when prior phases "
+            f"have produced their expected outputs. Use force=True "
+            f"on finish_scan ONLY if you've genuinely decided to "
+            f"skip outstanding workflow work."
+        ),
+        "current_phase": phase,
+        "workflow_gates": gates,
+        "next_recommended_actions": next_actions,
+    }
+
+
 def _check_open_hypotheses(*, force: bool) -> dict[str, Any] | None:
     """Recall-lift PR-1 — block `finish_scan` when probes are
     unresolved.
@@ -187,6 +255,10 @@ def finish_scan(
     active_agents_error = _check_active_agents(agent_state)
     if active_agents_error:
         return active_agents_error
+
+    workflow_phase_error = _check_workflow_phase(force=force)
+    if workflow_phase_error:
+        return workflow_phase_error
 
     open_hypotheses_error = _check_open_hypotheses(force=force)
     if open_hypotheses_error:
