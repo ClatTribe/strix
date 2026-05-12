@@ -72,6 +72,21 @@ class ScanRequest(BaseModel):
         ge=10_000,
         description="Override the worker's default `--max-input-tokens`.",
     )
+    login_creds: list[dict[str, str]] | None = Field(
+        default=None,
+        description=(
+            "PR-β / Phase 3d — tenant-supplied login credentials the "
+            "lead should TRY against discovered login forms. Each "
+            "entry is `{\"username\": ..., \"password\": ...}`. "
+            "Strix's `scan_auth_flow` tries these first before the "
+            "built-in default-creds corpus. A user-supplied success "
+            "captures the session but does NOT emit a finding "
+            "(those creds aren't \"weak defaults\"). NEVER LOGGED. "
+            "Wrapper UX should mask in the UI; transport must be "
+            "TLS-only."
+        ),
+        examples=[[{"username": "admin", "password": "secret123"}]],
+    )
     extra_args: list[str] | None = Field(
         default=None,
         description="Escape-hatch for arbitrary strix flags. Use sparingly; "
@@ -130,6 +145,7 @@ def submit_scan(req: ScanRequest) -> ScanQueued:
             "tenant_id":        req.tenant_id,
             "max_cost_usd":     req.max_cost_usd,
             "max_input_tokens": req.max_input_tokens,
+            "login_creds":      req.login_creds,
             "extra_args":       req.extra_args,
         },
     )

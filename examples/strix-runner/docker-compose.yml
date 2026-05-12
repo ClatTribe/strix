@@ -42,6 +42,19 @@ services:
       dockerfile: examples/strix-runner/Dockerfile
     profiles: ["refresh"]          # `docker compose --profile refresh up refresher`
     environment:
+      # PR-β / Phase 3d — tenant-supplied login credentials.
+      # Wrapper UI translates "Known credentials" form rows to
+      # a JSON list and passes via this env var. The lead's
+      # scan_auth_flow tries these first before the built-in
+      # default-creds corpus. Example:
+      #   STRIX_LOGIN_CREDS='[{"username":"admin","password":"Pa$$w0rd!"}]'
+      STRIX_LOGIN_CREDS: ${STRIX_LOGIN_CREDS:-}
+      # Pre-captured session (alternative to STRIX_LOGIN_CREDS) —
+      # wrapper already has working auth artifacts and just wants
+      # strix to use them on every request.
+      STRIX_AUTH_COOKIE: ${STRIX_AUTH_COOKIE:-}
+      STRIX_AUTH_BEARER: ${STRIX_AUTH_BEARER:-}
+      STRIX_AUTH_BASIC: ${STRIX_AUTH_BASIC:-}
       STRIX_THREAT_INTEL_CACHE: /home/strix/cache/threat_intel.db
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       NVD_API_KEY:  ${NVD_API_KEY:-}
@@ -88,6 +101,19 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      # PR-β / Phase 3d — tenant-supplied login credentials.
+      # Wrapper UI translates "Known credentials" form rows to
+      # a JSON list and passes via this env var. The lead's
+      # scan_auth_flow tries these first before the built-in
+      # default-creds corpus. Example:
+      #   STRIX_LOGIN_CREDS='[{"username":"admin","password":"Pa$$w0rd!"}]'
+      STRIX_LOGIN_CREDS: ${STRIX_LOGIN_CREDS:-}
+      # Pre-captured session (alternative to STRIX_LOGIN_CREDS) —
+      # wrapper already has working auth artifacts and just wants
+      # strix to use them on every request.
+      STRIX_AUTH_COOKIE: ${STRIX_AUTH_COOKIE:-}
+      STRIX_AUTH_BEARER: ${STRIX_AUTH_BEARER:-}
+      STRIX_AUTH_BASIC: ${STRIX_AUTH_BASIC:-}
       STRIX_THREAT_INTEL_CACHE: /home/strix/cache/threat_intel.db
       # Default sandbox mode is OFF (Option B in docs §6) — strix
       # runs the agent loop directly in this container.
@@ -176,6 +202,19 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      # PR-β / Phase 3d — tenant-supplied login credentials.
+      # Wrapper UI translates "Known credentials" form rows to
+      # a JSON list and passes via this env var. The lead's
+      # scan_auth_flow tries these first before the built-in
+      # default-creds corpus. Example:
+      #   STRIX_LOGIN_CREDS='[{"username":"admin","password":"Pa$$w0rd!"}]'
+      STRIX_LOGIN_CREDS: ${STRIX_LOGIN_CREDS:-}
+      # Pre-captured session (alternative to STRIX_LOGIN_CREDS) —
+      # wrapper already has working auth artifacts and just wants
+      # strix to use them on every request.
+      STRIX_AUTH_COOKIE: ${STRIX_AUTH_COOKIE:-}
+      STRIX_AUTH_BEARER: ${STRIX_AUTH_BEARER:-}
+      STRIX_AUTH_BASIC: ${STRIX_AUTH_BASIC:-}
       STRIX_THREAT_INTEL_CACHE: /home/strix/cache/threat_intel.db
       # Option A — inner sandbox ON, custom image.
       STRIX_SANDBOX_MODE: "true"

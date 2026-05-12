@@ -91,12 +91,64 @@ breach.
 
 ### Auth pass-through (DAST targets behind login)
 
+Two distinct mechanisms — pick the one that matches what the
+tenant supplied:
+
+**(a) Pre-captured session** — wrapper already has a working
+auth artifact (session cookie / bearer token / basic header)
+that strix should attach to every HTTP request.
+
 | Flag | Env | Forwarded by | Notes |
 |---|---|---|---|
 | `--auth-cookie 'k=v; k2=v2'` | `STRIX_AUTH_COOKIE` | HTTP safety proxy | Never logged. |
 | `--auth-bearer <token>` | `STRIX_AUTH_BEARER` | same | Never logged. |
-| `--auth-basic 'user:pass'` | `STRIX_AUTH_BASIC` | same | Never logged. |
+| `--auth-basic 'user:pass'` | `STRIX_AUTH_BASIC` | same | Already-encoded creds. |
 | `--header 'Name: Value'` | `STRIX_HEADERS` | same | Repeatable, joined with `\n`. |
+
+**(b) Known login credentials to TRY** — tenant supplied a
+`username:password` pair (typed in the UI: "this is the test
+account for the target") that strix should submit through the
+login form. The lead calls `scan_auth_flow` and these creds
+become priority-1 attempts before the built-in default-creds
+corpus.
+
+| Flag | Env | Notes |
+|---|---|---|
+| `--login-creds 'user:pass'` | `STRIX_LOGIN_CREDS` (JSON) | Phase 3d / PR-β. Repeatable. A user-supplied success captures the session into the lead's security context but does NOT emit a "default credentials" finding — that finding is reserved for the well-known-defaults codepath. |
+
+**`STRIX_LOGIN_CREDS` format**: a JSON list of objects:
+
+```json
+[{"username": "admin", "password": "Pa$$w0rd!"},
+ {"username": "test_user", "password": "TestPass123"}]
+```
+
+Wrapper-side UX (webappsec):
+
+```
+┌─ Target ────────────────────────────────────────────────────┐
+│ URL: https://demo.example.com                                │
+│                                                              │
+│ ☐ Try default credentials  (always on; lead will try        │
+│                             admin/admin, jsmith/Demo1234,   │
+│                             etc. when it finds a login form)│
+│                                                              │
+│ Known credentials (optional):                                │
+│   Username: ___________  Password: ___________  [+] Add     │
+│   admin                  Pa$$w0rd!                 [×]      │
+│                                                              │
+│ ─OR─ Pre-captured session (advanced):                        │
+│   Auth cookie: _______________________________               │
+│   Bearer token: _______________________________              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+The wrapper translates each "Known credentials" row to
+`--login-creds 'admin:Pa$$w0rd!'` on the strix CLI. Multiple
+rows → multiple `--login-creds` flags. The lead's
+`scan_auth_flow` invocation will try the user-supplied pairs
+first; only on failure does it fall through to the default
+corpus.
 
 ### Crawl seeds
 
@@ -233,7 +285,8 @@ The wrapper should treat **code 3 as a non-error** (capped successfully, partial
 | `STRIX_SURFACE_MAP_ONLY` | `--surface-map-only` | — |
 | `STRIX_VENDOR_MODE` | `--vendor-mode` | — |
 | `STRIX_QUIET` | `--quiet` | — |
-| `STRIX_AUTH_COOKIE` / `_BEARER` / `_BASIC` / `_HEADERS` | `--auth-*` / `--header` | Never logged. |
+| `STRIX_AUTH_COOKIE` / `_BEARER` / `_BASIC` / `_HEADERS` | `--auth-*` / `--header` | Pre-captured session — never logged. |
+| `STRIX_LOGIN_CREDS` | `--login-creds` (repeatable) | Tenant-supplied creds the lead should try via `scan_auth_flow`. JSON list of `{username, password}` objects. Never logged. |
 | `STRIX_EXCLUDE_PATHS` | `--exclude-path` | Newline-separated glob list. |
 | `STRIX_RATE_LIMIT` | `--rate-limit` | QPS cap. |
 | `STRIX_SEED_URLS` | `--seed-url` | Newline-separated URL list. |

@@ -588,6 +588,32 @@ Examples:
             "stop independent of fluctuating $-per-token. Default: unlimited."
         ),
     )
+    # PR-β / Phase 3d — tenant-supplied login credentials. Wrappers
+    # (webappsec UI) accept a "known credentials for this target"
+    # input and pass each pair via repeatable --login-creds. These
+    # become priority-1 attempts in scan_auth_flow before the
+    # built-in default-creds corpus. A user-supplied success
+    # captures the session but does NOT emit a "default credentials"
+    # finding — that finding is reserved for the well-known-defaults
+    # codepath (admin/admin etc.).
+    safety_group.add_argument(
+        "--login-creds",
+        action="append",
+        default=None,
+        metavar="USER:PASS",
+        help=(
+            "Tenant-supplied login credentials to try before the "
+            "default-creds corpus. Repeatable. Forwarded to "
+            "`scan_auth_flow` via `STRIX_LOGIN_CREDS` env var. "
+            "A user-supplied success captures the session into the "
+            "lead's security context but does NOT emit a finding "
+            "(those are tenant creds, not weak defaults). Use this "
+            "when the wrapper has known auth credentials for a "
+            "target. For HTTP Basic with already-encoded values, "
+            "prefer `--auth-basic`; --login-creds is specifically "
+            "for the lead to try against a login form."
+        ),
+    )
     # PR-1 of the recall-lift series — wall-clock cap. Distinct from
     # --max-cost so wrappers can differentiate "ran out of money" from
     # "ran out of time" (exit code 4 vs 3) and ladder up different
@@ -1146,6 +1172,35 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             console.print("[red]--max-input-tokens must be a positive integer.[/red]")
             sys.exit(2)
         os.environ["STRIX_MAX_INPUT_TOKENS_RUN"] = str(args.max_input_tokens)
+
+    # PR-β / Phase 3d — tenant-supplied login credentials → JSON
+    # env var. Each --login-creds value is `USER:PASS` (colon-
+    # separated; passwords containing `:` are supported by
+    # splitting on the FIRST colon only). Empty / malformed
+    # entries are skipped with a console warning.
+    if getattr(args, "login_creds", None):
+        import json as _json
+        login_pairs: list[dict[str, str]] = []
+        for raw in args.login_creds:
+            if not isinstance(raw, str) or ":" not in raw:
+                console = Console()
+                console.print(
+                    f"[yellow]ignoring malformed --login-creds value: "
+                    f"{raw!r} (expected USER:PASS)[/yellow]"
+                )
+                continue
+            user, _, password = raw.partition(":")
+            user, password = user.strip(), password.strip()
+            if not user or not password:
+                console = Console()
+                console.print(
+                    f"[yellow]ignoring --login-creds with empty user "
+                    f"or password: {raw!r}[/yellow]"
+                )
+                continue
+            login_pairs.append({"username": user, "password": password})
+        if login_pairs:
+            os.environ["STRIX_LOGIN_CREDS"] = _json.dumps(login_pairs)
 
     # Recall-lift PR-1 — wall-clock cap. When the user passes
     # --max-duration explicitly use that value (0 disables the cap
