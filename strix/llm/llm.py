@@ -130,6 +130,44 @@ class LLM:
             # tests), `get_tools_prompt` runs unfiltered — same as
             # before this PR.
             allowlist = self._system_prompt_context.get("tool_catalog_allowlist")
+
+            # Phase 3d / PR-α — when the lead-architecture is active,
+            # further filter the allowlist by current workflow phase.
+            # This is the enforcement layer that hides probe-phase
+            # tools during recon and vice-versa, reducing the lead's
+            # per-turn cognitive load to "pick the right tool for THIS
+            # phase" instead of "navigate the full ~85-tool catalog."
+            #
+            # Honours STRIX_WORKFLOW_DISABLED=1 — when set, the catalog
+            # is the unfiltered target-type set (backwards-compatible
+            # with pre-3d behaviour). When the lead-architecture isn't
+            # active (sub-agents, legacy), `allowlist` is None and we
+            # short-circuit — phase filtering doesn't apply there.
+            target_types = self._system_prompt_context.get("target_types") or []
+            if allowlist and target_types:
+                try:
+                    from strix.agents.workflow_state import (
+                        get_current_phase,
+                        is_workflow_disabled,
+                    )
+                    if not is_workflow_disabled():
+                        from strix.agents.lead_agent.tool_catalog import (
+                            get_lead_tool_catalog,
+                        )
+                        phase = get_current_phase()
+                        # Re-filter from scratch each call so the
+                        # phase change is honoured immediately, not
+                        # latched at init.
+                        allowlist = sorted(
+                            get_lead_tool_catalog(
+                                target_types=list(target_types),
+                                phase=phase,
+                            )
+                        )
+                except Exception:  # noqa: BLE001
+                    # Any failure → keep the init-time allowlist.
+                    pass
+
             if allowlist:
                 _tp = get_tools_prompt
                 def _get_tools_prompt_filtered() -> str:
