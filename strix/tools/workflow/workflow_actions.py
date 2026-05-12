@@ -23,12 +23,21 @@ from __future__ import annotations
 
 from typing import Any
 
-from strix.agents.workflow_state import (
-    PHASES,
-    advance_phase,
-    snapshot,
-)
 from strix.tools.registry import register_tool
+
+
+# NOTE: `strix.agents.workflow_state` is imported lazily inside
+# each tool body. `strix.agents.__init__` pulls in `BaseAgent`,
+# which transitively imports `strix.llm`; at the time
+# `strix.tools.__init__` is resolving this module (because
+# `strix.tools/__init__.py` does `from .workflow import *`), the
+# `strix.llm` module is still mid-init. A module-level import
+# here triggers the cycle. The hypothesis tools at
+# `strix/tools/active_hypotheses/active_hypotheses_tools.py:15`
+# use the same lazy-import pattern for the same reason.
+def _ws():
+    import strix.agents.workflow_state as m  # noqa: PLC0415
+    return m
 
 
 @register_tool(sandbox_execution=False, mitre_techniques=[])
@@ -56,7 +65,7 @@ def workflow_status() -> dict[str, Any]:
     in `report` phase. Treat the result as authoritative — your
     own memory of "have I tried auth?" is probably wrong.
     """
-    return {"success": True, **snapshot()}
+    return {"success": True, **_ws().snapshot()}
 
 
 @register_tool(sandbox_execution=False, mitre_techniques=[])
@@ -87,25 +96,26 @@ def advance_workflow_phase(
     completion criteria. Backwards transitions (e.g. probe → recon
     to crawl a newly-found endpoint) are always allowed.
     """
+    ws = _ws()
     target_norm = (target or "").strip().lower()
-    if target_norm not in PHASES:
+    if target_norm not in ws.PHASES:
         return {
             "success": False,
             "error": "invalid_target_phase",
             "message": (
                 f"unknown phase: {target!r}. Valid phases: "
-                f"{', '.join(PHASES)}."
+                f"{', '.join(ws.PHASES)}."
             ),
-            "valid_phases": list(PHASES),
+            "valid_phases": list(ws.PHASES),
         }
 
-    transitioned, message = advance_phase(
+    transitioned, message = ws.advance_phase(
         target=target_norm,  # type: ignore[arg-type]
         reason=reason,
         force=bool(force),
     )
 
-    snap = snapshot()
+    snap = ws.snapshot()
     return {
         "success": transitioned,
         "transitioned": transitioned,
