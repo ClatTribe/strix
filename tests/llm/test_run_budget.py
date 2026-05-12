@@ -39,6 +39,7 @@ def _reset(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("STRIX_KEV_DISABLED", "1")
     monkeypatch.delenv("STRIX_MAX_COST_USD", raising=False)
     monkeypatch.delenv("STRIX_MAX_INPUT_TOKENS_RUN", raising=False)
+    monkeypatch.delenv("STRIX_MAX_DURATION_S", raising=False)
     run_budget.reset_for_testing()
     tracer = Tracer("budget-test")
     set_global_tracer(tracer)
@@ -279,3 +280,141 @@ def test_get_run_caps_handles_garbage_env(monkeypatch) -> None:
     caps = run_budget.get_run_caps()
     assert caps["max_cost_usd"] == 0.0
     assert caps["max_input_tokens"] == 0
+
+
+# ---------------------------------------------------------------------------
+# --max-duration cap (recall-lift PR-1)
+#
+# Same self-exit contract as --max-cost / --max-input-tokens, but emits
+# a different reason and exits with a different code (4 vs 3) so wrappers
+# can distinguish "ran out of money" from "ran out of time."
+# ---------------------------------------------------------------------------
+
+
+def test_duration_cap_unset_means_unlimited(monkeypatch) -> None:
+    run_budget.mark_run_started()
+    monkeypatch.delenv("STRIX_MAX_DURATION_S", raising=False)
+    exceeded, reason = run_budget.is_run_budget_exceeded()
+    assert exceeded is False
+    assert reason is None
+
+
+def test_duration_cap_zero_means_unlimited(monkeypatch) -> None:
+    monkeypatch.setenv("STRIX_MAX_DURATION_S", "0")
+    run_budget.mark_run_started()
+    exceeded, reason = run_budget.is_run_budget_exceeded()
+    assert exceeded is False
+    assert reason is None
+
+
+def test_duration_cap_fires_when_elapsed_exceeds(monkeypatch) -> None:
+    """When elapsed > cap, the budget reports max_duration_s as the
+    reason. Implementation uses time.monotonic, so we monkeypatch
+    it to advance the clock deterministically."""
+    import time as _time
+    from strix.llm import run_budget as _rb
+
+    real_monotonic = _time.monotonic
+
+    # Pin the start time, then advance the clock past the cap.
+    base = real_monotonic()
+    monkeypatch.setattr(_rb.time, "monotonic", lambda: base)
+    monkeypatch.setenv("STRIX_MAX_DURATION_S", "30")
+    _rb.mark_run_started()
+
+    # Under the cap.
+    monkeypatch.setattr(_rb.time, "monotonic", lambda: base + 10.0)
+    assert _rb.is_run_budget_exceeded() == (False, None)
+
+    # Over the cap.
+    monkeypatch.setattr(_rb.time, "monotonic", lambda: base + 31.0)
+    assert _rb.is_run_budget_exceeded() == (True, "max_duration_s")
+
+
+def test_duration_cap_latches_like_other_caps(monkeypatch) -> None:
+    """Once tripped, subsequent calls keep reporting True even if
+    the env var changes (matches the cost-cap latch semantics)."""
+    import time as _time
+    from strix.llm import run_budget as _rb
+
+    base = _time.monotonic()
+    monkeypatch.setattr(_rb.time, "monotonic", lambda: base)
+    monkeypatch.setenv("STRIX_MAX_DURATION_S", "30")
+    _rb.mark_run_started()
+    monkeypatch.setattr(_rb.time, "monotonic", lambda: base + 35.0)
+    assert _rb.is_run_budget_exceeded()[0] is True
+
+    # Disable the cap mid-flight — latch keeps it true.
+    monkeypatch.setenv("STRIX_MAX_DURATION_S", "0")
+    assert _rb.is_run_budget_exceeded()[0] is True
+
+
+def test_duration_cap_emits_run_terminated_with_duration_dimension(
+    monkeypatch, tmp_path,
+) -> None:
+    """Breach should emit `run.terminated` with reason='duration_exceeded'
+    (top-level reason, distinct from the cost cap's 'budget_exceeded')."""
+    import time as _time
+    from strix.llm import run_budget as _rb
+
+    base = _time.monotonic()
+    monkeypatch.setattr(_rb.time, "monotonic", lambda: base)
+    monkeypatch.setenv("STRIX_MAX_DURATION_S", "10")
+    _rb.mark_run_started()
+    monkeypatch.setattr(_rb.time, "monotonic", lambda: base + 15.0)
+
+    exceeded, reason = _rb.is_run_budget_exceeded()
+    assert (exceeded, reason) == (True, "max_duration_s")
+    _rb.emit_run_terminated_event_once()
+
+    events = _load_events(tmp_path)
+    terminated = [e for e in events if e.get("event_type") == "run.terminated"]
+    assert len(terminated) == 1
+    payload = terminated[0].get("payload") or {}
+    assert payload["reason"] == "duration_exceeded"
+    assert payload["budget_dimension"] == "max_duration_s"
+    assert payload["limits"]["max_duration_s"] == 10
+    assert "elapsed_s" in payload["consumed"]
+
+
+def test_duration_cap_independent_of_cost_cap(monkeypatch) -> None:
+    """Cost cap unset; duration cap fires — `is_run_budget_exceeded`
+    correctly attributes to max_duration_s, not max_cost_usd."""
+    import time as _time
+    from strix.llm import run_budget as _rb
+
+    base = _time.monotonic()
+    monkeypatch.setattr(_rb.time, "monotonic", lambda: base)
+    monkeypatch.delenv("STRIX_MAX_COST_USD", raising=False)
+    monkeypatch.setenv("STRIX_MAX_DURATION_S", "10")
+    _rb.mark_run_started()
+
+    _rb.record_run_usage(cost_usd=999.0, input_tokens=999_999)
+    # Cost cap unset → cost shouldn't trip; duration not yet expired → no breach.
+    assert _rb.is_run_budget_exceeded() == (False, None)
+
+    monkeypatch.setattr(_rb.time, "monotonic", lambda: base + 11.0)
+    assert _rb.is_run_budget_exceeded() == (True, "max_duration_s")
+
+
+def test_mark_run_started_is_idempotent(monkeypatch) -> None:
+    """Pinning the start time twice doesn't reset the clock."""
+    import time as _time
+    from strix.llm import run_budget as _rb
+
+    base = _time.monotonic()
+    monkeypatch.setattr(_rb.time, "monotonic", lambda: base)
+    _rb.mark_run_started()
+
+    monkeypatch.setattr(_rb.time, "monotonic", lambda: base + 50.0)
+    _rb.mark_run_started()    # second call — should NOT reset
+
+    # Elapsed reflects the first mark, not the second.
+    assert _rb.get_run_elapsed_s() == pytest.approx(50.0, abs=0.5)
+
+
+def test_get_run_elapsed_returns_zero_before_mark() -> None:
+    """When `mark_run_started()` hasn't been called (e.g. unit
+    tests bypassing the CLI entrypoint), elapsed reports 0.0
+    rather than crashing."""
+    assert run_budget.get_run_elapsed_s() == 0.0

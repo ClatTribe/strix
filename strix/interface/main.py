@@ -588,6 +588,27 @@ Examples:
             "stop independent of fluctuating $-per-token. Default: unlimited."
         ),
     )
+    # PR-1 of the recall-lift series — wall-clock cap. Distinct from
+    # --max-cost so wrappers can differentiate "ran out of money" from
+    # "ran out of time" (exit code 4 vs 3) and ladder up different
+    # follow-ups. Per-scan-mode defaults are filled in at scan entry
+    # below if the user doesn't pass an explicit value.
+    safety_group.add_argument(
+        "--max-duration",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "Hard cap on wall-clock runtime for the scan (seconds). Strix "
+            "exits cleanly with code 4 (EXIT_DURATION_EXCEEDED) when the "
+            "elapsed time crosses the cap, emitting `run.terminated`. "
+            "Findings emitted up to that point are still in "
+            "vulnerabilities.json — the run is partial. "
+            "Defaults per scan-mode when unset: quick=600 (10 min), "
+            "standard=1200 (20 min), deep=2400 (40 min). Pass 0 to disable "
+            "the duration cap entirely."
+        ),
+    )
 
     # Roadmap §16 PR #133 — `--vendor-mode` emphasises vendor-
     # hygiene categories + emits a 0-100 vendor-risk score on
@@ -1126,6 +1147,31 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             sys.exit(2)
         os.environ["STRIX_MAX_INPUT_TOKENS_RUN"] = str(args.max_input_tokens)
 
+    # Recall-lift PR-1 — wall-clock cap. When the user passes
+    # --max-duration explicitly use that value (0 disables the cap
+    # entirely). When unset, fill in per-scan-mode defaults so a
+    # confused lead can't burn an unbounded wall-clock.
+    _DEFAULT_DURATION_BY_MODE = {
+        "quick": 600,        # 10 min
+        "standard": 1200,    # 20 min
+        "deep": 2400,        # 40 min
+    }
+    explicit_duration = getattr(args, "max_duration", None)
+    if explicit_duration is not None:
+        if explicit_duration < 0:
+            console = Console()
+            console.print(
+                "[red]--max-duration must be >= 0 (0 disables the cap).[/red]"
+            )
+            sys.exit(2)
+        os.environ["STRIX_MAX_DURATION_S"] = str(explicit_duration)
+    else:
+        # Default by scan_mode. The user explicitly disabled the cap
+        # by passing --max-duration 0; that path is handled above.
+        mode = getattr(args, "scan_mode", "deep")
+        default_s = _DEFAULT_DURATION_BY_MODE.get(mode, 2400)
+        os.environ["STRIX_MAX_DURATION_S"] = str(default_s)
+
     # Roadmap §4 PR #121 — propagate --quiet via env so any sub-
     # process / sandbox inherits it and suppresses Rich panels.
     if getattr(args, "quiet", False):
@@ -1212,6 +1258,17 @@ def main() -> None:  # noqa: PLR0912, PLR0915
         interactive=not args.non_interactive,
         has_instructions=bool(args.instruction),
     )
+
+    # Recall-lift PR-1 — pin the run's wall-clock start so the
+    # --max-duration cap has a reference point. Idempotent;
+    # `is_run_budget_exceeded()` checks elapsed-since-this-call.
+    try:
+        from strix.llm.run_budget import mark_run_started
+        mark_run_started()
+    except Exception:  # noqa: BLE001
+        # Failure to pin the start time disables the duration cap
+        # but doesn't block the run; degrade gracefully.
+        pass
 
     exit_reason = "user_exit"
     try:
@@ -1324,17 +1381,23 @@ def main() -> None:  # noqa: PLR0912, PLR0915
             pass
 
         # Roadmap §4 PR #113 — `--max-cost` / `--max-input-tokens`
-        # self-exit. When the run-level budget tripped during the
-        # scan, exit with the documented EXIT_BUDGET_EXCEEDED (3)
-        # rather than 0/2. Findings emitted up to the termination
-        # point are still in vulnerabilities.json — the run is
-        # partial.
+        # self-exit. Recall-lift PR-1 adds `--max-duration` with a
+        # distinct exit code (4 vs 3) so wrappers can distinguish
+        # "ran out of money" from "ran out of time" — they warrant
+        # different follow-ups. Findings emitted up to the
+        # termination point are still in vulnerabilities.json — the
+        # run is partial.
         try:
-            from strix.interface.exit_codes import EXIT_BUDGET_EXCEEDED
+            from strix.interface.exit_codes import (
+                EXIT_BUDGET_EXCEEDED,
+                EXIT_DURATION_EXCEEDED,
+            )
             from strix.llm.run_budget import is_run_budget_exceeded
 
-            exceeded, _reason = is_run_budget_exceeded()
+            exceeded, reason = is_run_budget_exceeded()
             if exceeded:
+                if reason == "max_duration_s":
+                    sys.exit(EXIT_DURATION_EXCEEDED)
                 sys.exit(EXIT_BUDGET_EXCEEDED)
         except Exception:  # noqa: BLE001
             # Bookkeeping failure should never block the normal exit path.

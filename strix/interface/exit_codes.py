@@ -63,6 +63,13 @@ EXIT_BUDGET_EXCEEDED: int = 3
 self-exit. Findings emitted up to the termination point are
 still in vulnerabilities.json; the run is partial."""
 
+EXIT_DURATION_EXCEEDED: int = 4
+"""Scan terminated by --max-duration self-exit. Wrappers and
+CI gates should treat this similarly to EXIT_BUDGET_EXCEEDED:
+not a failure, a deliberate cap that caught a runaway scan.
+Findings emitted up to the termination point are still in
+vulnerabilities.json."""
+
 EXIT_SIGINT: int = 130
 """User pressed Ctrl+C (SIGINT). Standard POSIX convention:
 128 + signal number."""
@@ -81,6 +88,7 @@ ALL_CODES: dict[int, str] = {
     EXIT_CONFIG_ERROR: "config / setup error",
     EXIT_CLEAN_WITH_FINDINGS: "clean — with findings",
     EXIT_BUDGET_EXCEEDED: "budget exceeded",
+    EXIT_DURATION_EXCEEDED: "duration exceeded",
     EXIT_SIGINT: "SIGINT (Ctrl+C)",
     EXIT_SIGTERM: "SIGTERM (graceful cancel)",
 }
@@ -94,9 +102,16 @@ def describe(code: int) -> str:
 
 def is_success(code: int) -> bool:
     """True for codes that represent a completed run (no
-    operational issue). 0 and 2 both qualify; 1/3/130/143 are
+    operational issue). 0 and 2 both qualify; 1/3/4/130/143 are
     not."""
     return int(code) in (EXIT_CLEAN_NO_FINDINGS, EXIT_CLEAN_WITH_FINDINGS)
+
+
+def is_capped(code: int) -> bool:
+    """True for codes that represent a deliberate self-exit due
+    to budget / duration caps. Wrappers should treat these as
+    successful (partial findings preserved), not as errors."""
+    return int(code) in (EXIT_BUDGET_EXCEEDED, EXIT_DURATION_EXCEEDED)
 
 
 def is_cancelled(code: int) -> bool:
