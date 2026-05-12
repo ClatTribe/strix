@@ -138,6 +138,120 @@ _LEAD_SYSTEM_PROMPT_ADDENDUM = (
 
 
 # ---------------------------------------------------------------------------
+# Recall-lift PR-1 — authenticated exploration directive.
+#
+# Empirically (Altoro Mutual / demo.testfire.net, May 2026): single-lead
+# under Phase 3a + 3b found only 2 of ~15 ground-truth bugs. Root cause:
+# the lead probed the unauthenticated surface, found 1-2 pre-auth bugs,
+# and never authenticated → couldn't reach the 6-8 bugs behind login.
+#
+# Banking / SaaS / e-commerce targets keep most of their attack surface
+# (and most planted vulnerabilities) post-auth. Without an explicit
+# directive, the lead defers to "I found some stuff, moving on" instead
+# of "I see a login form → I should try defaults → if accepted, the
+# post-auth surface is the next leg of the scan."
+#
+# Caught vs missed split (legacy comparison): legacy DID catch
+# `default-credentials` because the auth-flow specialist had its own
+# agent loop that naturally chained auth → crawl → probe. Single-lead's
+# flat tool dispatch doesn't chain unless the system prompt tells it to.
+# This directive is the chaining instruction.
+# ---------------------------------------------------------------------------
+_AUTH_CRAWL_DIRECTIVE = (
+    "AUTHENTICATED EXPLORATION IS NON-OPTIONAL FOR WEB TARGETS.\n\n"
+    "When recon surfaces a login form, signin endpoint, or "
+    "credentialed API:\n\n"
+    "  1. Try default credentials via `scan_auth_flow` BEFORE "
+    "probing the post-auth surface. Defaults to attempt: "
+    "`admin/admin`, `admin/password`, `test/test`, `demo/demo`, "
+    "`root/root`, plus framework-specific defaults inferred from "
+    "the tech-stack fingerprint (Tomcat `tomcat/tomcat`, Jenkins "
+    "`admin/admin`, Jira `admin/admin`, WordPress `admin/<weak>`, "
+    "etc.). Altoro Mutual / Juice Shop / WebGoat: `jsmith/Demo1234`, "
+    "`admin/Pa$$w0rd!`. If `scan_auth_flow` reports a captured "
+    "session, you now have a post-auth context — proceed.\n\n"
+    "  2. Re-crawl using `send_request` / `browser_action` / "
+    "`webapp_recon_pipeline` WITH the captured session. The first "
+    "crawl was unauth — the post-auth surface area is typically "
+    "5-10× larger, and most planted vulnerabilities live there. "
+    "Treat this re-crawl as a NEW recon pass with the same care "
+    "you gave the unauth surface.\n\n"
+    "  3. For EVERY post-auth endpoint discovered in step 2, run "
+    "the same specialist fan-out you'd run on a pre-auth surface: "
+    "`scan_sqli`, `scan_xss`, `scan_idor`, `csrf_check`, "
+    "`scan_path_traversal`, `open_redirect_check`. Authenticated "
+    "endpoints are MORE likely to harbour IDOR, business-logic, "
+    "and authz bugs — don't skip the fan-out just because the "
+    "auth handshake worked.\n\n"
+    "  4. Where two distinct auth states are available (e.g. two "
+    "test accounts, two roles, or admin + regular user), invoke "
+    "`scan_multi_role_auth` and `scan_idor` cross-session — IDOR "
+    "becomes directly detectable via response-body diff.\n\n"
+    "Do NOT call `finish_scan` if you discovered a login form / "
+    "auth endpoint but skipped steps 1-3. Steps 1-3 are the scan; "
+    "skipping them leaves the run unfinished."
+)
+
+
+# ---------------------------------------------------------------------------
+# Recall-lift PR-1 — specialist fan-out directive.
+#
+# Empirically: the failing testfire run made 100 tool calls but spent
+# most of them on `browser_action` + `list_sitemap` exploration, with
+# only a fraction on specialist dispatch. The lead treats recon and
+# probing as serial phases instead of interleaved. A senior pentester
+# fans out specialists per-endpoint as endpoints are discovered, not
+# at the end of a giant crawl.
+#
+# This directive maps each endpoint shape to its expected specialist
+# fan-out, so the LLM has an explicit checklist rather than relying
+# on its own judgment of what's worth probing.
+# ---------------------------------------------------------------------------
+_FAN_OUT_DIRECTIVE = (
+    "WEB ENDPOINTS DESERVE FAN-OUT PROBES, NOT JUST EXPLORATION.\n\n"
+    "When recon emits a new endpoint via `list_sitemap`, "
+    "`bfs_crawl`, `webapp_recon_pipeline`, or `extract_dom` — "
+    "BEFORE moving to the next endpoint, dispatch the specialists "
+    "that match THIS endpoint's shape. Use this routing table:\n\n"
+    "  * Any form with query / body params              → "
+    "`scan_sqli` + `scan_xss` + `open_redirect_check`\n"
+    "  * Any state-changing POST / PUT / DELETE         → "
+    "`csrf_check` + (above)\n"
+    "  * URL with numeric / UUID / slug path identifier → "
+    "`scan_idor` (post-auth) + `scan_path_traversal`\n"
+    "  * File-serving endpoint                          → "
+    "`scan_path_traversal` + `scan_secrets_in_response`\n"
+    "  * Auth-related endpoint (login / reset / token)  → "
+    "`scan_auth_flow` + `cookie_jwt_scoping_check` + `jwt_audit`\n"
+    "  * API endpoint returning JSON                    → "
+    "`scan_nosql_injection` + `scan_sqli` (depending on backend "
+    "fingerprint) + `scan_idor` (if it takes an ID arg)\n"
+    "  * Search / filter / sort endpoint                → "
+    "`scan_sqli` (always) + `scan_xss` + LDAP / XPath specialists "
+    "if the backend fingerprint warrants them\n\n"
+    "Crawling the sitemap is RECON. Probing every endpoint with "
+    "the right specialists is the SCAN. A 5-minute recon pass "
+    "followed by systematic specialist fan-out beats a 30-minute "
+    "recon pass followed by 2 specialist calls — even if total "
+    "wall-clock is identical, recall is dramatically higher. "
+    "Track open hypotheses (`open_hypothesis`) per endpoint so "
+    "you don't lose threads when probes return multi-stage "
+    "results."
+)
+
+
+# Compose the final addendum used by `LeadAgent.augment_system_prompt_context`
+# (see `_LEAD_OPERATING_DIRECTIVE` reference below).
+_LEAD_SYSTEM_PROMPT_ADDENDUM = (
+    _LEAD_SYSTEM_PROMPT_ADDENDUM
+    + "\n\n"
+    + _AUTH_CRAWL_DIRECTIVE
+    + "\n\n"
+    + _FAN_OUT_DIRECTIVE
+)
+
+
+# ---------------------------------------------------------------------------
 # Asset-aware routing guidance.
 #
 # The lead's tool catalog is filtered per target type (see

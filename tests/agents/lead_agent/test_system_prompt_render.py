@@ -170,3 +170,71 @@ def test_block_lists_blocked_spawn_helpers(env: Environment) -> None:
     )
     assert "create_agent" in out
     assert "spawn_webapp_specialist_team" in out
+
+
+# ---------------------------------------------------------------------------
+# Recall-lift PR-1 — auth-crawl + fan-out directives
+# ---------------------------------------------------------------------------
+
+
+def test_default_lead_addendum_includes_auth_crawl_directive() -> None:
+    """The bundled `_LEAD_SYSTEM_PROMPT_ADDENDUM` must include the
+    authenticated-exploration directive. This is what wires the
+    biggest recall lift on banking / SaaS targets (most planted
+    vulns live post-auth; without this directive the lead probes
+    only the unauth surface)."""
+    from strix.agents.lead_agent.lead_agent import (
+        _LEAD_SYSTEM_PROMPT_ADDENDUM,
+    )
+    assert "AUTHENTICATED EXPLORATION" in _LEAD_SYSTEM_PROMPT_ADDENDUM
+    # The four-step protocol must be discoverable. We don't pin
+    # the exact wording (that's prompt-engineering territory and
+    # will iterate), but the structural markers should be present.
+    assert "scan_auth_flow" in _LEAD_SYSTEM_PROMPT_ADDENDUM
+    assert "default credentials" in _LEAD_SYSTEM_PROMPT_ADDENDUM
+    assert "Re-crawl" in _LEAD_SYSTEM_PROMPT_ADDENDUM
+    assert "scan_multi_role_auth" in _LEAD_SYSTEM_PROMPT_ADDENDUM
+
+
+def test_default_lead_addendum_includes_fan_out_directive() -> None:
+    """The bundled addendum must include the specialist fan-out
+    routing table. Empirically the lead under-dispatches
+    specialists when it doesn't see this table in its prompt."""
+    from strix.agents.lead_agent.lead_agent import (
+        _LEAD_SYSTEM_PROMPT_ADDENDUM,
+    )
+    assert "FAN-OUT PROBES" in _LEAD_SYSTEM_PROMPT_ADDENDUM
+    # Tools the routing table should mention by name (these are
+    # the lead's primary specialist fan-out targets):
+    for tool in (
+        "scan_sqli", "scan_xss", "scan_idor", "csrf_check",
+        "scan_path_traversal", "open_redirect_check",
+        "scan_auth_flow", "scan_nosql_injection",
+    ):
+        assert tool in _LEAD_SYSTEM_PROMPT_ADDENDUM, (
+            f"fan-out directive should mention {tool}"
+        )
+
+
+def test_lead_addendum_renders_into_prompt(env: Environment) -> None:
+    """End-to-end: when the lead-agent renders its system prompt
+    with the addendum as `lead_architecture_directives`, the new
+    directives are present in the rendered text."""
+    from strix.agents.lead_agent.lead_agent import (
+        _LEAD_SYSTEM_PROMPT_ADDENDUM,
+    )
+    out = _render(
+        env,
+        agent_id="a", agent_name="Root Agent", agent_role="root",
+        agent_category="lead", interactive=False,
+        skills_text="",
+        system_prompt_context={
+            "scope_source": "test",
+            "authorization_source": "test",
+            "authorized_targets": [],
+            "lead_architecture_active": True,
+            "lead_architecture_directives": _LEAD_SYSTEM_PROMPT_ADDENDUM,
+        },
+    )
+    assert "AUTHENTICATED EXPLORATION" in out
+    assert "FAN-OUT PROBES" in out
