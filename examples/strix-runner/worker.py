@@ -87,6 +87,7 @@ def run_scan(
     tenant_id: str = "default",
     max_cost_usd: float | None = None,
     max_input_tokens: int | None = None,
+    login_creds: list[dict[str, str]] | None = None,
     extra_args: list[str] | None = None,
 ) -> dict:
     """Run one strix scan.
@@ -129,6 +130,19 @@ def run_scan(
         "--max-cost", str(max_cost_usd),
         "--max-input-tokens", str(max_input_tokens),
     ]
+    # PR-β / Phase 3d — tenant-supplied login credentials. Each
+    # `{username, password}` becomes one `--login-creds 'u:p'`
+    # flag. Strix's main.py validates + assembles them into
+    # STRIX_LOGIN_CREDS env for scan_auth_flow to consume.
+    if login_creds:
+        for entry in login_creds:
+            try:
+                u = (entry.get("username") or "").strip()
+                p = (entry.get("password") or "").strip()
+            except AttributeError:
+                continue
+            if u and p:
+                cmd.extend(["--login-creds", f"{u}:{p}"])
     cmd.extend(extra_args or [])
 
     # Tenant scoping happens via env vars + cwd. The wrapper layer

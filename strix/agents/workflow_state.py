@@ -524,6 +524,11 @@ def _suggest_next_actions(s: WorkflowState) -> list[str]:
 _PHASE_AGNOSTIC_TOOLS: frozenset[str] = frozenset({
     # Workflow control (must always be reachable to advance phases)
     "workflow_status", "advance_workflow_phase",
+    # PR-β — composite probe fan-out. Lives in the probe phase
+    # primarily but also useful in post_auth_recon for quick
+    # validation; phase-agnostic to give the lead the lowest
+    # cognitive-load path.
+    "probe_endpoint",
     # Coordination
     "open_hypothesis", "confirm_hypothesis", "dismiss_hypothesis",
     "list_active_hypotheses", "is_surface_under_investigation",

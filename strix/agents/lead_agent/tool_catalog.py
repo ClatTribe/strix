@@ -35,6 +35,11 @@ _CORE_TOOLS: frozenset[str] = frozenset({
     # phase-agnostic in workflow_state.py so phase filtering
     # never strips them).
     "workflow_status", "advance_workflow_phase",
+    # Phase 3d / PR-β — composite specialist fan-out. Lives in
+    # the core so it's always reachable; the phase filter still
+    # makes sense per-target-type (web-only) but probe_endpoint
+    # is universally useful when a probable endpoint is in hand.
+    "probe_endpoint",
     # Coordination + planning
     "open_hypothesis", "confirm_hypothesis", "dismiss_hypothesis",
     "list_active_hypotheses", "is_surface_under_investigation",

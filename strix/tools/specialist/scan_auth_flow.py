@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import secrets
 import string
@@ -68,6 +69,73 @@ logger = logging.getLogger(__name__)
 # Default-credential cohort. Ordered by historical hit-rate against
 # CTF-shaped / neglected-app login endpoints. Pairs are tried in
 # sequence; first success wins.
+def _load_user_supplied_credentials(
+    extra_creds: list[tuple[str, str]] | list[list[str]] | None,
+) -> list[tuple[str, str]]:
+    """PR-β — assemble user-supplied credentials from the `extra_creds`
+    arg AND the `STRIX_LOGIN_CREDS` env var.
+
+    The env var is populated by `interface/main.py`'s `--login-creds`
+    handler and survives the wrapper → sandbox boundary like the
+    rest of the STRIX_* env contract. Format: JSON list of either
+    `[username, password]` pairs OR `{"username": ..., "password": ...}`
+    objects.
+
+    `extra_creds` (the kwarg) takes precedence when both are set —
+    a programmatic caller can override the wrapper's tenant config.
+
+    Returns deduplicated `(username, password)` tuples. Invalid /
+    malformed entries are silently dropped (logged at debug); we
+    never let a parse error block scan_auth_flow from running the
+    default corpus.
+    """
+    import json as _json
+
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(u: object, p: object) -> None:
+        if not isinstance(u, str) or not isinstance(p, str):
+            return
+        u_strip, p_strip = u.strip(), p.strip()
+        if not u_strip or not p_strip:
+            return
+        key = (u_strip, p_strip)
+        if key in seen:
+            return
+        seen.add(key)
+        pairs.append(key)
+
+    # 1. From the kwarg.
+    if extra_creds:
+        for entry in extra_creds:
+            try:
+                if isinstance(entry, dict):
+                    _add(entry.get("username"), entry.get("password"))
+                elif isinstance(entry, (tuple, list)) and len(entry) >= 2:
+                    _add(entry[0], entry[1])
+            except Exception:  # noqa: BLE001
+                logger.debug("ignored malformed extra_creds entry: %r", entry)
+
+    # 2. From the env var (set by interface/main.py from --login-creds).
+    env_raw = (os.environ.get("STRIX_LOGIN_CREDS") or "").strip()
+    if env_raw:
+        try:
+            parsed = _json.loads(env_raw)
+            if isinstance(parsed, list):
+                for entry in parsed:
+                    if isinstance(entry, dict):
+                        _add(entry.get("username"), entry.get("password"))
+                    elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                        _add(entry[0], entry[1])
+        except (ValueError, TypeError) as e:
+            logger.debug(
+                "STRIX_LOGIN_CREDS not valid JSON list (%s); ignoring", e,
+            )
+
+    return pairs
+
+
 _DEFAULT_CREDS: tuple[tuple[str, str], ...] = (
     # Juice Shop in particular bakes admin@juice-sh.op/admin123 in.
     ("admin@juice-sh.op", "admin123"),
@@ -209,6 +277,7 @@ def scan_auth_flow(
     label: str = "default-creds",
     try_register: bool = False,
     register_url: str | None = None,
+    extra_creds: list[tuple[str, str]] | list[list[str]] | None = None,
 ) -> SpecialistResult:
     """Try a small default-credential cohort against the login URL,
     capture session on success, and write to SecurityContext.AuthState.
@@ -233,6 +302,16 @@ def scan_auth_flow(
         register_url: explicit signup endpoint when known. When None
             and `try_register=True`, the specialist tries a small set
             of common signup paths.
+        extra_creds: Phase 3d / PR-β — user-supplied credentials to
+            try BEFORE the built-in default corpus. Accepts a list of
+            `(username, password)` tuples / 2-element lists. Wrappers
+            populate this from a tenant-supplied "known creds for
+            this target" UI input via the `STRIX_LOGIN_CREDS` env
+            var; the lead can also pass `extra_creds=[...]` directly.
+            Priority-1 attempts — if a user-supplied pair succeeds,
+            we capture that session and report the success WITHOUT
+            emitting a "default credentials accepted" finding (those
+            are tenant-supplied creds, not exploitable defaults).
 
     Returns: SpecialistResult. On default-creds success, auto-emits
     a CWE-521 / CWE-798 finding. Always writes captured session
@@ -265,8 +344,23 @@ def scan_auth_flow(
     headers = dict(extra_headers or {})
     headers.setdefault("Content-Type", "application/json")
 
-    # Phase 1 — default-credential brute force.
-    for email, password in _DEFAULT_CREDS:
+    # PR-β / Phase 3d — assemble the credential cohort. Priority-1
+    # is user-supplied creds (from `extra_creds=` arg OR the
+    # `STRIX_LOGIN_CREDS` env JSON set by the wrapper / CLI's
+    # `--login-creds`). Priority-2 is the built-in default
+    # corpus. We track which set each pair came from so we can
+    # decide whether to emit a "default credentials accepted"
+    # finding (only for default-corpus hits — user-supplied
+    # credentials are explicit tenant-provided values, not
+    # exploitable defaults).
+    user_creds = _load_user_supplied_credentials(extra_creds)
+    cohort: list[tuple[str, str, str]] = [   # (email, password, source)
+        *((u, p, "user_supplied") for u, p in user_creds),
+        *((e, p, "default_corpus") for e, p in _DEFAULT_CREDS),
+    ]
+
+    # Phase 1 — credential brute force (user-supplied first).
+    for email, password, _source in cohort:
         body_dict = _build_login_body(
             email_field=email_field, password_field=password_field,
             email=email, password=password,
@@ -338,10 +432,20 @@ def scan_auth_flow(
                 except Exception as e:  # noqa: BLE001
                     logger.debug("scan_auth_flow: jwt_audit chain failed: %s", e, exc_info=True)
 
-            # Emit a finding for default-creds success.
+            # Emit a finding for default-creds success — but NOT
+            # for user-supplied credentials. User-supplied creds
+            # are explicit tenant-provided values; succeeding with
+            # them just means we authenticated, not that we
+            # exploited weak defaults.
+            if _source == "default_corpus":
+                try:
+                    from strix.telemetry.tracer import get_global_tracer
+                    tracer = get_global_tracer()
+                except Exception:  # noqa: BLE001
+                    tracer = None
+            else:
+                tracer = None
             try:
-                from strix.telemetry.tracer import get_global_tracer
-                tracer = get_global_tracer()
                 if tracer is not None:
                     rid = tracer.add_vulnerability_report(
                         title=f"Default credentials accepted at {urlparse(login_url).path or login_url}",
@@ -420,15 +524,20 @@ def scan_auth_flow(
             except Exception as e:  # noqa: BLE001
                 logger.debug("scan_auth_flow: emit failed: %s", e, exc_info=True)
 
-            drafts.append(FindingDraft(
-                title=f"Default credentials accepted at {login_url}",
-                severity="high", cwe="CWE-521",
-                endpoint=login_url, category="auth",
-                verification_status="verified", confidence=1.0,
-                description=f"Login successful with `{email}` / `{password}`",
-            ))
+            # Same source-aware filter — user-supplied successes
+            # don't get a `FindingDraft` either. The session
+            # capture (via record_auth_state below) is the value
+            # the lead wants from a user-supplied cred attempt.
+            if _source == "default_corpus":
+                drafts.append(FindingDraft(
+                    title=f"Default credentials accepted at {login_url}",
+                    severity="high", cwe="CWE-521",
+                    endpoint=login_url, category="auth",
+                    verification_status="verified", confidence=1.0,
+                    description=f"Login successful with `{email}` / `{password}`",
+                ))
             evidence.append(
-                f"default-creds success: {email}/{password} → "
+                f"{_source} login success: {email}/<redacted> → "
                 f"cookies={list(cookies.keys())} jwt={'yes' if jwt else 'no'}"
             )
             # Record probe coverage.
