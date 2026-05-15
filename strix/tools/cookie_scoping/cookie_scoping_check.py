@@ -250,7 +250,27 @@ def _emit_finding(**kwargs: Any) -> str | None:
     tracer = get_global_tracer()
     if tracer is None:
         return None
-    return tracer.add_vulnerability_report(**kwargs)
+    finding_id = tracer.add_vulnerability_report(**kwargs)
+    # §3 KG side-effect — cookie misconfigs are surface-level.
+    try:
+        from strix.agents.kg_emit import record_finding_in_kg
+        record_finding_in_kg(
+            finding_id=finding_id,
+            url=kwargs.get("endpoint") or kwargs.get("target") or "",
+            param=kwargs.get("category", "cookie"),
+            cwe=kwargs.get("cwe") or "CWE-1004",
+            severity=kwargs.get("severity") or "medium",
+            category=kwargs.get("category") or "cookie_scoping",
+            method="GET",
+            detection_kind=(kwargs.get("title") or "")[:60],
+            confidence=0.85,
+        )
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug(
+            "cookie_scoping: kg record failed: %s", e, exc_info=True,
+        )
+    return finding_id
 
 
 def _start_check(category: str, surface: str) -> str | None:

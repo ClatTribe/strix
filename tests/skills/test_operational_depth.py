@@ -35,13 +35,21 @@ def _read(name: str) -> str:
 
 
 def _section_order(text: str, *markers: str) -> bool:
-    """Return True when markers appear in `text` in the given order."""
+    """Return True when markers appear in `text` in the given order.
+
+    Matches `\\n<marker>` so `## Validation` doesn't accidentally
+    match inside `### Validation Gaps` (which `text.find` would
+    happily return).
+    """
     positions: list[int] = []
     for m in markers:
-        pos = text.find(m)
-        if pos < 0:
+        # Anchor to start-of-line OR start-of-document.
+        anchor_a = text.find("\n" + m)
+        anchor_b = text.find(m) if text.startswith(m) else -1
+        candidates = [p for p in (anchor_a, anchor_b) if p >= 0]
+        if not candidates:
             return False
-        positions.append(pos)
+        positions.append(min(candidates))
     return positions == sorted(positions)
 
 
@@ -168,6 +176,65 @@ def test_rce_has_operational_runbook() -> None:
 def test_rce_has_operational_markers(marker: str) -> None:
     text = _read("rce")
     assert marker in text, f"missing operational marker: {marker!r}"
+
+
+def test_csrf_has_operational_runbook() -> None:
+    text = _read("csrf")
+    assert "## Operational Runbook" in text
+    assert _section_order(text, "## Operational Runbook", "## Validation")
+
+
+@pytest.mark.parametrize("marker", [
+    "X-CSRF-Token",
+    "Content-Type downgrade",
+    "Origin",
+    "SameSite",
+    "enctype=\"text/plain\"",
+    "session",
+])
+def test_csrf_has_operational_markers(marker: str) -> None:
+    text = _read("csrf")
+    assert marker in text, f"missing operational marker: {marker!r}"
+
+
+def test_path_traversal_has_operational_runbook() -> None:
+    text = _read("path_traversal_lfi_rfi")
+    assert "## Operational Runbook" in text
+    assert _section_order(text, "## Operational Runbook", "## Validation")
+
+
+@pytest.mark.parametrize("marker", [
+    "/etc/passwd",
+    "%2F",
+    "php://filter",
+    "data://",
+    "Zip Slip",
+    "/proc/self/environ",
+    "cron",
+])
+def test_path_traversal_has_operational_markers(marker: str) -> None:
+    text = _read("path_traversal_lfi_rfi")
+    assert marker in text, f"missing operational marker: {marker!r}"
+
+
+def test_file_upload_has_operational_runbook() -> None:
+    text = _read("insecure_file_uploads")
+    assert "## Operational Runbook" in text
+    assert _section_order(text, "## Operational Runbook", "## Validation")
+
+
+@pytest.mark.parametrize("marker", [
+    "shell.jpg.php",
+    "shell.phar",
+    "magic byte",
+    ".htaccess",
+    "Zip Slip",
+    "ImageTragick",
+    "GIF89a",
+])
+def test_file_upload_has_operational_markers(marker: str) -> None:
+    text = _read("insecure_file_uploads").lower()
+    assert marker.lower() in text, f"missing operational marker: {marker!r}"
 
 
 # ---------------------------------------------------------------------------

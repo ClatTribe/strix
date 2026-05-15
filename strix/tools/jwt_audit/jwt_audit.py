@@ -450,7 +450,7 @@ def _emit_finding(
     tracer = get_global_tracer()
     if tracer is None:
         return
-    tracer.add_vulnerability_report(
+    finding_id = tracer.add_vulnerability_report(
         title=title,
         severity=severity,
         category="jwt_misconfiguration",
@@ -471,6 +471,25 @@ def _emit_finding(
         recommended_action=recommended_action,
         verification_status="needs_review",
     )
+    # §3 KG side-effect — Vuln + Surface + AFFECTS. JWT findings
+    # are session-bearing-endpoint level; we use the title's
+    # canonical claim/header field as the Surface param surrogate
+    # so multiple JWT issues on the same endpoint dedup correctly.
+    try:
+        from strix.agents.kg_emit import record_finding_in_kg
+        record_finding_in_kg(
+            finding_id=finding_id, url=endpoint,
+            param="jwt", cwe=cwe, severity=severity,
+            category="jwt_misconfiguration",
+            method="GET",
+            detection_kind=title[:60],
+            confidence=0.9,
+        )
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug(
+            "jwt_audit: kg record failed: %s", e, exc_info=True,
+        )
 
 
 def _start_check(category: str, surface: str) -> str | None:
