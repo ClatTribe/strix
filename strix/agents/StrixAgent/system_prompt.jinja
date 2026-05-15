@@ -563,6 +563,12 @@ Default user: pentester (sudo available)
 </available_skills>
 {% endif %}
 
+{% if system_prompt_context.objectives_table %}
+<objectives>
+{{ system_prompt_context.objectives_table }}
+</objectives>
+{% endif %}
+
 {% if loaded_skill_names %}
 <specialized_knowledge>
 {% for skill_name in loaded_skill_names %}
