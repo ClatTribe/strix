@@ -244,7 +244,10 @@ def _update_tracer_with_result(
         raise
 
 
-def _format_tool_result(tool_name: str, result: Any) -> tuple[str, list[dict[str, Any]]]:
+def _format_tool_result(
+    tool_name: str, result: Any,
+    execution_id: str | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
     images: list[dict[str, Any]] = []
 
     screenshot_data = extract_screenshot_from_result(result)
@@ -263,10 +266,45 @@ def _format_tool_result(tool_name: str, result: Any) -> tuple[str, list[dict[str
         final_result_str = f"Tool {tool_name} executed successfully"
     else:
         final_result_str = str(result_str)
-        if len(final_result_str) > 10000:
-            start_part = final_result_str[:4000]
-            end_part = final_result_str[-4000:]
-            final_result_str = start_part + "\n\n... [middle content truncated] ...\n\n" + end_part
+
+        # §6 / PR-#235 — tiered output management. Replaces the
+        # legacy 10K head-tail truncation that lost the middle
+        # entirely. Now: ≤15K inline, 15-100K saved to scratch
+        # with summary + path, >100K aggressive save. ANSI
+        # stripping + repeat-line compression applied universally.
+        # Kill switch: STRIX_OUTPUT_TIERING_DISABLED=1 reverts to
+        # the legacy truncation below.
+        try:
+            from strix.runtime.output_tiering import (
+                apply_tiering, is_tiering_disabled,
+            )
+            if not is_tiering_disabled():
+                final_result_str = apply_tiering(
+                    tool_name=tool_name,
+                    raw_output=final_result_str,
+                    execution_id=execution_id,
+                )
+            elif len(final_result_str) > 10000:
+                # Legacy path — preserved for kill-switch parity.
+                start_part = final_result_str[:4000]
+                end_part = final_result_str[-4000:]
+                final_result_str = (
+                    start_part
+                    + "\n\n... [middle content truncated] ...\n\n"
+                    + end_part
+                )
+        except Exception:  # noqa: BLE001
+            # Tiering bug must never break a tool call — fall back
+            # to legacy truncation.
+            logger.debug("output_tiering failed", exc_info=True)
+            if len(final_result_str) > 10000:
+                start_part = final_result_str[:4000]
+                end_part = final_result_str[-4000:]
+                final_result_str = (
+                    start_part
+                    + "\n\n... [middle content truncated] ...\n\n"
+                    + end_part
+                )
 
     # Trust-boundary: scan for prompt-injection markers in the tool
     # output before the LLM sees it. Emits a tool.output.injected
@@ -368,7 +406,9 @@ async def _execute_single_tool(
             tracer.update_tool_execution(execution_id, "error", error_msg)
         raise
 
-    observation_xml, images = _format_tool_result(tool_name, result)
+    observation_xml, images = _format_tool_result(
+        tool_name, result, execution_id=execution_id,
+    )
     return observation_xml, images, should_agent_finish
 
 
