@@ -218,6 +218,25 @@ def _emit_ssrf_finding(
         return None
 
 
+def _record_in_kg(
+    *, finding_id: str | None, url: str, param: str,
+    severity: str, via_oob: bool,
+) -> None:
+    """Populate §3 KG with Vuln + Surface + AFFECTS triple after a
+    successful SSRF emit. Best-effort; never raises."""
+    try:
+        from strix.agents.kg_emit import record_finding_in_kg
+        record_finding_in_kg(
+            finding_id=finding_id, url=url, param=param,
+            cwe="CWE-918", severity=severity, category="ssrf",
+            method="GET",
+            detection_kind="oob" if via_oob else "in_band_fingerprint",
+            confidence=0.95 if via_oob else 0.9,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("scan_ssrf: kg record failed: %s", e, exc_info=True)
+
+
 @register_specialist_tool(
     category="ssrf-specialist",
     llm=False,
@@ -359,6 +378,10 @@ def scan_ssrf(
                 )
                 if rid:
                     emitted_count += 1
+                    _record_in_kg(
+                        finding_id=rid, url=url, param=p,
+                        severity=severity, via_oob=False,
+                    )
                 drafts.append(FindingDraft(
                     title=f"SSRF in `{p}` parameter ({label})",
                     severity=severity, cwe="CWE-918",
@@ -403,6 +426,10 @@ def scan_ssrf(
                             )
                             if rid:
                                 emitted_count += 1
+                                _record_in_kg(
+                                    finding_id=rid, url=url, param=p,
+                                    severity="high", via_oob=True,
+                                )
                             drafts.append(FindingDraft(
                                 title=f"Blind SSRF in `{p}` (OOB-confirmed)",
                                 severity="high", cwe="CWE-918",

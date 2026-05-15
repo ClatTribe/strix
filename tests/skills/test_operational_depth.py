@@ -110,6 +110,66 @@ def test_ssrf_has_operational_markers(marker: str) -> None:
     assert marker in text, f"missing operational marker: {marker!r}"
 
 
+def test_idor_has_operational_runbook() -> None:
+    text = _read("idor")
+    assert "## Operational Runbook" in text
+    assert _section_order(text, "## Operational Runbook", "## Validation")
+
+
+@pytest.mark.parametrize("marker", [
+    "OWNER",
+    "ATTACKER",
+    "Bearer",
+    "anon variant",
+    "Step 7 — record evidence",
+    "CWE-862",
+    "write-side IDOR",
+])
+def test_idor_has_operational_markers(marker: str) -> None:
+    text = _read("idor")
+    assert marker in text, f"missing operational marker: {marker!r}"
+
+
+def test_jwt_has_operational_runbook() -> None:
+    text = _read("authentication_jwt")
+    assert "## Operational Runbook" in text
+    assert _section_order(text, "## Operational Runbook", "## Validation")
+
+
+@pytest.mark.parametrize("marker", [
+    "alg: none",
+    "algorithm confusion",
+    "hashcat -m 16500",
+    "jku",
+    "kid",
+    "jwt_tool.py",
+    "RS256",
+])
+def test_jwt_has_operational_markers(marker: str) -> None:
+    text = _read("authentication_jwt")
+    assert marker in text, f"missing operational marker: {marker!r}"
+
+
+def test_rce_has_operational_runbook() -> None:
+    text = _read("rce")
+    assert "## Operational Runbook" in text
+    assert _section_order(text, "## Operational Runbook", "## Validation")
+
+
+@pytest.mark.parametrize("marker", [
+    "OOB oracle",
+    "interactsh",
+    "timing oracle",
+    "ysoserial",
+    "Jinja2 SSTI",
+    "/.dockerenv",
+    "kubernetes.io/serviceaccount",
+])
+def test_rce_has_operational_markers(marker: str) -> None:
+    text = _read("rce")
+    assert marker in text, f"missing operational marker: {marker!r}"
+
+
 # ---------------------------------------------------------------------------
 # Cross-cut: operational sections include shell + python snippets
 # ---------------------------------------------------------------------------

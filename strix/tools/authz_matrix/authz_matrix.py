@@ -473,7 +473,7 @@ def _emit_authz_finding(  # noqa: PLR0913
         "client-side checks alone are not sufficient. Pair with audit "
         "logging on this surface so future bypasses are visible."
     )
-    tracer.add_vulnerability_report(
+    finding_id = tracer.add_vulnerability_report(
         title=f"{title_prefix} {method} {url}",
         severity=severity,
         category=category,
@@ -486,3 +486,21 @@ def _emit_authz_finding(  # noqa: PLR0913
         remediation_steps=remediation,
         verification_status="needs_review",
     )
+    # §3 KG side-effect — Vuln + Surface + AFFECTS triple. The
+    # method discriminates Surface dedup (GET vs POST same path
+    # = two surfaces, since authz boundaries are method-specific).
+    try:
+        from strix.agents.kg_emit import record_finding_in_kg
+        record_finding_in_kg(
+            finding_id=finding_id, url=url,
+            param=",".join(roles_involved[:2]) or "anon",
+            cwe=cwe, severity=severity, category=category,
+            method=method,
+            detection_kind=finding_type,
+            confidence=0.9,
+        )
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug(
+            "authz_matrix: kg record failed: %s", e, exc_info=True,
+        )

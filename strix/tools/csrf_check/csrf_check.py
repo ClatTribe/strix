@@ -304,7 +304,7 @@ def _emit_finding(
     tracer = get_global_tracer()
     if tracer is None:
         return
-    tracer.add_vulnerability_report(
+    finding_id = tracer.add_vulnerability_report(
         title=title,
         severity=severity,
         category="csrf",
@@ -326,6 +326,21 @@ def _emit_finding(
         recommended_action=recommended_action,
         verification_status="needs_review",
     )
+    # §3 KG side-effect: record Vuln + Surface + AFFECTS on every
+    # successful emit. CSRF is endpoint-level (no param), so we
+    # use the empty-string param surrogate; surface dedup still
+    # works (one Surface per endpoint+method).
+    try:
+        from strix.agents.kg_emit import record_finding_in_kg
+        record_finding_in_kg(
+            finding_id=finding_id, url=endpoint, param="",
+            cwe="CWE-352", severity=severity, category="csrf",
+            method="POST",  # CSRF concerns state-changing requests
+            detection_kind="missing_csrf_token",
+            confidence=0.85,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("csrf_check: kg record failed: %s", e, exc_info=True)
 
 
 def _start_check(category: str, surface: str) -> str | None:
