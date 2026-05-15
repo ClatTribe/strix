@@ -195,6 +195,13 @@ def record_endpoint_discovered(url: str) -> None:
             s.post_auth_endpoints_discovered.add(url)
         else:
             s.endpoints_discovered.add(url)
+    # PR-γ — progress signal. Watchdog import is lazy + best-effort
+    # so a missing/broken watchdog never blocks the recorder.
+    try:
+        from strix.agents.progress_watchdog import record_progress
+        record_progress("endpoint.discovered", url[:120])
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def record_login_form_found(url: str) -> None:
@@ -226,6 +233,12 @@ def record_auth_attempt(*, captured: bool, label: str | None = None) -> None:
             s.auth_state_captured = True
             if label and label not in s.captured_auth_labels:
                 s.captured_auth_labels.append(label)
+    if captured:
+        try:
+            from strix.agents.progress_watchdog import record_progress
+            record_progress("auth.captured", label or "default")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def record_endpoint_probed(url: str) -> None:
@@ -236,6 +249,11 @@ def record_endpoint_probed(url: str) -> None:
         return
     with _LOCK:
         _get_or_create().endpoints_probed.add(url)
+    try:
+        from strix.agents.progress_watchdog import record_progress
+        record_progress("endpoint.probed", url[:120])
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def record_finding_emitted() -> None:
@@ -243,6 +261,11 @@ def record_finding_emitted() -> None:
     the lead a quick "you've found N things" feedback."""
     with _LOCK:
         _get_or_create().findings_emitted += 1
+    try:
+        from strix.agents.progress_watchdog import record_progress
+        record_progress("finding.created", "")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def record_chain_emitted() -> None:
@@ -358,6 +381,11 @@ def advance_phase(
         "workflow phase: %s → %s (%s)",
         current, target, reason or "no reason given",
     )
+    try:
+        from strix.agents.progress_watchdog import record_progress
+        record_progress("phase.transitioned", f"{current}->{target}")
+    except Exception:  # noqa: BLE001
+        pass
     return True, "ok"
 
 

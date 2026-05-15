@@ -380,6 +380,43 @@ class BaseAgent(metaclass=AgentMeta):
             except Exception:  # noqa: BLE001
                 pass
 
+            # PR-γ — progress watchdog (5th termination criterion).
+            # Inject a "stalled" message into the lead's next-turn
+            # context so the LLM observes + reorients. At the
+            # escalation tier, force-advance to report phase + stop.
+            # Only run on the lead agent (parent_id is None) — sub-
+            # agents don't need their own watchdog.
+            if self.state.parent_id is None:
+                try:
+                    from strix.agents.progress_watchdog import (
+                        get_warning_message,
+                        should_escalate,
+                    )
+
+                    warning = get_warning_message()
+                    if warning:
+                        self.state.add_message("user", warning)
+                        if should_escalate():
+                            # Hard intervention — force phase to
+                            # report so the next finish_scan call
+                            # passes the workflow guard, and
+                            # request_stop after that to bound
+                            # further LLM cost.
+                            try:
+                                from strix.agents.workflow_state import (
+                                    advance_phase,
+                                )
+                                advance_phase(
+                                    target="report",
+                                    reason="progress_watchdog escalation",
+                                    force=True,
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
+                except Exception:  # noqa: BLE001
+                    # Watchdog must never break the loop.
+                    pass
+
             if self.state.is_waiting_for_input():
                 await self._wait_for_input()
                 continue
