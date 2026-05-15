@@ -129,7 +129,7 @@ def _emit_admin_default_creds_finding(
         tracer = get_global_tracer()
         if tracer is None:
             return None
-        return tracer.add_vulnerability_report(
+        finding_id = tracer.add_vulnerability_report(
             title=f"Default admin credentials accepted at `{login_url}`",
             severity="critical",
             cwe="CWE-798",
@@ -199,6 +199,17 @@ def _emit_admin_default_creds_finding(
                 f"Username is admin-shaped → critical (CWE-798).",
             ],
         )
+        try:
+            from strix.agents.kg_emit import record_finding_in_kg
+            record_finding_in_kg(
+                finding_id=finding_id, url=login_url, param="admin_default_cred",
+                cwe="CWE-798", severity="critical", category="authentication",
+                method="POST", detection_kind="default_admin_cred",
+                confidence=0.99,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("scan_multi_role_auth: kg record failed: %s", e, exc_info=True)
+        return finding_id
     except Exception as e:  # noqa: BLE001
         logger.debug("scan_multi_role_auth: emit failed: %s", e, exc_info=True)
         return None

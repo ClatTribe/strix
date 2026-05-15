@@ -652,3 +652,130 @@ def test_scan_subdomain_takeover_populates_kg() -> None:
         )
 
     _assert_vuln("subdomain_takeover", "CWE-1390")
+
+
+# ---------------------------------------------------------------------------
+# P2-tail batch — 8 more specialist scanners + non-specialist scanners
+# (xpath, ldap, oob_xxe, blind_ssrf, blind_cmd, multi_role_auth,
+# request_smuggling_active, auth_flow) plus the non-specialist edits
+# (tls, websocket, graphql, http_headers, session_entropy, race_check,
+# mfa_attestation, sri_audit, source_maps, secrets_scan,
+# request_smuggling, dom_xss_static, file_upload, csv_injection,
+# cache_deception, method_tamper, debug_endpoint).
+# Each test asserts that a Vuln node lands with the expected
+# category/cwe.
+# ---------------------------------------------------------------------------
+
+
+def test_scan_xpath_injection_populates_kg() -> None:
+    from strix.tools.specialist.scan_xpath_injection import _emit_finding
+
+    with _patch_tracer("F-700"):
+        _emit_finding(
+            url="https://app/api/search",
+            param="user",
+            probe_label="union_attribute_extract",
+            payload="')or'1'='1",
+            evidence_reason="response set changed",
+            response_excerpt="...",
+            severity="high",
+        )
+    _assert_vuln("xpath_injection", "CWE-643")
+
+
+def test_scan_ldap_injection_populates_kg() -> None:
+    from strix.tools.specialist.scan_ldap_injection import _emit_finding
+
+    with _patch_tracer("F-701"):
+        _emit_finding(
+            url="https://app/api/login",
+            param="username",
+            probe_label="ldap_or_wildcard",
+            payload="*)(uid=*",
+            evidence_reason="diff>50%",
+            response_excerpt="...",
+            severity="critical",
+        )
+    _assert_vuln("ldap_injection", "CWE-90")
+
+
+def test_scan_oob_xxe_populates_kg() -> None:
+    from strix.tools.specialist.scan_oob_xxe import _emit_finding
+
+    with _patch_tracer("F-702"):
+        _emit_finding(
+            url="https://app/api/xml",
+            payload_label="param_entity_dtd",
+            payload="...",
+            callback_url="https://oast.example",
+            source_ip="10.0.0.1",
+            raw_request_excerpt="...",
+        )
+    props = _assert_vuln("xxe", "CWE-611")
+    assert props["detection_kind"].startswith("oob_")
+
+
+def test_scan_blind_ssrf_populates_kg() -> None:
+    from strix.tools.specialist.scan_blind_ssrf import _emit_finding
+
+    with _patch_tracer("F-703"):
+        _emit_finding(
+            url="https://app/proxy",
+            param="url",
+            payload_label="oob_callback_basic",
+            payload="https://oast/x",
+            callback_url="https://oast/x",
+            source_ip="10.0.0.1",
+            raw_request_excerpt="...",
+            severity="high",
+        )
+    props = _assert_vuln("ssrf", "CWE-918")
+    assert props["detection_kind"].startswith("oob_")
+
+
+def test_scan_blind_cmd_injection_populates_kg() -> None:
+    from strix.tools.specialist.scan_blind_cmd_injection import _emit_finding
+
+    with _patch_tracer("F-704"):
+        _emit_finding(
+            url="https://app/api/ping",
+            param="host",
+            payload_label="bash_oob_curl",
+            payload="$(curl oast)",
+            description_label="bash command substitution",
+            os_label="unix",
+            callback_url="https://oast/x",
+            source_ip="10.0.0.1",
+            raw_request_excerpt="...",
+        )
+    _assert_vuln("command_injection", "CWE-78")
+
+
+def test_scan_multi_role_auth_populates_kg() -> None:
+    from strix.tools.specialist.scan_multi_role_auth import (
+        _emit_admin_default_creds_finding,
+    )
+
+    with _patch_tracer("F-705"):
+        _emit_admin_default_creds_finding(
+            login_url="https://app/login",
+            username="admin",
+            password="admin",
+        )
+    _assert_vuln("authentication", "CWE-798")
+
+
+def test_scan_request_smuggling_active_populates_kg() -> None:
+    from strix.tools.specialist.scan_request_smuggling_active import _emit_finding
+
+    with _patch_tracer("F-706"):
+        _emit_finding(
+            url="https://app/",
+            probe_label="cl_te_chunked_smuggle",
+            description="CL.TE",
+            baseline_elapsed=0.1,
+            probe_elapsed=10.0,
+            probe_response_excerpt="...",
+            severity="high",
+        )
+    _assert_vuln("http_request_smuggling", "CWE-444")

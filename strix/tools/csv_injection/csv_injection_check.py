@@ -193,7 +193,7 @@ def _emit_finding(
     tracer = get_global_tracer()
     if tracer is None:
         return
-    tracer.add_vulnerability_report(
+    finding_id = tracer.add_vulnerability_report(
         title=title,
         severity=severity,
         category="csv_formula_injection",
@@ -216,6 +216,20 @@ def _emit_finding(
         recommended_action=recommended_action,
         verification_status="verified",
     )
+    try:
+        from strix.agents.kg_emit import record_finding_in_kg
+        record_finding_in_kg(
+            finding_id=finding_id, url=endpoint, param="csv_export",
+            cwe="CWE-1236", severity=severity,
+            category="csv_formula_injection",
+            method="GET", detection_kind=title[:60],
+            confidence=0.9,
+        )
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug(
+            "csv_injection: kg record failed: %s", e, exc_info=True,
+        )
 
 
 def _start_check(category: str, surface: str) -> str | None:

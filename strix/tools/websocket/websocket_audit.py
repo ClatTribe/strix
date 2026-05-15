@@ -475,7 +475,7 @@ def _emit_finding(rec: dict[str, Any], *, target: str) -> str | None:
     recommended = _RECOMMENDED_BY_KIND.get(kind, "Review the WebSocket configuration.")
     cwe = _CWE_BY_KIND.get(kind, "CWE-942")
 
-    return tracer.add_vulnerability_report(
+    finding_id = tracer.add_vulnerability_report(
         title=f"WebSocket: {kind.replace('ws_', '').replace('_', ' ')} on {rec['url']}",
         severity=severity,
         category="websocket_misconfiguration",
@@ -495,6 +495,19 @@ def _emit_finding(rec: dict[str, Any], *, target: str) -> str | None:
         recommended_action=recommended,
         verification_status="verified",
     )
+    try:
+        from strix.agents.kg_emit import record_finding_in_kg
+        record_finding_in_kg(
+            finding_id=finding_id, url=rec["url"], param=kind,
+            cwe=cwe, severity=severity, category="websocket_misconfiguration",
+            method="GET", detection_kind=kind[:60], confidence=0.9,
+        )
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug(
+            "websocket_audit: kg record failed: %s", e, exc_info=True,
+        )
+    return finding_id
 
 
 def _start_check(category: str, surface: str) -> str | None:
