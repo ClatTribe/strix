@@ -22,6 +22,13 @@ captured, finding emitted, endpoint probed) without needing the
 lead to mediate.
 """
 
+from strix.tools.workflow.kg_tools import (
+    kg_create_edge,
+    kg_create_node,
+    kg_query_nodes,
+    kg_query_paths,
+    kg_stats,
+)
 from strix.tools.workflow.probe_endpoint import probe_endpoint
 from strix.tools.workflow.specialist_dispatch import (
     complete_objective,
@@ -37,6 +44,11 @@ __all__ = [
     "advance_workflow_phase",
     "complete_objective",
     "dispatch_specialist",
+    "kg_create_edge",
+    "kg_create_node",
+    "kg_query_nodes",
+    "kg_query_paths",
+    "kg_stats",
     "probe_endpoint",
     "workflow_status",
 ]
