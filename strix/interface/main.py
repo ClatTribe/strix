@@ -340,6 +340,19 @@ Examples:
     )
 
     parser.add_argument(
+        "--scope-file",
+        type=str,
+        help=(
+            "Path to a `strix.scope.yml` engagement-scope doc (see §7). "
+            "Structured replacement for free-form --instruction-file: declares "
+            "in-scope targets, path/host exclusions, opsec level, rate limit, "
+            "auth method+source, and acceptance criteria. Validated at scan "
+            "start; injected into every agent's system prompt. CI-friendly: "
+            "version-control next to .github/workflows/strix.yml."
+        ),
+    )
+
+    parser.add_argument(
         "-n",
         "--non-interactive",
         action="store_true",
@@ -757,6 +770,21 @@ Examples:
                     parser.error(f"Instruction file '{instruction_path}' is empty")
         except Exception as e:  # noqa: BLE001
             parser.error(f"Failed to read instruction file '{instruction_path}': {e}")
+
+    # §7 — engagement scope file. Validated at scan start; refuses
+    # to spawn agents if malformed. The CLI surfaces ALL validation
+    # errors at once via ScopeValidationError.errors so the user
+    # doesn't have to fix-and-retry one at a time.
+    args.scope = None
+    if getattr(args, "scope_file", None):
+        from strix.scope import ScopeValidationError, load_scope_file
+        scope_path = Path(args.scope_file)
+        try:
+            args.scope = load_scope_file(scope_path)
+        except FileNotFoundError:
+            parser.error(f"Scope file not found: {scope_path}")
+        except ScopeValidationError as e:
+            parser.error(str(e))
 
     args.targets_info = []
     for target in args.target:

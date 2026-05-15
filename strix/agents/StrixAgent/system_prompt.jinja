@@ -62,6 +62,10 @@ AUTHORIZED TARGETS:
 {% endfor %}
 {% endif %}
 
+{% if system_prompt_context and system_prompt_context.engagement_scope_block %}
+{{ system_prompt_context.engagement_scope_block }}
+{% endif %}
+
 {% if system_prompt_context and system_prompt_context.lead_architecture_active %}
 SINGLE-LEAD ARCHITECTURE (roadmap §8.5):
 - You are running in single-lead mode. There are NO sub-agents to spawn — `create_agent`, `spawn_webapp_specialist_team`, and similar helpers are intentionally absent from your tool catalog.

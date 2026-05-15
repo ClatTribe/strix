@@ -49,12 +49,28 @@ class StrixAgent(BaseAgent):
                 }
             )
 
-        return {
+        context: dict[str, Any] = {
             "scope_source": "system_scan_config",
             "authorization_source": "strix_platform_verified_targets",
             "authorized_targets": authorized_targets,
             "user_instructions_do_not_expand_scope": True,
         }
+
+        # §7 — render engagement scope (strix.scope.yml) into the
+        # system prompt when provided. Safe to skip silently when
+        # not configured: this is additive, the existing
+        # `authorized_targets` block remains authoritative.
+        scope_obj = scan_config.get("scope")
+        if scope_obj is not None:
+            try:
+                from strix.scope import render_for_prompt
+                context["engagement_scope_block"] = render_for_prompt(scope_obj)
+            except Exception:  # noqa: BLE001
+                # Scope render failure must not block scan start;
+                # the CLI already validated structure at parse time.
+                pass
+
+        return context
 
     async def execute_scan(self, scan_config: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0912
         user_instructions = scan_config.get("user_instructions", "")
