@@ -40,35 +40,139 @@ def _check_workflow_phase(*, force: bool) -> dict[str, Any] | None:
     if phase == "report":
         return None
 
-    # Build a hint-rich error so the lead knows what to do next.
+    # OODA-loop-breaker (PR-#232) — check the auto-bypass first.
+    # When the lead has been rejected `AUTO_BYPASS_THRESHOLD` times
+    # in a row, let finish_scan proceed (the run is tagged
+    # `auto_bypassed=True` in the response so the wrapper /
+    # benchmark pipeline can flag it for review). Without this,
+    # the lead burns ~$0.50 of inference on retry loops (observed
+    # 36 consecutive rejections in the Phase 3d benchmark).
+    try:
+        from strix.agents.rejection_tracker import (
+            build_ooda_response,
+            should_auto_bypass,
+        )
+    except Exception:
+        # Fall back to the pre-OODA response if the tracker fails
+        # to import (e.g. test isolation issue).
+        return {
+            "success": False, "error": "workflow_not_in_report_phase",
+            "current_phase": phase,
+        }
+    if should_auto_bypass("finish_scan"):
+        return None    # let finish_scan proceed; tracker logs the bypass
+
     try:
         snap = snapshot()
         next_actions = snap.get("next_recommended_actions") or []
         gates = snap.get("gates") or {}
     except Exception:
+        snap = {}
         next_actions = []
         gates = {}
 
-    return {
-        "success": False,
-        "error": "workflow_not_in_report_phase",
-        "message": (
-            f"Cannot finish_scan: workflow is in '{phase}' phase, "
-            f"not 'report'. The pentest workflow runs recon → "
-            f"auth_attempt (if login form found) → post_auth_recon "
-            f"(if auth captured) → probe → chain_correlation → "
-            f"report. Call `workflow_status()` for the structured "
-            f"snapshot of gates + recommended next actions. "
-            f"`advance_workflow_phase('report', reason='...')` "
-            f"transitions to the terminal phase when prior phases "
-            f"have produced their expected outputs. Use force=True "
-            f"on finish_scan ONLY if you've genuinely decided to "
-            f"skip outstanding workflow work."
+    # OODA-structured rejection — the lead's LLM should treat
+    # `ooda.act` as the authoritative next-step list. Each entry
+    # is a concrete tool-call template (tool name + arg dict).
+    decide_steps = [
+        f"Current phase is '{phase}' — must reach 'report' before finish_scan succeeds.",
+    ]
+    act_calls: list[dict[str, Any]] = []
+
+    # Build the act-plan based on remaining gates.
+    if not gates.get("recon_has_endpoints"):
+        decide_steps.append(
+            "Recon hasn't produced any endpoints yet — crawl first."
+        )
+        act_calls.append({
+            "tool": "webapp_recon_pipeline",
+            "args": {"url": "<the target URL from this scan>"},
+        })
+    elif (gates.get("recon_found_login_form")
+          and not gates.get("auth_attempted")):
+        decide_steps.append(
+            "A login form was found and auth hasn't been attempted — "
+            "try default + tenant-supplied credentials before probing."
+        )
+        act_calls.append({
+            "tool": "advance_workflow_phase",
+            "args": {"target": "auth_attempt", "reason": "login form found"},
+        })
+        act_calls.append({
+            "tool": "scan_auth_flow",
+            "args": {"login_url": "<the discovered login URL>"},
+        })
+    elif phase in ("recon", "auth_attempt", "post_auth_recon"):
+        decide_steps.append(
+            "Recon and any auth captures are done — advance to probe."
+        )
+        act_calls.append({
+            "tool": "advance_workflow_phase",
+            "args": {"target": "probe",
+                     "reason": "recon complete; probe discovered endpoints"},
+        })
+    elif phase == "probe":
+        decide_steps.append(
+            "Probe phase — fan out specialists on each discovered "
+            "endpoint via `probe_endpoint` before advancing."
+        )
+        unprobed = snap.get("unprobed_endpoints_sample") or []
+        if unprobed:
+            act_calls.append({
+                "tool": "probe_endpoint",
+                "args": {"endpoint_url": unprobed[0]},
+            })
+        else:
+            act_calls.append({
+                "tool": "advance_workflow_phase",
+                "args": {"target": "chain_correlation",
+                         "reason": "probe complete"},
+            })
+    elif phase == "chain_correlation":
+        decide_steps.append(
+            "Emit finding chains, then advance to report."
+        )
+        act_calls.append({"tool": "correlate_findings", "args": {}})
+        act_calls.append({
+            "tool": "advance_workflow_phase",
+            "args": {"target": "report", "reason": "chains emitted"},
+        })
+
+    # Always end with the retry-finish_scan call so the lead has
+    # the full ordered plan in front of it.
+    act_calls.append({
+        "tool": "finish_scan",
+        "args": {
+            "executive_summary": "<your summary>",
+            "methodology": "<your methodology>",
+            "technical_analysis": "<your analysis>",
+            "recommendations": "<your recs>",
+        },
+    })
+
+    return build_ooda_response(
+        tool_name="finish_scan",
+        error="workflow_not_in_report_phase",
+        observe=(
+            f"Workflow is in '{phase}' phase. finish_scan requires "
+            f"'report' phase to proceed."
         ),
-        "current_phase": phase,
-        "workflow_gates": gates,
-        "next_recommended_actions": next_actions,
-    }
+        orient=(
+            f"The pentest workflow runs recon → auth_attempt (if "
+            f"login form found) → post_auth_recon (if auth "
+            f"captured) → probe → chain_correlation → report. "
+            f"Each forward transition has gate prerequisites. "
+            f"You're blocked from finish_scan because the workflow "
+            f"hasn't completed the phases leading to 'report'."
+        ),
+        decide=decide_steps,
+        act=act_calls,
+        extra_fields={
+            "current_phase": phase,
+            "workflow_gates": gates,
+            "next_recommended_actions": next_actions,
+        },
+    )
 
 
 def _check_open_hypotheses(*, force: bool) -> dict[str, Any] | None:
@@ -112,6 +216,21 @@ def _check_open_hypotheses(*, force: bool) -> dict[str, Any] | None:
     if not open_h:
         return None
 
+    # OODA-loop-breaker (PR-#232) — auto-bypass after N consecutive
+    # rejections. See _check_workflow_phase for the rationale.
+    try:
+        from strix.agents.rejection_tracker import (
+            build_ooda_response,
+            should_auto_bypass,
+        )
+    except Exception:
+        return {
+            "success": False, "error": "open_hypotheses_remain",
+            "open_count": len(open_h),
+        }
+    if should_auto_bypass("finish_scan"):
+        return None    # let finish_scan proceed; tracker logs the bypass
+
     summaries = [
         {
             "id": str(h.get("id", "")),
@@ -121,27 +240,64 @@ def _check_open_hypotheses(*, force: bool) -> dict[str, Any] | None:
         }
         for h in open_h[:6]
     ]
-    return {
-        "success": False,
-        "error": "open_hypotheses_remain",
-        "message": (
-            f"Cannot finish_scan: {len(open_h)} hypotheses are still "
-            f"in 'investigating' status. Resolve each by probing → "
-            f"`confirm_hypothesis` (emit a finding) or "
-            f"`dismiss_hypothesis` (explicit decision it's not "
-            f"exploitable). When you've genuinely exhausted probes "
-            f"on a hypothesis but the surface still warrants the "
-            f"open state, dismiss it with reasoning; do NOT leave "
-            f"it open through finish_scan."
+
+    # Build the concrete dismiss_hypothesis calls — one per open
+    # hypothesis. The lead executes these to clear the gate.
+    dismiss_calls: list[dict[str, Any]] = [
+        {
+            "tool": "dismiss_hypothesis",
+            "args": {
+                "hypothesis_id": s["id"],
+                "reason": (
+                    f"Probed during scan; surface {s['surface']!r} "
+                    f"did not yield exploitable evidence."
+                ),
+            },
+        }
+        for s in summaries
+    ]
+    # After the dismisses, the lead retries finish_scan.
+    dismiss_calls.append({
+        "tool": "finish_scan",
+        "args": {
+            "executive_summary": "<your summary>",
+            "methodology": "<your methodology>",
+            "technical_analysis": "<your analysis>",
+            "recommendations": "<your recs>",
+        },
+    })
+
+    return build_ooda_response(
+        tool_name="finish_scan",
+        error="open_hypotheses_remain",
+        observe=(
+            f"{len(open_h)} hypotheses are still in 'investigating' "
+            f"status. The lead has open probe threads it hasn't "
+            f"resolved."
         ),
-        "open_count": len(open_h),
-        "open_hypothesis_summaries": summaries,
-        "suggestions": [
-            "Call list_active_hypotheses() to see the full list",
-            "For each: probe → confirm_hypothesis OR dismiss_hypothesis",
-            "If you've truly exhausted options, pass force=True to override",
+        orient=(
+            "An open hypothesis represents an unresolved probe — "
+            "either confirm it (call `confirm_hypothesis`, which "
+            "should accompany a finding emission) or dismiss it "
+            "(call `dismiss_hypothesis` with a reason). Leaving "
+            "them open through finish_scan would suggest the scan "
+            "report is incomplete. If you've truly exhausted "
+            "probes, dismiss with that reasoning; if you actually "
+            "have evidence, confirm via create_vulnerability_report."
+        ),
+        decide=[
+            "For each of the {n} open hypotheses, decide: did the probe produce evidence?".format(n=len(open_h)),
+            "If YES: emit a finding via create_vulnerability_report, then confirm_hypothesis.",
+            "If NO: dismiss_hypothesis with the reasoning of why it's not exploitable.",
+            "After ALL hypotheses are resolved, retry finish_scan.",
+            "Alternative: pass `force=True` to finish_scan if you've genuinely decided to skip resolving them.",
         ],
-    }
+        act=dismiss_calls,
+        extra_fields={
+            "open_count": len(open_h),
+            "open_hypothesis_summaries": summaries,
+        },
+    )
 
 
 def _validate_root_agent(agent_state: Any) -> dict[str, Any] | None:
@@ -291,13 +447,14 @@ def finish_scan(
             )
 
             vulnerability_count = len(tracer.vulnerability_reports)
-
-            return {
+            response = {
                 "success": True,
                 "scan_completed": True,
                 "message": "Scan completed successfully",
                 "vulnerabilities_found": vulnerability_count,
             }
+            _annotate_success_response(response)
+            return response
 
         import logging
 
@@ -306,9 +463,30 @@ def finish_scan(
     except (ImportError, AttributeError) as e:
         return {"success": False, "message": f"Failed to complete scan: {e!s}"}
     else:
-        return {
+        response = {
             "success": True,
             "scan_completed": True,
             "message": "Scan completed (not persisted)",
             "warning": "Results could not be persisted - tracer unavailable",
         }
+        _annotate_success_response(response)
+        return response
+
+
+def _annotate_success_response(response: dict[str, Any]) -> None:
+    """When finish_scan succeeds, reset the rejection counter and
+    (if a loop was auto-bypassed) annotate the response with the
+    auto-bypass marker so the wrapper / benchmark pipeline can
+    flag the scan for review."""
+    try:
+        from strix.agents.rejection_tracker import (
+            build_auto_bypass_marker,
+            get_rejection_count,
+            record_success,
+        )
+    except Exception:
+        return
+    count_at_success = get_rejection_count("finish_scan")
+    record_success("finish_scan")
+    if count_at_success >= 6:    # AUTO_BYPASS_THRESHOLD
+        response.update(build_auto_bypass_marker("finish_scan"))

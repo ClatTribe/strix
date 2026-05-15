@@ -116,13 +116,127 @@ def advance_workflow_phase(
     )
 
     snap = ws.snapshot()
-    return {
-        "success": transitioned,
-        "transitioned": transitioned,
-        "current_phase": snap["current_phase"],
-        "message": message,
-        # Surface the next recommended actions so the lead doesn't
-        # have to make a separate workflow_status() call after a
-        # successful transition.
-        "next_recommended_actions": snap["next_recommended_actions"],
-    }
+
+    # OODA-loop-breaker (PR-#232) — when transitions are repeatedly
+    # rejected by the gate, the lead is probably stuck. Track the
+    # rejection count + surface an OODA-shaped response after the
+    # first few rejections so the lead can break out by either
+    # filling the missing prerequisite OR passing force=True.
+    try:
+        from strix.agents.rejection_tracker import (
+            build_ooda_response,
+            record_success,
+            should_auto_bypass,
+        )
+    except Exception:
+        # Tracker unavailable — return the simple response.
+        return {
+            "success": transitioned,
+            "transitioned": transitioned,
+            "current_phase": snap["current_phase"],
+            "message": message,
+            "next_recommended_actions": snap["next_recommended_actions"],
+        }
+
+    if transitioned:
+        # Success — clear the rejection counter.
+        record_success("advance_workflow_phase")
+        return {
+            "success": True,
+            "transitioned": True,
+            "current_phase": snap["current_phase"],
+            "message": message,
+            "next_recommended_actions": snap["next_recommended_actions"],
+        }
+
+    # Refused — auto-bypass after the threshold.
+    if should_auto_bypass("advance_workflow_phase"):
+        # Force-transition. Same effect as if the lead had passed
+        # force=True. Cap on lead-stuck cost.
+        transitioned_forced, _ = ws.advance_phase(
+            target=target_norm,  # type: ignore[arg-type]
+            reason=reason or "auto-bypassed after consecutive rejections",
+            force=True,
+        )
+        snap2 = ws.snapshot()
+        record_success("advance_workflow_phase")
+        from strix.agents.rejection_tracker import build_auto_bypass_marker
+        out = {
+            "success": transitioned_forced,
+            "transitioned": transitioned_forced,
+            "current_phase": snap2["current_phase"],
+            "message": (
+                f"auto-bypassed gate after consecutive rejections; "
+                f"original blocker: {message}"
+            ),
+            "next_recommended_actions": snap2["next_recommended_actions"],
+        }
+        out.update(build_auto_bypass_marker("advance_workflow_phase"))
+        return out
+
+    # Standard OODA-rejection.
+    gates = snap.get("gates") or {}
+    decide_steps = [
+        f"Transition to '{target_norm}' was refused: {message}",
+        "Either satisfy the missing prerequisite or pass force=True.",
+    ]
+    act_calls: list[dict[str, Any]] = []
+    # Surface concrete next-actions based on what's missing.
+    if target_norm == "auth_attempt" and not gates.get("recon_found_login_form"):
+        act_calls.append({
+            "tool": "webapp_recon_pipeline",
+            "args": {"url": "<the target URL>"},
+        })
+    elif target_norm == "post_auth_recon" and not gates.get("auth_state_captured"):
+        act_calls.append({
+            "tool": "scan_auth_flow",
+            "args": {"login_url": "<the discovered login URL>"},
+        })
+    elif target_norm == "probe" and not gates.get("recon_has_endpoints"):
+        act_calls.append({
+            "tool": "webapp_recon_pipeline",
+            "args": {"url": "<the target URL>"},
+        })
+    elif target_norm == "chain_correlation" and gates.get("findings_emitted", 0) == 0:
+        # Chain correlation needs findings. Either probe more or skip to report.
+        decide_steps.append(
+            "No findings emitted yet — either probe more endpoints "
+            "to produce findings, OR advance directly to 'report' "
+            "with finish_scan(force=True) if you've decided the scan "
+            "is unproductive."
+        )
+        act_calls.append({
+            "tool": "advance_workflow_phase",
+            "args": {"target": "report", "reason": "no findings to chain"},
+        })
+    # Always include the force-bypass option as the last alt.
+    act_calls.append({
+        "tool": "advance_workflow_phase",
+        "args": {
+            "target": target_norm,
+            "reason": reason or "force-bypass",
+            "force": True,
+        },
+    })
+
+    return build_ooda_response(
+        tool_name="advance_workflow_phase",
+        error="phase_transition_refused",
+        observe=(
+            f"Transition '{snap['current_phase']}' → "
+            f"'{target_norm}' refused. Gate validation failed."
+        ),
+        orient=message,
+        decide=decide_steps,
+        act=act_calls,
+        extra_fields={
+            # Preserve `message` for pre-PR-#232 consumers who
+            # don't read `ooda.orient`.
+            "message": message,
+            "current_phase": snap["current_phase"],
+            "target_phase": target_norm,
+            "transitioned": False,
+            "workflow_gates": gates,
+            "next_recommended_actions": snap["next_recommended_actions"],
+        },
+    )
