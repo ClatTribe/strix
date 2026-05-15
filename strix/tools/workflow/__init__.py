@@ -22,6 +22,13 @@ captured, finding emitted, endpoint probed) without needing the
 lead to mediate.
 """
 
+from strix.tools.workflow.objective_tools import (
+    add_child_objective,
+    create_objective,
+    get_objective,
+    list_objectives,
+    update_objective,
+)
 from strix.tools.workflow.probe_endpoint import probe_endpoint
 from strix.tools.workflow.specialist_dispatch import (
     complete_objective,
@@ -34,9 +41,14 @@ from strix.tools.workflow.workflow_actions import (
 
 
 __all__ = [
+    "add_child_objective",
     "advance_workflow_phase",
     "complete_objective",
+    "create_objective",
     "dispatch_specialist",
+    "get_objective",
+    "list_objectives",
     "probe_endpoint",
+    "update_objective",
     "workflow_status",
 ]
