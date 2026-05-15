@@ -215,7 +215,7 @@ def _emit_finding(
         tracer = get_global_tracer()
         if tracer is None:
             return None
-        return tracer.add_vulnerability_report(
+        finding_id = tracer.add_vulnerability_report(
             title=f"Subdomain takeover possible at `{url}` ({service_label})",
             severity=severity,
             cwe="CWE-1390",
@@ -291,6 +291,17 @@ def _emit_finding(
                 f"Takeover step: {takeover_instructions}",
             ],
         )
+        try:
+            from strix.agents.kg_emit import record_finding_in_kg
+            record_finding_in_kg(
+                finding_id=finding_id, url=url, param=service_label,
+                cwe="CWE-1390", severity=severity, category="subdomain_takeover",
+                method="GET", detection_kind=service_label[:60],
+                confidence=0.93,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("scan_subdomain_takeover_active: kg record failed: %s", e, exc_info=True)
+        return finding_id
     except Exception as e:  # noqa: BLE001
         logger.debug("scan_subdomain_takeover_active: emit failed: %s", e, exc_info=True)
         return None

@@ -181,7 +181,7 @@ def _emit_finding(
         tracer = get_global_tracer()
         if tracer is None:
             return None
-        return tracer.add_vulnerability_report(
+        finding_id = tracer.add_vulnerability_report(
             title=f"Path traversal in `{param}` parameter",
             severity=severity,
             cwe="CWE-22",
@@ -261,6 +261,17 @@ def _emit_finding(
                 "Server reads attacker-controlled paths without scope check.",
             ],
         )
+        try:
+            from strix.agents.kg_emit import record_finding_in_kg
+            record_finding_in_kg(
+                finding_id=finding_id, url=url, param=param,
+                cwe="CWE-22", severity=severity, category="path_traversal",
+                method="GET", detection_kind=payload_label[:60],
+                confidence=0.95,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("scan_path_traversal: kg record failed: %s", e, exc_info=True)
+        return finding_id
     except Exception as e:  # noqa: BLE001
         logger.debug("scan_path_traversal: emit failed: %s", e, exc_info=True)
         return None

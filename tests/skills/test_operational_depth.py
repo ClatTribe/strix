@@ -237,6 +237,100 @@ def test_file_upload_has_operational_markers(marker: str) -> None:
     assert marker.lower() in text, f"missing operational marker: {marker!r}"
 
 
+def test_xxe_has_operational_runbook() -> None:
+    text = _read("xxe")
+    assert "## Operational Runbook" in text
+    assert _section_order(text, "## Operational Runbook", "## Validation")
+
+
+@pytest.mark.parametrize("marker", [
+    "DOCTYPE",
+    "ENTITY",
+    "169.254.169.254",
+    "XInclude",
+    "parameter entit",
+    "SAML",
+])
+def test_xxe_has_operational_markers(marker: str) -> None:
+    text = _read("xxe")
+    assert marker in text, f"missing operational marker: {marker!r}"
+
+
+def test_mass_assignment_has_operational_runbook() -> None:
+    text = _read("mass_assignment")
+    assert "## Operational Runbook" in text
+    assert _section_order(text, "## Operational Runbook", "## Validation")
+
+
+@pytest.mark.parametrize("marker", [
+    "is_admin",
+    "role=admin",
+    "GraphQL mutation",
+    "tenant_id",
+    "credits",
+])
+def test_mass_assignment_has_operational_markers(marker: str) -> None:
+    text = _read("mass_assignment")
+    assert marker in text, f"missing operational marker: {marker!r}"
+
+
+def test_race_conditions_has_operational_runbook() -> None:
+    text = _read("race_conditions")
+    assert "## Operational Runbook" in text
+    assert _section_order(text, "## Operational Runbook", "## Validation")
+
+
+@pytest.mark.parametrize("marker", [
+    "Turbo Intruder",
+    "asyncio",
+    "single-packet",
+    "concurrent",
+    "TOCTOU",
+])
+def test_race_conditions_has_operational_markers(marker: str) -> None:
+    text = _read("race_conditions")
+    assert marker in text, f"missing operational marker: {marker!r}"
+
+
+def test_subdomain_takeover_has_operational_runbook() -> None:
+    text = _read("subdomain_takeover")
+    assert "## Operational Runbook" in text
+    assert _section_order(text, "## Operational Runbook", "## Validation")
+
+
+@pytest.mark.parametrize("marker", [
+    "subfinder",
+    "amass",
+    "crt.sh",
+    "subjack",
+    "nuclei",
+    "NoSuchBucket",
+    "herokuapp",
+])
+def test_subdomain_takeover_has_operational_markers(marker: str) -> None:
+    text = _read("subdomain_takeover")
+    assert marker in text, f"missing operational marker: {marker!r}"
+
+
+def test_business_logic_has_operational_runbook() -> None:
+    text = _read("business_logic")
+    assert "## Operational Runbook" in text
+    assert _section_order(text, "## Operational Runbook", "## Validation")
+
+
+@pytest.mark.parametrize("marker", [
+    "state machine",
+    "step skipping",
+    "step repetition",
+    "parameter tampering",
+    "negative qty",
+    "currency manipulation",
+])
+def test_business_logic_has_operational_markers(marker: str) -> None:
+    text = _read("business_logic").lower()
+    assert marker.lower() in text, f"missing operational marker: {marker!r}"
+
+
 # ---------------------------------------------------------------------------
 # Cross-cut: operational sections include shell + python snippets
 # ---------------------------------------------------------------------------
