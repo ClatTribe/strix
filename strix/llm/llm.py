@@ -219,6 +219,19 @@ class LLM:
                 # flat-list-in-tool-description path still works.
                 render_ctx["skills_menu"] = ""
 
+            # §2 — OPPLAN-style objective progress table. Injects the
+            # current plan (status, deps, evidence count) so every
+            # LLM call sees "what's left to do, what's blocked". Kill
+            # switch: STRIX_OBJECTIVES_DISABLED=1 → empty string,
+            # template skips the section.
+            try:
+                from strix.agents.objective_tracker import (
+                    render_progress_table,
+                )
+                render_ctx["objectives_table"] = render_progress_table()
+            except Exception:  # noqa: BLE001
+                render_ctx["objectives_table"] = ""
+
             result = env.get_template("system_prompt.jinja").render(
                 get_tools_prompt=tool_prompt_fn,
                 loaded_skill_names=list(skill_content.keys()),
