@@ -41,6 +41,12 @@ from strix.tools.workflow.specialist_dispatch import (
     complete_objective,
     dispatch_specialist,
 )
+from strix.tools.workflow.verification_tools import (
+    advance_verification_stage,
+    record_verification_evidence,
+    register_finding_for_verification,
+    verification_status,
+)
 from strix.tools.workflow.workflow_actions import (
     advance_workflow_phase,
     workflow_status,
@@ -49,6 +55,7 @@ from strix.tools.workflow.workflow_actions import (
 
 __all__ = [
     "add_child_objective",
+    "advance_verification_stage",
     "advance_workflow_phase",
     "complete_objective",
     "create_objective",
@@ -61,6 +68,9 @@ __all__ = [
     "kg_stats",
     "list_objectives",
     "probe_endpoint",
+    "record_verification_evidence",
+    "register_finding_for_verification",
     "update_objective",
+    "verification_status",
     "workflow_status",
 ]
