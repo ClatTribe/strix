@@ -308,6 +308,126 @@ def test_kg_chain_query_finds_ssrf_to_idor_chain() -> None:
 
 
 # ---------------------------------------------------------------------------
+# P2 batch — 5 more scanners adopted (jwt_audit, host_header,
+# cookie_scoping, open_redirect, cors_check). Each test fires the
+# scanner's _emit_finding with a fake tracer + asserts a Vuln + Surface
+# triple lands.
+# ---------------------------------------------------------------------------
+
+
+def _patch_tracer(finding_id: str):
+    """Helper — fake tracer that captures the finding_id + has a
+    get_run_dir() returning None so kg_emit falls through to
+    STRIX_RUN_DIR (set in the fixture)."""
+    from unittest.mock import MagicMock, patch
+    fake = MagicMock()
+    fake.add_vulnerability_report.return_value = finding_id
+    fake.get_run_dir.return_value = None
+    return patch(
+        "strix.telemetry.tracer.get_global_tracer",
+        return_value=fake,
+    )
+
+
+def test_jwt_audit_emit_populates_kg() -> None:
+    from strix.tools.jwt_audit.jwt_audit import _emit_finding
+
+    with _patch_tracer("F-501"):
+        _emit_finding(
+            title="JWT alg:none accepted",
+            severity="critical",
+            cwe="CWE-327",
+            target="https://app",
+            endpoint="https://app/api/auth",
+            description="d",
+            description_plain="d",
+            recommended_action="r",
+        )
+
+    assert _kg_has_finding(category="jwt_misconfiguration", cwe="CWE-327")
+    surfaces = kg.get_kg().query_nodes(type="Surface")
+    assert surfaces[0].props["param"] == "jwt"
+
+
+def test_host_header_emit_populates_kg() -> None:
+    from strix.tools.host_header.host_header_check import _emit_finding
+
+    with _patch_tracer("F-502"):
+        _emit_finding(
+            title="Host header reflected in password-reset link",
+            severity="high",
+            category="host_header",
+            cwe="CWE-79",
+            target="https://app",
+            endpoint="https://app/forgot",
+            description="d",
+            description_plain="d",
+            recommended_action="r",
+        )
+
+    assert _kg_has_finding(category="host_header", cwe="CWE-79")
+    surfaces = kg.get_kg().query_nodes(type="Surface")
+    assert surfaces[0].props["param"] == "Host"
+
+
+def test_cookie_scoping_emit_populates_kg() -> None:
+    from strix.tools.cookie_scoping.cookie_scoping_check import _emit_finding
+
+    with _patch_tracer("F-503"):
+        _emit_finding(
+            title="Session cookie missing Secure flag",
+            severity="medium",
+            cwe="CWE-1004",
+            category="cookie_scoping",
+            target="https://app",
+            endpoint="https://app",
+            description="d",
+            description_plain="d",
+            recommended_action="r",
+        )
+
+    assert _kg_has_finding(category="cookie_scoping", cwe="CWE-1004")
+
+
+def test_open_redirect_emit_populates_kg() -> None:
+    from strix.tools.open_redirect.open_redirect_check import _emit_finding
+
+    with _patch_tracer("F-504"):
+        _emit_finding(
+            title="Open redirect via `next` param",
+            severity="medium",
+            target="https://app",
+            endpoint="https://app/login",
+            description="d",
+            description_plain="d",
+            recommended_action="r",
+        )
+
+    assert _kg_has_finding(category="open_redirect", cwe="CWE-601")
+    surfaces = kg.get_kg().query_nodes(type="Surface")
+    assert surfaces[0].props["param"] == "redirect_url"
+
+
+def test_cors_check_emit_populates_kg() -> None:
+    from strix.tools.cors_check.cors_deep_check import _emit_finding
+
+    with _patch_tracer("F-505"):
+        _emit_finding(
+            title="CORS allows null Origin with credentials",
+            severity="high",
+            target="https://app",
+            endpoint="https://app/api",
+            description="d",
+            description_plain="d",
+            recommended_action="r",
+        )
+
+    assert _kg_has_finding(category="cors_misconfiguration", cwe="CWE-942")
+    surfaces = kg.get_kg().query_nodes(type="Surface")
+    assert surfaces[0].props["param"] == "Origin"
+
+
+# ---------------------------------------------------------------------------
 # Kill switch — adopted scanners respect STRIX_KG_DISABLED
 # ---------------------------------------------------------------------------
 
@@ -323,4 +443,19 @@ def test_ssrf_record_no_op_when_kg_disabled(
         severity="high", via_oob=False,
     )
     # No nodes / edges added.
+    assert kg.get_kg().stats()["node_count"] == 0
+
+
+def test_jwt_audit_kg_no_op_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STRIX_KG_DISABLED", "1")
+    from strix.tools.jwt_audit.jwt_audit import _emit_finding
+
+    with _patch_tracer("F-998"):
+        _emit_finding(
+            title="x", severity="high", cwe="CWE-327",
+            target="https://app", endpoint="https://app/x",
+            description="d", description_plain="d", recommended_action="r",
+        )
     assert kg.get_kg().stats()["node_count"] == 0

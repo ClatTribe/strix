@@ -331,7 +331,7 @@ def _emit_finding(
     tracer = get_global_tracer()
     if tracer is None:
         return
-    tracer.add_vulnerability_report(
+    finding_id = tracer.add_vulnerability_report(
         title=title,
         severity=severity,
         category="cors_misconfiguration",
@@ -353,6 +353,22 @@ def _emit_finding(
         recommended_action=recommended_action,
         verification_status="needs_review",
     )
+    # §3 KG side-effect.
+    try:
+        from strix.agents.kg_emit import record_finding_in_kg
+        record_finding_in_kg(
+            finding_id=finding_id, url=endpoint, param="Origin",
+            cwe="CWE-942", severity=severity,
+            category="cors_misconfiguration",
+            method="GET",
+            detection_kind=title[:60],
+            confidence=0.85,
+        )
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug(
+            "cors_check: kg record failed: %s", e, exc_info=True,
+        )
 
 
 def _start_check(category: str, surface: str) -> str | None:
