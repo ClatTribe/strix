@@ -328,6 +328,32 @@ def _emit_idor_finding(
         return None
 
 
+def _record_in_kg(
+    *, finding_id: str | None, url: str, accessor_label: str,
+    severity: str, cwe: str,
+) -> None:
+    """Populate §3 KG with Vuln + Surface + AFFECTS triple after a
+    successful IDOR / missing-auth emit. Best-effort."""
+    try:
+        from strix.agents.kg_emit import record_finding_in_kg
+        category = "missing_auth" if cwe == "CWE-862" else "idor"
+        record_finding_in_kg(
+            finding_id=finding_id, url=url,
+            # Use `accessor_label` as the param surrogate — IDOR is
+            # path-based, not param-based, but the (url, param,
+            # method) dedup key still works (path-only URLs collapse
+            # to one Surface; one Vuln per accessor demonstrates
+            # the cross-session read).
+            param=accessor_label,
+            cwe=cwe, severity=severity, category=category,
+            method="GET",
+            detection_kind="cross_session_read" if cwe == "CWE-639" else "anon_read",
+            confidence=0.95,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("scan_idor: kg record failed: %s", e, exc_info=True)
+
+
 @register_specialist_tool(
     category="idor-specialist",
     # Phase 3b — adaptive-retry inner-LLM enabled. See scan_xss.py
@@ -528,6 +554,11 @@ def scan_idor(
                         )
                         if rid:
                             emitted_count += 1
+                            _record_in_kg(
+                                finding_id=rid, url=u,
+                                accessor_label=accessor_label,
+                                severity=severity, cwe="CWE-639",
+                            )
                         drafts.append(FindingDraft(
                             title=f"IDOR at `{u}` ({accessor_label} reads {owner_label})",
                             severity=severity, cwe="CWE-639",
@@ -583,6 +614,11 @@ def scan_idor(
                         )
                         if rid:
                             emitted_count += 1
+                            _record_in_kg(
+                                finding_id=rid, url=u,
+                                accessor_label="anon",
+                                severity=severity, cwe="CWE-862",
+                            )
                         drafts.append(FindingDraft(
                             title=f"Missing auth at `{u}` (anon reads {owner_label})",
                             severity=severity, cwe="CWE-862",

