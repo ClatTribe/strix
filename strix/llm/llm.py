@@ -549,17 +549,37 @@ class LLM:
         return args
 
     def _resolve_failover_model(self) -> str | None:
-        """Phase 1.1 — failover model selection.
+        """Failover model selection.
 
-        Priority:
-          1. `STRIX_LLM_FAILOVER` env var (explicit override).
-          2. Built-in defaults: gemini → claude-sonnet-4.5; claude
-             → gpt-4o; openai → claude-sonnet-4.5.
-          3. None — failover disabled.
+        Priority order:
+          1. `STRIX_LLM_FAILOVER` env var (explicit override — backwards
+             compat with Phase 1.1).
+          2. §8 fallback chain (`strix.llm.fallback_chain.pick_chain`):
+             uses `STRIX_AUTH_PRIORITY` + per-role tier to choose the
+             next link in the chain. Walks past the current model to
+             find a credential-present alternative.
+          3. Built-in 2-choice defaults (legacy Phase 1.1 fallback;
+             retained so test environments without env knobs still
+             get *some* failover candidate).
+          4. None — failover disabled.
         """
         explicit = os.environ.get("STRIX_LLM_FAILOVER", "").strip()
         if explicit:
             return explicit
+
+        # §8 — try the chain first. Returns None when the chain is
+        # empty (kill switch set, no creds, etc.); fall through to
+        # the legacy defaults in that case.
+        try:
+            from strix.llm.fallback_chain import next_link_after
+            role = (self.agent_name or "").lower() or None
+            link = next_link_after(self.config.litellm_model or "", role=role)
+            if link and link.credential_present:
+                return link.model
+        except Exception:  # noqa: BLE001
+            # Never let chain bugs break the LLM init path.
+            logger.debug("fallback_chain.next_link_after failed", exc_info=True)
+
         primary = (self.config.litellm_model or "").lower()
         if "gemini" in primary or "vertex" in primary:
             return "anthropic/claude-sonnet-4-5-20250929"
@@ -597,18 +617,28 @@ class LLM:
         total = len(self._request_history)
         retry_rate = retries / total
 
-        if not self._failover_active and retry_rate > 0.5:
+        if retry_rate > 0.5:
+            # §8 — if already in failover, advance to the NEXT link
+            # in the chain (multi-step traversal) instead of staying
+            # on a dead fallback. `_resolve_failover_model` walks past
+            # the current model to find a credential-present alternative.
+            next_model = self._resolve_failover_model() if self._failover_active else self._failover_model
+            if not next_model or next_model == self.config.litellm_model:
+                # Chain exhausted — stay where we are, let retry loop
+                # keep trying. Resetting history would re-trigger
+                # immediately.
+                return
             old_model = self.config.litellm_model
-            self.config.litellm_model = self._failover_model
+            self.config.litellm_model = next_model
             self._failover_active = True
             logger.warning(
                 "LLM provider failover: retry_rate=%.2f exceeds 0.5 over "
                 "trailing window (%d outcomes). Swapping %s → %s",
-                retry_rate, total, old_model, self._failover_model,
+                retry_rate, total, old_model, next_model,
             )
             self._emit_failover_event(
                 from_model=old_model,
-                to_model=self._failover_model,
+                to_model=next_model,
                 retry_rate=retry_rate,
             )
             # Reset history so next window measures the new provider.
