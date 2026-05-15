@@ -258,6 +258,28 @@ def _emit_finding(
         return None
 
 
+def _record_in_kg(
+    *, finding_id: str | None, url: str, param: str,
+) -> None:
+    """Side-effect of a successful emit: populate `Vuln` + `Surface`
+    + `AFFECTS` in the §3 typed KG. Best-effort; never raises."""
+    try:
+        from strix.agents.kg_emit import record_finding_in_kg
+        record_finding_in_kg(
+            finding_id=finding_id,
+            url=url,
+            param=param,
+            cwe="CWE-79",
+            severity="medium",
+            category="xss",
+            method="GET",
+            detection_kind="reflected",
+            confidence=0.9,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("scan_xss: kg record failed: %s", e, exc_info=True)
+
+
 @register_specialist_tool(
     category="xss-specialist",
     # Phase 3b — adaptive-retry inner-LLM enabled. When the
@@ -468,6 +490,9 @@ def scan_xss(
                 )
                 if report_id:
                     emitted_count += 1
+                    _record_in_kg(
+                        finding_id=report_id, url=url, param=param,
+                    )
                 drafts.append(FindingDraft(
                     title=f"Reflected XSS in `{param}` parameter",
                     severity="medium",

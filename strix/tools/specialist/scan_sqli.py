@@ -310,7 +310,7 @@ def _emit_finding(
     *,
     url: str,
     param: str,
-    detection_kind: str,           # "error" | "boolean"
+    detection_kind: str,           # "error" | "boolean" | "auth_bypass"
     db_engine: str | None,
     payload: str,
     response_excerpt: str,
@@ -318,7 +318,12 @@ def _emit_finding(
     confidence: float,
 ) -> str | None:
     """Emit via `tracer.add_vulnerability_report`. Best-effort; never
-    raises. Returns finding id on success, None on failure."""
+    raises. Returns finding id on success, None on failure.
+
+    Side-effect: when emission succeeds AND the §3 typed KG is
+    enabled, a `Vuln` + `Surface` + `AFFECTS` triple is recorded
+    so `kg_query_paths` can find chains rooted in this finding.
+    """
     try:
         from strix.telemetry.tracer import get_global_tracer
 
@@ -440,6 +445,31 @@ def _emit_finding(
     except Exception as e:  # noqa: BLE001
         logger.debug("scan_sqli: emit failed: %s", e, exc_info=True)
         return None
+
+
+def _record_in_kg(
+    *, finding_id: str | None, url: str, param: str,
+    detection_kind: str, db_engine: str | None, confidence: float,
+    severity: str,
+) -> None:
+    """KG side-effect of a successful emit. Wrapped in try/except
+    so any failure leaves the tracer-side finding untouched."""
+    try:
+        from strix.agents.kg_emit import record_finding_in_kg
+        record_finding_in_kg(
+            finding_id=finding_id,
+            url=url,
+            param=param,
+            cwe="CWE-89",
+            severity=severity,
+            category="sqli",
+            method="GET",
+            detection_kind=detection_kind,
+            db_engine=db_engine,
+            confidence=confidence,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("scan_sqli: kg record failed: %s", e, exc_info=True)
 
 
 @register_specialist_tool(
@@ -677,6 +707,11 @@ def scan_sqli(
                 )
                 if report_id:
                     emitted_count += 1
+                    _record_in_kg(
+                        finding_id=report_id, url=url, param=param,
+                        detection_kind="error", db_engine=engine,
+                        confidence=0.95, severity="high",
+                    )
                 drafts.append(FindingDraft(
                     title=f"Error-based SQL injection in `{param}`",
                     severity="high",
@@ -735,6 +770,11 @@ def scan_sqli(
                     )
                     if report_id:
                         emitted_count += 1
+                        _record_in_kg(
+                            finding_id=report_id, url=url, param=param,
+                            detection_kind="auth_bypass", db_engine=None,
+                            confidence=0.98, severity="critical",
+                        )
                     drafts.append(FindingDraft(
                         title=f"SQL injection auth bypass in `{param}` (payload: `{payload}`)",
                         severity="critical",
@@ -805,6 +845,11 @@ def scan_sqli(
             )
             if report_id:
                 emitted_count += 1
+                _record_in_kg(
+                    finding_id=report_id, url=url, param=param,
+                    detection_kind="boolean", db_engine=None,
+                    confidence=0.75, severity="high",
+                )
             drafts.append(FindingDraft(
                 title=f"Boolean-blind SQL injection in `{param}`",
                 severity="high",
