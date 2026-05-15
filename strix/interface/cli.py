@@ -79,6 +79,11 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
         "diff_scope": getattr(args, "diff_scope", {"active": False}),
         "scan_mode": scan_mode,
         "scope_mode": getattr(args, "scope_mode", "auto"),
+        # §7 — engagement scope (parsed `strix.scope.yml`). None when
+        # the user didn't pass --scope-file. The downstream
+        # `_build_system_scope_context` renders this into the system
+        # prompt under <engagement_scope>.
+        "scope": getattr(args, "scope", None),
     }
 
     llm_config = LLMConfig(

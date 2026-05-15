@@ -749,6 +749,8 @@ class StrixTUIApp(App):  # type: ignore[misc]
             "diff_scope": getattr(args, "diff_scope", {"active": False}),
             "scan_mode": getattr(args, "scan_mode", "deep"),
             "scope_mode": getattr(args, "scope_mode", "auto"),
+            # §7 — engagement scope (parsed `strix.scope.yml`).
+            "scope": getattr(args, "scope", None),
         }
 
     def _build_agent_config(self, args: argparse.Namespace) -> dict[str, Any]:
