@@ -36,6 +36,12 @@ from strix.tools.workflow.objective_tools import (
     list_objectives,
     update_objective,
 )
+from strix.tools.workflow.patcher_tools import (
+    list_patches,
+    mark_patch_applied,
+    propose_patch,
+    verify_patch,
+)
 from strix.tools.workflow.probe_endpoint import probe_endpoint
 from strix.tools.workflow.specialist_dispatch import (
     complete_objective,
@@ -67,10 +73,14 @@ __all__ = [
     "kg_query_paths",
     "kg_stats",
     "list_objectives",
+    "list_patches",
+    "mark_patch_applied",
     "probe_endpoint",
+    "propose_patch",
     "record_verification_evidence",
     "register_finding_for_verification",
     "update_objective",
     "verification_status",
+    "verify_patch",
     "workflow_status",
 ]
