@@ -114,6 +114,117 @@ TLS clues: certificate CN/SAN referencing provider default host instead of the c
 - Child-zone NS delegations outrank parent records
 - Control of delegated NS yields full control of all hosts below that label
 
+## Operational Runbook
+
+Subdomain takeover requires careful enumeration → fingerprint identification → safe claim. Most engagements stop at "confirmed takeover possible" without actually claiming the resource (the claim itself is non-trivial to reverse).
+
+### Step 1 — enumerate subdomains broadly
+
+```bash
+# Multi-source enumeration
+subfinder -d <TARGET_DOMAIN> -all -recursive -o /tmp/subs.txt
+amass enum -passive -d <TARGET_DOMAIN> -o /tmp/subs_amass.txt
+assetfinder --subs-only <TARGET_DOMAIN> >> /tmp/subs.txt
+findomain -t <TARGET_DOMAIN> -q >> /tmp/subs.txt
+
+# Certificate transparency
+curl -s "https://crt.sh/?q=%25.<TARGET_DOMAIN>&output=json" \
+    | jq -r '.[].name_value' | tr ',' '\n' | sort -u >> /tmp/subs.txt
+
+# Deduplicate
+sort -u /tmp/subs.txt > /tmp/subs_unique.txt
+wc -l /tmp/subs_unique.txt
+```
+
+### Step 2 — resolve all DNS record types
+
+```bash
+# Bulk resolve with dnsx
+dnsx -l /tmp/subs_unique.txt -a -aaaa -cname -ns -mx -resp -silent > /tmp/dns_records.txt
+
+# Focus on CNAMEs pointing to third-party services (highest takeover risk)
+grep "CNAME" /tmp/dns_records.txt | tee /tmp/cnames.txt
+
+# Also pull dangling NS delegations (rarer but high-impact)
+grep "NS " /tmp/dns_records.txt | grep -v "<TARGET_DOMAIN>"
+```
+
+### Step 3 — fingerprint against known-takeoverable services
+
+```bash
+# Subjack — has the largest fingerprint database
+subjack -w /tmp/subs_unique.txt -t 100 -timeout 30 -ssl -c ~/go/src/github.com/haccer/subjack/fingerprints.json \
+    -v -o /tmp/subjack_results.json
+
+# Nuclei has signed takeover templates
+nuclei -l /tmp/subs_unique.txt -t http/takeovers/ -severity high,critical -o /tmp/nuclei_takeovers.txt
+
+# Manual fingerprint check — fetch each candidate
+for sub in $(grep -E "(s3|github|herokuapp|azure|cloudfront|fastly|shopify)" /tmp/cnames.txt | awk '{print $1}'); do
+    body=$(curl -sL "https://$sub" -m 10 -o /dev/null -w '%{http_code}\n')
+    echo "$sub → status=$body"
+    if [ "$body" = "404" ]; then
+        # Often the "unclaimed" status — fetch the body to confirm fingerprint
+        curl -sL "https://$sub" -m 10 | head -5
+    fi
+done
+```
+
+### Step 4 — high-value provider fingerprints
+
+| Service | CNAME pattern | Unclaimed response signature |
+|---|---|---|
+| AWS S3 (legacy) | `*.s3.amazonaws.com` | `<Code>NoSuchBucket</Code>` |
+| AWS S3 (region) | `*.s3-website.<region>.amazonaws.com` | "The specified bucket does not exist" |
+| AWS CloudFront | `*.cloudfront.net` | "ERROR: The request could not be satisfied" |
+| GitHub Pages | `*.github.io` | "There isn't a GitHub Pages site here" |
+| Heroku | `*.herokuapp.com` | "No such app" |
+| Azure | `*.azurewebsites.net` / `*.cloudapp.net` | "404 Web Site not found" |
+| Shopify | `*.myshopify.com` | "Sorry, this shop is currently unavailable" |
+| Fastly | `*.fastly.net` | "Fastly error: unknown domain" |
+| Tumblr | `*.tumblr.com` | "Whatever you were looking for doesn't currently exist" |
+| Surge | `*.surge.sh` | "project not found" |
+| Pantheon | `*.pantheonsite.io` | "404 site not found" |
+| Bitbucket | `*.bitbucket.io` | "Repository not found" |
+| Webflow | `*.webflow.io` | "The page you are looking for doesn't exist" |
+| Read the Docs | `*.readthedocs.io` | "unknown to Read the Docs" |
+
+### Step 5 — confirm before claiming (DO NOT execute claim without scope authz)
+
+```bash
+# Confirmation checklist for a candidate "victim.example.com → unclaimed.s3.amazonaws.com":
+# 1. dig CNAME the subdomain
+dig +short victim.example.com
+# 2. Verify the target resolves but is unclaimed
+curl -sL https://victim.example.com -m 10
+# 3. Search GitHub / DocSearch for references to the subdomain
+# 4. Document the FQDN, the dangling target, the fingerprint match,
+#    AND screenshot the unclaimed response.
+```
+
+**STOP HERE** unless the engagement scope explicitly authorizes the claim. The claim itself:
+
+```bash
+# (DO NOT do this without explicit scope auth)
+# 1. Register the dangling resource (create new S3 bucket / GitHub Pages site / etc.)
+# 2. Set a custom domain matching the target subdomain
+# 3. Host benign content proving control
+# 4. Document the cookie/CORS scope the takeover grants
+# 5. Hand off to the customer to demonstrate impact
+
+# Reversal: bucket deletion / Pages site delete should restore the dangling state,
+# but DNS owner needs to update CNAME → cleanup is shared work.
+```
+
+### Step 6 — record evidence
+
+Document:
+- FQDN of vulnerable subdomain
+- CNAME target (the dangling pointer)
+- Fingerprint match (exact string from the unclaimed response)
+- Cookie scope implications (`.example.com` cookies are reachable from any subdomain of example.com → takeover grants session theft)
+- Severity: **high** for generic takeover; **critical** when the target subdomain is referenced in JS / OAuth callback URLs / CSP allow-lists / SAML metadata / cookie domains.
+
 ## Testing Methodology
 
 1. **Enumerate subdomains** - Aggregate CT logs, passive DNS, and org inventory

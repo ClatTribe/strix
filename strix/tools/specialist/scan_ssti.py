@@ -132,7 +132,7 @@ def _emit_finding(
         tracer = get_global_tracer()
         if tracer is None:
             return None
-        return tracer.add_vulnerability_report(
+        finding_id = tracer.add_vulnerability_report(
             title=f"Server-side template injection in `{param}` ({engine_label})",
             severity=severity,
             cwe="CWE-1336",
@@ -212,6 +212,17 @@ def _emit_finding(
                 f"Severity {severity} (template engine likely allows code execution).",
             ],
         )
+        try:
+            from strix.agents.kg_emit import record_finding_in_kg
+            record_finding_in_kg(
+                finding_id=finding_id, url=url, param=param,
+                cwe="CWE-1336", severity=severity, category="ssti",
+                method="GET", detection_kind=engine_label[:60],
+                confidence=0.95,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("scan_ssti: kg record failed: %s", e, exc_info=True)
+        return finding_id
     except Exception as e:  # noqa: BLE001
         logger.debug("scan_ssti: emit failed: %s", e, exc_info=True)
         return None

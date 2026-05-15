@@ -459,3 +459,196 @@ def test_jwt_audit_kg_no_op_when_disabled(
             description="d", description_plain="d", recommended_action="r",
         )
     assert kg.get_kg().stats()["node_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# P2-finish — 10 more specialist scanners adopted via direct
+# `_emit_finding` -> `record_finding_in_kg` calls. Each test fires
+# the scanner's emit via a mocked tracer + asserts a Vuln + Surface
+# triple lands with the expected CWE / category / detection_kind.
+# ---------------------------------------------------------------------------
+
+
+def _assert_vuln(category: str, cwe: str) -> dict:
+    """Helper — assert exactly one Vuln with this category+cwe; return its props."""
+    g = kg.get_kg()
+    vulns = [v for v in g.query_nodes(type="Vuln")
+             if v.props.get("category") == category and v.props.get("cwe") == cwe]
+    assert len(vulns) == 1, f"expected 1 Vuln for {category}/{cwe}, got {len(vulns)}"
+    return vulns[0].props
+
+
+def test_scan_xxe_populates_kg() -> None:
+    from strix.tools.specialist.scan_xxe import _emit_xxe_finding
+
+    with _patch_tracer("F-600"):
+        _emit_xxe_finding(
+            url="https://app/api/xml",
+            payload_label="file_disclosure_passwd",
+            target="file:///etc/passwd",
+            response_excerpt="root:x:0:0:root:/root:/bin/bash",
+            severity="critical",
+            cwe="CWE-611",
+        )
+
+    props = _assert_vuln("xxe", "CWE-611")
+    assert props["finding_id"] == "F-600"
+    surface = kg.get_kg().query_nodes(type="Surface")[0]
+    assert surface.props["method"] == "POST"
+    assert surface.props["param"] == "xml_body"
+
+
+def test_scan_deserialization_populates_kg() -> None:
+    from strix.tools.specialist.scan_deserialization import _emit_finding
+
+    with _patch_tracer("F-601"):
+        _emit_finding(
+            url="https://app/api/import",
+            family="java",
+            payload_label="ysoserial_cc5",
+            detection_kind="time_delta",
+            severity="critical",
+            response_excerpt="...",
+        )
+
+    props = _assert_vuln("deserialization", "CWE-502")
+    assert props["detection_kind"] == "time_delta"
+    assert props["confidence"] == 0.97
+
+
+def test_scan_cmd_injection_populates_kg() -> None:
+    from strix.tools.specialist.scan_cmd_injection import _emit_finding
+
+    with _patch_tracer("F-602"):
+        _emit_finding(
+            url="https://app/api/ping",
+            param="host",
+            payload_label="bash_command_substitution",
+            payload="$(id)",
+            response_excerpt="uid=33(www-data)",
+            os_label="unix",
+        )
+
+    props = _assert_vuln("cmd_injection", "CWE-78")
+    assert props["severity"] == "critical"
+
+
+def test_scan_ssti_populates_kg() -> None:
+    from strix.tools.specialist.scan_ssti import _emit_finding
+
+    with _patch_tracer("F-603"):
+        _emit_finding(
+            url="https://app/api/render",
+            param="template",
+            engine_label="Jinja2",
+            payload="{{7*7}}",
+            expected_product=49,
+            response_excerpt="...49...",
+            severity="critical",
+        )
+
+    props = _assert_vuln("ssti", "CWE-1336")
+    assert props["detection_kind"] == "Jinja2"
+
+
+def test_scan_nosql_injection_populates_kg() -> None:
+    from strix.tools.specialist.scan_nosql_injection import _emit_finding
+
+    with _patch_tracer("F-604"):
+        _emit_finding(
+            url="https://app/api/search",
+            param="filter",
+            probe_label="ne_null_operator",
+            probe_url="...",
+            evidence_reason="result set expanded",
+            response_excerpt="...",
+            severity="high",
+        )
+
+    _assert_vuln("nosql_injection", "CWE-943")
+
+
+def test_scan_path_traversal_populates_kg() -> None:
+    from strix.tools.specialist.scan_path_traversal import _emit_finding
+
+    with _patch_tracer("F-605"):
+        _emit_finding(
+            url="https://app/api/download",
+            param="filename",
+            payload_label="dot_dot_etc_passwd",
+            payload="../../../../etc/passwd",
+            response_excerpt="root:x:0:0:",
+            severity="critical",
+        )
+
+    _assert_vuln("path_traversal", "CWE-22")
+
+
+def test_scan_secrets_in_response_populates_kg() -> None:
+    from strix.tools.specialist.scan_secrets_in_response import _emit_finding
+
+    with _patch_tracer("F-606"):
+        _emit_finding(
+            url="https://app/.env",
+            label="aws_access_key",
+            description_label="AWS Access Key ID",
+            excerpt="AKIA...",
+            severity="critical",
+            cwe="CWE-200",
+        )
+
+    props = _assert_vuln("secrets_in_response", "CWE-200")
+    assert props["detection_kind"] == "aws_access_key"
+
+
+def test_scan_oauth_populates_kg() -> None:
+    from strix.tools.specialist.scan_oauth import _emit_finding
+
+    with _patch_tracer("F-607"):
+        _emit_finding(
+            url="https://app/oauth/callback",
+            issue_label="redirect_uri_open",
+            title="OAuth redirect_uri allows open redirect",
+            description="d", impact="i",
+            technical_analysis="ta",
+            poc_description="pd", poc_script_code="psc",
+            remediation_steps="rs",
+            severity="high",
+            cwe="CWE-601",
+        )
+
+    _assert_vuln("oauth_misconfiguration", "CWE-601")
+
+
+def test_scan_business_logic_populates_kg() -> None:
+    from strix.tools.specialist.scan_business_logic import _emit_finding
+
+    with _patch_tracer("F-608"):
+        _emit_finding(
+            url="https://app/api/apply-coupon",
+            family="coupon_reapply",
+            probe_label="apply_same_code_twice",
+            severity="high",
+            response_excerpt="balance: $100",
+        )
+
+    g = kg.get_kg()
+    vulns = g.query_nodes(type="Vuln", filters={"category": "business_logic"})
+    assert len(vulns) == 1
+
+
+def test_scan_subdomain_takeover_populates_kg() -> None:
+    from strix.tools.specialist.scan_subdomain_takeover_active import _emit_finding
+
+    with _patch_tracer("F-609"):
+        _emit_finding(
+            url="https://dangling.example.com",
+            service_label="aws_s3",
+            fingerprint="NoSuchBucket",
+            severity="high",
+            takeover_instructions="Create an S3 bucket named ...",
+            response_excerpt="...",
+            status_code=404,
+        )
+
+    _assert_vuln("subdomain_takeover", "CWE-1390")

