@@ -40,6 +40,12 @@ _CORE_TOOLS: frozenset[str] = frozenset({
     # makes sense per-target-type (web-only) but probe_endpoint
     # is universally useful when a probable endpoint is in hand.
     "probe_endpoint",
+    # §1 / PR-#233 — fresh-context orchestrator dispatch. The
+    # lead in orchestrator mode calls `dispatch_specialist`; the
+    # spawned specialist calls `complete_objective` to exit. Both
+    # in core so they're always reachable when the orchestrator
+    # mode is on (catalog gate handled below).
+    "dispatch_specialist", "complete_objective",
     # Coordination + planning
     "open_hypothesis", "confirm_hypothesis", "dismiss_hypothesis",
     "list_active_hypotheses", "is_surface_under_investigation",
@@ -219,13 +225,64 @@ _BLOCKED_TOOLS: frozenset[str] = frozenset({
 })
 
 
+# §1 / PR-#233 — orchestrator mode. When the lead runs in
+# orchestrator mode (STRIX_ORCHESTRATOR_MODE=true), its catalog is
+# reduced to orchestration + dispatch tools. Probing specialists
+# are HIDDEN from the lead's view because the orchestrator should
+# never invoke them directly — they're called inside the bounded
+# fresh-context loop spawned via `dispatch_specialist`.
+#
+# This is the architectural commitment of §1: lead has no probing
+# tools, only `dispatch_specialist`, workflow control, hypothesis
+# tracking, finding emission, threat-intel lookups, and finish.
+_ORCHESTRATOR_ALLOWED_TOOLS: frozenset[str] = frozenset({
+    # Dispatch — the lead's primary action
+    "dispatch_specialist",
+    # Workflow control
+    "workflow_status", "advance_workflow_phase",
+    # Coordination + planning
+    "open_hypothesis", "confirm_hypothesis", "dismiss_hypothesis",
+    "list_active_hypotheses", "is_surface_under_investigation",
+    "agent_self_audit",
+    # Finding emission (lead reads dispatch_specialist's structured
+    # result; usually doesn't emit findings directly, but the tool
+    # stays available for orchestrator-level findings like
+    # "coverage gap" or "scope violation")
+    "create_vulnerability_report", "update_finding", "dismiss_finding",
+    "check_budget",
+    # Threat-intel lookups (lead may need these for orchestration
+    # decisions — "what CVEs apply to this tech stack?")
+    "cve_lookup", "nvd_lookup", "lookup_known_cves",
+    "lookup_cve_by_id", "list_actively_exploited_cves",
+    "threat_intel_status",
+    # Reasoning + notes
+    "think", "create_note", "list_notes", "get_note",
+    "update_note", "delete_note",
+    # Cross-category emission (orchestrator's final step before report)
+    "correlate_findings", "emit_compliance_evidence",
+    # Termination
+    "finish_scan",
+})
+
+
+def is_orchestrator_mode_enabled() -> bool:
+    """Re-exported here for the catalog-filter caller. The real
+    impl lives in `specialist_orchestrator.py`; we read it lazily
+    to avoid the circular-import pattern."""
+    import os
+    return os.environ.get(
+        "STRIX_ORCHESTRATOR_MODE", ""
+    ).lower() in ("1", "true", "yes", "on")
+
+
 def get_lead_tool_catalog(
     *,
     target_types: Iterable[str],
     phase: str | None = None,
 ) -> set[str]:
     """Return the union of allowed tool names for the given target
-    types, optionally further filtered by the current workflow phase.
+    types, optionally further filtered by the current workflow phase
+    AND by orchestrator mode.
 
     Args:
         target_types: target-type strings (e.g. ['web_application',
@@ -244,7 +301,21 @@ def get_lead_tool_catalog(
         A set of tool names. Tools NOT in this set should be omitted
         from the lead's prompt. The actual prompt rendering is
         owned by the LLM layer; this helper is the policy.
+
+    Orchestrator mode (§1 / PR-#233):
+        When `STRIX_ORCHESTRATOR_MODE=true`, this function REPLACES
+        the result with `_ORCHESTRATOR_ALLOWED_TOOLS` — the lead's
+        catalog becomes orchestration-only. Probing specialists
+        (scan_xss, scan_sqli, etc.) are HIDDEN from the lead's
+        view; the lead must call them via `dispatch_specialist`
+        which runs them in a bounded fresh-context loop.
     """
+    # §1 — orchestrator mode short-circuits to a fixed, narrow
+    # catalog. Target-type + phase filters are bypassed since the
+    # orchestrator's tools are universal across asset classes.
+    if is_orchestrator_mode_enabled():
+        return set(_ORCHESTRATOR_ALLOWED_TOOLS) - _BLOCKED_TOOLS
+
     allowed: set[str] = set(_CORE_TOOLS)
     for tt in target_types:
         if not isinstance(tt, str):

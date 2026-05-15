@@ -23,6 +23,10 @@ lead to mediate.
 """
 
 from strix.tools.workflow.probe_endpoint import probe_endpoint
+from strix.tools.workflow.specialist_dispatch import (
+    complete_objective,
+    dispatch_specialist,
+)
 from strix.tools.workflow.workflow_actions import (
     advance_workflow_phase,
     workflow_status,
@@ -31,6 +35,8 @@ from strix.tools.workflow.workflow_actions import (
 
 __all__ = [
     "advance_workflow_phase",
+    "complete_objective",
+    "dispatch_specialist",
     "probe_endpoint",
     "workflow_status",
 ]
