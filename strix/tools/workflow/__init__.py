@@ -22,6 +22,13 @@ captured, finding emitted, endpoint probed) without needing the
 lead to mediate.
 """
 
+from strix.tools.workflow.kg_tools import (
+    kg_create_edge,
+    kg_create_node,
+    kg_query_nodes,
+    kg_query_paths,
+    kg_stats,
+)
 from strix.tools.workflow.objective_tools import (
     add_child_objective,
     create_objective,
@@ -47,6 +54,11 @@ __all__ = [
     "create_objective",
     "dispatch_specialist",
     "get_objective",
+    "kg_create_edge",
+    "kg_create_node",
+    "kg_query_nodes",
+    "kg_query_paths",
+    "kg_stats",
     "list_objectives",
     "probe_endpoint",
     "update_objective",
