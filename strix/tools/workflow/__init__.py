@@ -22,6 +22,20 @@ captured, finding emitted, endpoint probed) without needing the
 lead to mediate.
 """
 
+from strix.tools.workflow.kg_tools import (
+    kg_create_edge,
+    kg_create_node,
+    kg_query_nodes,
+    kg_query_paths,
+    kg_stats,
+)
+from strix.tools.workflow.objective_tools import (
+    add_child_objective,
+    create_objective,
+    get_objective,
+    list_objectives,
+    update_objective,
+)
 from strix.tools.workflow.probe_endpoint import probe_endpoint
 from strix.tools.workflow.specialist_dispatch import (
     complete_objective,
@@ -40,13 +54,23 @@ from strix.tools.workflow.workflow_actions import (
 
 
 __all__ = [
+    "add_child_objective",
     "advance_verification_stage",
     "advance_workflow_phase",
     "complete_objective",
+    "create_objective",
     "dispatch_specialist",
+    "get_objective",
+    "kg_create_edge",
+    "kg_create_node",
+    "kg_query_nodes",
+    "kg_query_paths",
+    "kg_stats",
+    "list_objectives",
     "probe_endpoint",
     "record_verification_evidence",
     "register_finding_for_verification",
+    "update_objective",
     "verification_status",
     "workflow_status",
 ]
