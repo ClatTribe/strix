@@ -203,6 +203,22 @@ class LLM:
             # when native mode is on.
             render_ctx["native_tool_calls_enabled"] = self._native_tool_calls_enabled()
 
+            # §5 / PR-#236 — progressive-disclosure skills menu.
+            # Injects a categorised list of every available skill
+            # (frontmatter description + optional trigger keywords)
+            # into the system prompt so the agent can pick the right
+            # skill instead of speculatively loading bodies. Kill
+            # switch: STRIX_SKILLS_MENU_DISABLED=1 returns an empty
+            # string and the template skips the section.
+            try:
+                from strix.skills.menu import generate_skills_menu
+                render_ctx["skills_menu"] = generate_skills_menu()
+            except Exception:  # noqa: BLE001
+                # A bug in menu generation must never break the
+                # system prompt. Falls back to no menu — the legacy
+                # flat-list-in-tool-description path still works.
+                render_ctx["skills_menu"] = ""
+
             result = env.get_template("system_prompt.jinja").render(
                 get_tools_prompt=tool_prompt_fn,
                 loaded_skill_names=list(skill_content.keys()),

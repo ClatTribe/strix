@@ -553,6 +553,12 @@ Directories:
 Default user: pentester (sudo available)
 </environment>
 
+{% if system_prompt_context.skills_menu %}
+<available_skills>
+{{ system_prompt_context.skills_menu }}
+</available_skills>
+{% endif %}
+
 {% if loaded_skill_names %}
 <specialized_knowledge>
 {% for skill_name in loaded_skill_names %}
