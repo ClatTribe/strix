@@ -394,7 +394,18 @@ _PER_ASSET_GUIDANCE: dict[str, str] = {
         "the specialist returns `status=partial` with "
         "`engine_available=false` when missing — surface that to the "
         "operator instead of probing further. Operators can scope to "
-        "CVE-only via `STRIX_TRIVY_SCANNERS=vuln` for fast scans."
+        "CVE-only via `STRIX_TRIVY_SCANNERS=vuln` for fast scans.\n\n"
+        "Supply-chain: when `cosign` is installed (and not disabled "
+        "via `STRIX_COSIGN_DISABLED=1`), the specialist ALSO probes "
+        "`cosign verify` (image signature) and `cosign verify-"
+        "attestation --type slsaprovenance` (SLSA build provenance) "
+        "and emits findings under category=image_signing (CWE-345) "
+        "when either fails. Pin the expected signer via "
+        "`STRIX_COSIGN_EXPECTED_IDENTITY` (regex on workflow path) "
+        "and `STRIX_COSIGN_EXPECTED_ISSUER`. Set "
+        "`STRIX_COSIGN_REQUIRE_SIGNED=1` to escalate unsigned-image "
+        "severity from medium to high (recommended for production "
+        "deployment gates)."
     ),
 }
 

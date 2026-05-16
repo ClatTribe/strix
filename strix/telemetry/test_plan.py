@@ -81,6 +81,8 @@ _CATEGORIES_BY_TARGET_TYPE: dict[str, list[tuple[str, str]]] = {
         ("epss_decoration", "EPSS ≥ 0.5 → severity escalation"),
         ("image_misconfiguration", "Dockerfile / docker-compose / k8s misconfigs (USER root, exposed ports, privileged containers)"),
         ("image_secrets", "secrets-in-layers (AWS keys, JWT tokens, hardcoded API keys baked into image)"),
+        ("image_signing", "cosign signature verification (unsigned image / signer-identity mismatch)"),
+        ("slsa_provenance", "SLSA provenance attestation (builder identity + source repo bound to image digest)"),
     ],
     # `api` shares most of the web_application probe surface but
     # skips DOM-rendering specialists (xss, dom_xss) and adds the
