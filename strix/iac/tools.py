@@ -47,7 +47,7 @@ def _emit_finding(*, finding, repo_path: str) -> str | None:
             f"{finding.file}:{finding.line}"
             if finding.line else finding.file
         )
-        return tracer.add_vulnerability_report(
+        report_id = tracer.add_vulnerability_report(
             title=title,
             severity=finding.severity,
             cwe=finding.cwe,
@@ -111,6 +111,30 @@ def _emit_finding(*, finding, repo_path: str) -> str | None:
             ),
             cvss_breakdown=None,
         )
+
+        # KG: code-location surface — same shape as SAST. IaC
+        # findings are file:line, not URL, so the tracer's URL-
+        # auto-emit skips them. Add the code-shape triple here so
+        # IaC misconfigs feed into chain queries (e.g., a CORS
+        # misconfig in IaC + the deployed endpoint sharing the
+        # same `category=misconfig` chain to a DAST CORS probe).
+        try:
+            from strix.agents.kg_emit import record_code_finding_in_kg
+
+            record_code_finding_in_kg(
+                finding_id=report_id,
+                file_path=finding.file,
+                start_line=finding.line if finding.line else 1,
+                cwe=finding.cwe or "CWE-1390",
+                severity=finding.severity,
+                category=finding.category or "misconfig",
+                rule_id=finding.rule_id,
+                confidence=0.9,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("iac: KG code-finding emit failed", exc_info=True)
+
+        return report_id
     except Exception as e:  # noqa: BLE001
         logger.debug("iac emit failed: %s", e, exc_info=True)
         return None

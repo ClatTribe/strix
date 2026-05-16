@@ -74,6 +74,11 @@ def _emit_finding(
         # Pick the first CVE/CWE in the template if any.
         cve = template.info.cve_id[0] if template.info.cve_id else None
         cwe = template.info.cwe_id[0] if template.info.cwe_id else None
+        if not cwe:
+            # Nuclei templates without an explicit CWE are still
+            # vuln-shaped — fall back to CWE-1390 (other) so the
+            # `record_finding_in_kg` Vuln node has a typed CWE.
+            cwe = "CWE-1390"
         ref_block = ""
         if template.info.reference:
             ref_block = "\n".join(
@@ -85,7 +90,7 @@ def _emit_finding(
             template.info.name
             or f"Nuclei template {template.id}"
         ) + f" — confirmed at `{url}`"
-        return tracer.add_vulnerability_report(
+        report_id = tracer.add_vulnerability_report(
             title=title,
             severity=sev,
             cwe=cwe,
@@ -136,6 +141,34 @@ def _emit_finding(
                 + (f" CVE: {cve}." if cve else ""),
             ],
         )
+
+        # Populate the KG so the finding chains into cross-tool
+        # graph queries + the CVE-relevance evaluator can see
+        # nuclei-matched CVEs against the customer's inventory.
+        try:
+            from strix.agents.kg_emit import record_finding_in_kg
+
+            record_finding_in_kg(
+                finding_id=report_id,
+                url=url,
+                # Nuclei doesn't expose a single "vulnerable param" —
+                # use the template id as the surface differentiator
+                # so multiple templates against the same URL stay
+                # distinguishable in the graph.
+                param=template.id,
+                cwe=cwe,
+                severity=sev,
+                category="nuclei",
+                method="GET",
+                detection_kind=(
+                    "cve" if cve else "template_match"
+                ),
+                confidence=0.92,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("nuclei_runner: KG emit failed", exc_info=True)
+
+        return report_id
     except Exception as e:  # noqa: BLE001
         logger.debug("nuclei_runner: emit failed: %s", e, exc_info=True)
         return None

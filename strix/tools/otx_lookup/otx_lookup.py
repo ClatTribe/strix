@@ -321,6 +321,7 @@ def _emit_finding(
     description: str,
     description_plain: str,
     recommended_action: str,
+    asset_type: str = "domain",
 ) -> None:
     try:
         from strix.telemetry.tracer import get_global_tracer
@@ -329,7 +330,7 @@ def _emit_finding(
     tracer = get_global_tracer()
     if tracer is None:
         return
-    tracer.add_vulnerability_report(
+    report_id = tracer.add_vulnerability_report(
         title=title,
         severity=severity,
         category="malicious_target",
@@ -351,6 +352,23 @@ def _emit_finding(
         recommended_action=recommended_action,
         verification_status="needs_review",
     )
+
+    # KG: record as ThreatIntel observation about the IoC asset.
+    try:
+        from strix.agents.kg_emit import record_threat_intel_in_kg
+
+        record_threat_intel_in_kg(
+            source="otx_lookup",
+            asset_type=asset_type,
+            asset_value=target,
+            verdict="malicious" if severity in ("high", "critical") else "suspicious",
+            detail=title,
+            finding_id=report_id,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "otx_lookup: ThreatIntel KG emit failed", exc_info=True,
+        )
 
 
 def _start_check(category: str, surface: str) -> str | None:

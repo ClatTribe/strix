@@ -319,7 +319,7 @@ def _emit_finding(
     tracer = get_global_tracer()
     if tracer is None:
         return
-    tracer.add_vulnerability_report(
+    report_id = tracer.add_vulnerability_report(
         title=title,
         severity=severity,
         category="malicious_target",
@@ -341,6 +341,44 @@ def _emit_finding(
         description_plain=description_plain,
         recommended_action=recommended_action,
         verification_status="needs_review",
+    )
+
+    # KG: record as ThreatIntel observation about the IP/domain
+    # asset. GreyNoise classifies IPs primarily; we treat the
+    # target as `ip_address` when it parses as one, else `domain`.
+    try:
+        from strix.agents.kg_emit import record_threat_intel_in_kg
+
+        asset_type = (
+            "ip_address" if _looks_like_ip(target) else "domain"
+        )
+        record_threat_intel_in_kg(
+            source="greynoise_classify",
+            asset_type=asset_type,
+            asset_value=target,
+            verdict="malicious" if severity in ("high", "critical") else "suspicious",
+            detail=title,
+            finding_id=report_id,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "greynoise: ThreatIntel KG emit failed", exc_info=True,
+        )
+
+
+def _looks_like_ip(target: str) -> bool:
+    """Cheap IPv4/IPv6 sniffer — avoids pulling `ipaddress` parsing
+    overhead since we only need to pick the right KG asset_type."""
+    if not isinstance(target, str):
+        return False
+    t = target.strip()
+    if not t:
+        return False
+    if ":" in t and t.count(":") >= 2:
+        return True   # IPv6 shape
+    parts = t.split(".")
+    return len(parts) == 4 and all(
+        p.isdigit() and 0 <= int(p) <= 255 for p in parts
     )
 
 

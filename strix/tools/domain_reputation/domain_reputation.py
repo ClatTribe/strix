@@ -514,7 +514,7 @@ def _emit_finding(
     tracer = get_global_tracer()
     if tracer is None:
         return
-    tracer.add_vulnerability_report(
+    report_id = tracer.add_vulnerability_report(
         title=title,
         severity=severity,
         category="malicious_target",
@@ -538,6 +538,25 @@ def _emit_finding(
         recommended_action=recommended_action,
         verification_status="needs_review",
     )
+
+    # KG: record as a ThreatIntel observation about the Asset
+    # (domain). Vuln-shape doesn't fit — reputation is an observed
+    # property of the target, not a vuln at a surface.
+    try:
+        from strix.agents.kg_emit import record_threat_intel_in_kg
+
+        record_threat_intel_in_kg(
+            source="domain_reputation",
+            asset_type="domain",
+            asset_value=target,
+            verdict="malicious" if severity in ("high", "critical") else "suspicious",
+            detail=title,
+            finding_id=report_id,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "domain_reputation: ThreatIntel KG emit failed", exc_info=True,
+        )
 
 
 def _start_check(category: str, surface: str) -> str | None:
