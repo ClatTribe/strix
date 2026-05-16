@@ -7,6 +7,7 @@ import pytest
 from strix.compliance.frameworks import (
     ALL_FRAMEWORKS,
     Control,
+    FRAMEWORK_HIPAA,
     FRAMEWORK_ISO27001,
     FRAMEWORK_OWASP_ASVS,
     FRAMEWORK_PCI_DSS,
@@ -22,12 +23,33 @@ from strix.compliance.frameworks import (
 # ---------------------------------------------------------------------------
 
 
-def test_all_four_frameworks_registered() -> None:
+def test_all_frameworks_registered() -> None:
     assert FRAMEWORK_SOC2 in ALL_FRAMEWORKS
     assert FRAMEWORK_ISO27001 in ALL_FRAMEWORKS
     assert FRAMEWORK_PCI_DSS in ALL_FRAMEWORKS
     assert FRAMEWORK_OWASP_ASVS in ALL_FRAMEWORKS
-    assert len(ALL_FRAMEWORKS) == 4
+    assert FRAMEWORK_HIPAA in ALL_FRAMEWORKS
+    assert len(ALL_FRAMEWORKS) == 5
+
+
+def test_hipaa_has_technical_safeguards() -> None:
+    """§164.312 (Technical Safeguards) is the HIPAA subsection
+    most AppSec findings map to. Must include access control,
+    transmission security, integrity, person auth."""
+    hipaa = {c.id for c in get_framework_controls(FRAMEWORK_HIPAA)}
+    assert "164.312(a)(1)" in hipaa       # access control
+    assert "164.312(c)(1)" in hipaa       # integrity
+    assert "164.312(d)" in hipaa          # person/entity auth
+    assert "164.312(e)(1)" in hipaa       # transmission security
+
+
+def test_hipaa_has_administrative_safeguards() -> None:
+    """§164.308 — risk analysis + access auth + login monitoring
+    + password management are the AppSec-touchable subset."""
+    hipaa = {c.id for c in get_framework_controls(FRAMEWORK_HIPAA)}
+    assert "164.308(a)(5)(ii)(B)" in hipaa  # malicious software
+    assert "164.308(a)(5)(ii)(D)" in hipaa  # password management
+    assert "164.308(a)(4)(ii)(B)" in hipaa  # access authorization
 
 
 def test_each_framework_has_controls() -> None:

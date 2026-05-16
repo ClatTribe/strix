@@ -32,6 +32,7 @@ from __future__ import annotations
 from typing import Iterable
 
 from strix.compliance.frameworks import (
+    FRAMEWORK_HIPAA,
     FRAMEWORK_ISO27001,
     FRAMEWORK_OWASP_ASVS,
     FRAMEWORK_PCI_DSS,
@@ -52,6 +53,7 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.26"),
         (FRAMEWORK_PCI_DSS, "6.5.8"),
         (FRAMEWORK_OWASP_ASVS, "V12.3.1"),
+        (FRAMEWORK_HIPAA, "164.312(a)(1)"),
     ],
     # CWE-78 — OS Command Injection
     "CWE-78": [
@@ -60,6 +62,7 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.28"),
         (FRAMEWORK_PCI_DSS, "6.5.1"),
         (FRAMEWORK_OWASP_ASVS, "V5.3.8"),
+        (FRAMEWORK_HIPAA, "164.312(c)(1)"),
     ],
     # CWE-79 — Cross-Site Scripting (XSS)
     "CWE-79": [
@@ -68,6 +71,7 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.28"),
         (FRAMEWORK_PCI_DSS, "6.5.7"),
         (FRAMEWORK_OWASP_ASVS, "V5.3.3"),
+        (FRAMEWORK_HIPAA, "164.312(c)(1)"),
     ],
     # CWE-89 — SQL Injection
     "CWE-89": [
@@ -76,6 +80,7 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.28"),
         (FRAMEWORK_PCI_DSS, "6.5.1"),
         (FRAMEWORK_OWASP_ASVS, "V5.3.4"),
+        (FRAMEWORK_HIPAA, "164.312(c)(1)"),
     ],
     # CWE-90 — LDAP Injection
     "CWE-90": [
@@ -98,6 +103,8 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.3"),
         (FRAMEWORK_PCI_DSS, "7.1"),
         (FRAMEWORK_OWASP_ASVS, "V8.1"),
+        (FRAMEWORK_HIPAA, "164.312(a)(1)"),
+        (FRAMEWORK_HIPAA, "164.312(e)(1)"),
     ],
     # CWE-208 — Observable Timing Discrepancy
     "CWE-208": [
@@ -118,6 +125,8 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.2"),
         (FRAMEWORK_PCI_DSS, "7.1"),
         (FRAMEWORK_OWASP_ASVS, "V4.1"),
+        (FRAMEWORK_HIPAA, "164.308(a)(4)(ii)(B)"),
+        (FRAMEWORK_HIPAA, "164.312(a)(1)"),
     ],
     # CWE-285 — Improper Authorization
     "CWE-285": [
@@ -125,6 +134,8 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.3"),
         (FRAMEWORK_PCI_DSS, "7.1"),
         (FRAMEWORK_OWASP_ASVS, "V4.1"),
+        (FRAMEWORK_HIPAA, "164.308(a)(4)(ii)(B)"),
+        (FRAMEWORK_HIPAA, "164.312(a)(1)"),
     ],
     # CWE-287 — Improper Authentication
     "CWE-287": [
@@ -132,6 +143,8 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.5"),
         (FRAMEWORK_PCI_DSS, "8.2"),
         (FRAMEWORK_OWASP_ASVS, "V2"),
+        (FRAMEWORK_HIPAA, "164.312(d)"),
+        (FRAMEWORK_HIPAA, "164.312(a)(2)(i)"),
     ],
     # CWE-295 — Improper Certificate Validation
     "CWE-295": [
@@ -140,6 +153,7 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_PCI_DSS, "4.2"),
         (FRAMEWORK_PCI_DSS, "6.5.4"),
         (FRAMEWORK_OWASP_ASVS, "V9.2"),
+        (FRAMEWORK_HIPAA, "164.312(e)(1)"),
     ],
     # CWE-306 — Missing Authentication for Critical Function
     "CWE-306": [
@@ -147,6 +161,7 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.5"),
         (FRAMEWORK_PCI_DSS, "7.1"),
         (FRAMEWORK_OWASP_ASVS, "V4.1"),
+        (FRAMEWORK_HIPAA, "164.312(d)"),
     ],
     # CWE-326 — Inadequate Encryption Strength
     "CWE-326": [
@@ -154,6 +169,8 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.24"),
         (FRAMEWORK_PCI_DSS, "4.1"),
         (FRAMEWORK_OWASP_ASVS, "V6.2"),
+        (FRAMEWORK_HIPAA, "164.312(a)(2)(iv)"),
+        (FRAMEWORK_HIPAA, "164.312(e)(2)(ii)"),
     ],
     # CWE-327 — Use of a Broken / Risky Crypto Algorithm
     "CWE-327": [
@@ -161,6 +178,8 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.24"),
         (FRAMEWORK_PCI_DSS, "4.1"),
         (FRAMEWORK_OWASP_ASVS, "V6.2"),
+        (FRAMEWORK_HIPAA, "164.312(a)(2)(iv)"),
+        (FRAMEWORK_HIPAA, "164.312(e)(2)(ii)"),
     ],
     # CWE-338 — Use of Cryptographically Weak PRNG
     "CWE-338": [
@@ -249,6 +268,8 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.3"),
         (FRAMEWORK_PCI_DSS, "7.1"),
         (FRAMEWORK_OWASP_ASVS, "V4.1"),
+        (FRAMEWORK_HIPAA, "164.308(a)(4)(ii)(B)"),
+        (FRAMEWORK_HIPAA, "164.312(a)(1)"),
     ],
     # CWE-643 — XPath Injection
     "CWE-643": [
@@ -263,6 +284,7 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.3"),
         (FRAMEWORK_PCI_DSS, "7.1"),
         (FRAMEWORK_OWASP_ASVS, "V4.1"),
+        (FRAMEWORK_HIPAA, "164.312(a)(1)"),
     ],
     # CWE-798 — Use of Hardcoded Credentials
     "CWE-798": [
@@ -271,6 +293,7 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.24"),
         (FRAMEWORK_PCI_DSS, "8.2.1"),
         (FRAMEWORK_OWASP_ASVS, "V2.10"),
+        (FRAMEWORK_HIPAA, "164.308(a)(5)(ii)(D)"),
     ],
     # CWE-862 — Missing Authorization
     "CWE-862": [
@@ -278,6 +301,8 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.3"),
         (FRAMEWORK_PCI_DSS, "7.1"),
         (FRAMEWORK_OWASP_ASVS, "V4.1"),
+        (FRAMEWORK_HIPAA, "164.308(a)(4)(ii)(B)"),
+        (FRAMEWORK_HIPAA, "164.312(a)(1)"),
     ],
     # CWE-915 — Improperly Controlled Modification of Object Attributes
     # (Mass Assignment)
@@ -294,6 +319,7 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.24"),
         (FRAMEWORK_PCI_DSS, "8.2.1"),
         (FRAMEWORK_OWASP_ASVS, "V2.4"),
+        (FRAMEWORK_HIPAA, "164.308(a)(5)(ii)(D)"),
     ],
     # CWE-918 — SSRF
     "CWE-918": [
@@ -307,6 +333,8 @@ CWE_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.10"),
         (FRAMEWORK_PCI_DSS, "8.2.1"),
         (FRAMEWORK_OWASP_ASVS, "V2.10"),
+        (FRAMEWORK_HIPAA, "164.312(a)(2)(iv)"),
+        (FRAMEWORK_HIPAA, "164.310(d)(1)"),
     ],
     # CWE-943 — Improper Neutralization of Special Elements (NoSQL injection)
     "CWE-943": [
@@ -364,6 +392,7 @@ CATEGORY_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.7"),
         (FRAMEWORK_PCI_DSS, "6.3.2"),
         (FRAMEWORK_OWASP_ASVS, "V14.2.4"),
+        (FRAMEWORK_HIPAA, "164.308(a)(5)(ii)(B)"),
     ],
     "malicious_dependency": [
         (FRAMEWORK_SOC2, "CC6.8"),
@@ -371,6 +400,7 @@ CATEGORY_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_ISO27001, "A.8.7"),
         (FRAMEWORK_PCI_DSS, "6.3.2"),
         (FRAMEWORK_OWASP_ASVS, "V14.2.4"),
+        (FRAMEWORK_HIPAA, "164.308(a)(5)(ii)(B)"),
     ],
     "license_violation": [
         (FRAMEWORK_SOC2, "CC9.2"),

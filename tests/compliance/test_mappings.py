@@ -7,6 +7,7 @@ import pytest
 from strix.compliance.frameworks import (
     ALL_FRAMEWORKS,
     Control,
+    FRAMEWORK_HIPAA,
     FRAMEWORK_ISO27001,
     FRAMEWORK_OWASP_ASVS,
     FRAMEWORK_PCI_DSS,
@@ -179,3 +180,86 @@ def test_untested_subset_to_one_framework() -> None:
     SOC 2 entries."""
     untested = untested_controls(frameworks=[FRAMEWORK_SOC2])
     assert all(fw == FRAMEWORK_SOC2 for fw, _ in untested)
+
+
+# ---------------------------------------------------------------------------
+# HIPAA mappings — Security Rule §164.308 / §164.310 / §164.312
+# ---------------------------------------------------------------------------
+
+
+def test_sqli_maps_to_hipaa_integrity() -> None:
+    """SQLi violates HIPAA §164.312(c)(1) — Integrity — because
+    arbitrary database modification is improper alteration of ePHI."""
+    out = controls_for(cwe="CWE-89")
+    assert (FRAMEWORK_HIPAA, "164.312(c)(1)") in out
+
+
+def test_path_traversal_maps_to_hipaa_access_control() -> None:
+    """Path traversal violates §164.312(a)(1) — Access Control."""
+    out = controls_for(cwe="CWE-22")
+    assert (FRAMEWORK_HIPAA, "164.312(a)(1)") in out
+
+
+def test_weak_auth_maps_to_hipaa_person_entity_auth() -> None:
+    """Improper authentication (CWE-287) violates §164.312(d) —
+    Person or Entity Authentication."""
+    out = controls_for(cwe="CWE-287")
+    assert (FRAMEWORK_HIPAA, "164.312(d)") in out
+
+
+def test_broken_crypto_maps_to_hipaa_encryption() -> None:
+    """Weak crypto violates §164.312(a)(2)(iv) + §164.312(e)(2)(ii)
+    — encryption at rest + in transit."""
+    out = controls_for(cwe="CWE-326")
+    assert (FRAMEWORK_HIPAA, "164.312(a)(2)(iv)") in out
+    assert (FRAMEWORK_HIPAA, "164.312(e)(2)(ii)") in out
+
+
+def test_hardcoded_credentials_map_to_hipaa_password_management() -> None:
+    """Hardcoded credentials (CWE-798) violate §164.308(a)(5)(ii)(D)
+    — Password Management."""
+    out = controls_for(cwe="CWE-798")
+    assert (FRAMEWORK_HIPAA, "164.308(a)(5)(ii)(D)") in out
+
+
+def test_idor_maps_to_hipaa_access_authorization() -> None:
+    """IDOR violates §164.308(a)(4)(ii)(B) — Access Authorization."""
+    out = controls_for(cwe="CWE-639")
+    assert (FRAMEWORK_HIPAA, "164.308(a)(4)(ii)(B)") in out
+    assert (FRAMEWORK_HIPAA, "164.312(a)(1)") in out
+
+
+def test_vulnerable_dependency_maps_to_hipaa_malware_protection() -> None:
+    """SCA findings (no CWE) → §164.308(a)(5)(ii)(B)
+    — Protection from malicious software (vulnerable + malicious
+    deps both qualify under the HHS interpretation)."""
+    out = controls_for(category="vulnerable_dependency")
+    assert (FRAMEWORK_HIPAA, "164.308(a)(5)(ii)(B)") in out
+
+
+def test_information_disclosure_maps_to_hipaa_transmission_security() -> None:
+    """CWE-200 hits both §164.312(a)(1) (access control) and
+    §164.312(e)(1) (transmission security) — disclosure is the
+    core HIPAA breach scenario."""
+    out = controls_for(cwe="CWE-200")
+    assert (FRAMEWORK_HIPAA, "164.312(a)(1)") in out
+    assert (FRAMEWORK_HIPAA, "164.312(e)(1)") in out
+
+
+def test_untested_subset_to_hipaa() -> None:
+    """`untested_controls(frameworks=['hipaa'])` returns only HIPAA
+    entries — admin / physical safeguards we don't directly attest."""
+    untested = untested_controls(frameworks=[FRAMEWORK_HIPAA])
+    assert all(fw == FRAMEWORK_HIPAA for fw, _ in untested)
+    # Risk analysis is admin work — outside scanner scope.
+    untested_ids = {cid for _, cid in untested}
+    assert "164.308(a)(1)(ii)(A)" in untested_ids
+
+
+def test_hipaa_appears_in_covered_set() -> None:
+    """At least some HIPAA controls should be covered by AppSec
+    rules — if HIPAA had zero coverage, the catalog would be
+    pure noise."""
+    covered = covered_controls()
+    hipaa_covered = {cid for fw, cid in covered if fw == FRAMEWORK_HIPAA}
+    assert len(hipaa_covered) >= 5
