@@ -416,3 +416,113 @@ def record_finding_in_kg(
         return None, None
 
     return vuln_node.id, surface_node_id
+
+
+# Code-location Surface dedup. SAST + IaC findings address
+# `file:start_line` rather than `url:param:method`; they need
+# their own dedup namespace so a URL-shaped Surface doesn't
+# accidentally collide with a code-shaped one.
+_code_surface_cache: dict[tuple[str, int], str] = {}
+_code_surface_cache_lock = threading.Lock()
+
+
+def reset_code_surface_cache_for_testing() -> None:
+    """Tests must call in fixtures to keep ids stable."""
+    with _code_surface_cache_lock:
+        _code_surface_cache.clear()
+
+
+def record_code_finding_in_kg(
+    *,
+    finding_id: str | None,
+    file_path: str,
+    start_line: int,
+    cwe: str,
+    severity: str,
+    category: str,
+    end_line: int | None = None,
+    rule_id: str | None = None,
+    confidence: float | None = None,
+) -> tuple[str | None, str | None]:
+    """SAST / IaC analogue of `record_finding_in_kg` — emits the
+    `Vuln + Surface + AFFECTS` triple but with a code-location-
+    shaped Surface (`file_path:start_line` keyed) rather than the
+    URL-shaped Surface used for DAST findings.
+
+    Without this path SAST + IaC findings sit outside the KG,
+    blocking cross-tool chaining (a SAST hit on `auth.py:42`
+    can't link to a DAST IDOR finding on `/api/user/{id}` even
+    though they describe the same defect). The wrapper's
+    cross-finding correlator reads `Surface` nodes regardless of
+    shape, so once these are in the graph the existing
+    `chaining_graph` patterns light up.
+
+    Dedup key: `(file_path, start_line)`. Two SAST rules firing
+    on the same line collapse to one Surface with two Vulns
+    affecting it — the same shape DAST uses for "two probes
+    against the same URL+param".
+
+    Returns `(vuln_node_id, surface_node_id)` — both `None` when
+    KG is disabled or emission fails. Never raises.
+    """
+    if not isinstance(file_path, str) or not file_path.strip():
+        return None, None
+    if not isinstance(start_line, int) or start_line < 1:
+        return None, None
+
+    try:
+        from strix.agents.knowledge_graph import get_kg, is_disabled
+    except ImportError:
+        return None, None
+
+    if is_disabled():
+        return None, None
+
+    kg = get_kg()
+    cache_key = (file_path.strip(), start_line)
+
+    try:
+        with _code_surface_cache_lock:
+            surface_node_id = _code_surface_cache.get(cache_key)
+            if surface_node_id is None or kg.get_node(surface_node_id) is None:
+                surface_props: dict[str, Any] = {
+                    "file": file_path.strip(),
+                    "start_line": start_line,
+                    # `kind=code_location` differentiates this
+                    # Surface from URL-shaped ones in graph queries.
+                    "kind": "code_location",
+                }
+                if end_line is not None and end_line >= start_line:
+                    surface_props["end_line"] = end_line
+                surface_node = kg.add_node(
+                    type="Surface", props=surface_props,
+                )
+                surface_node_id = surface_node.id
+                _code_surface_cache[cache_key] = surface_node_id
+
+        vuln_props: dict[str, Any] = {
+            "cwe": cwe,
+            "severity": (severity or "").lower(),
+            "category": category,
+        }
+        if finding_id:
+            vuln_props["finding_id"] = finding_id
+        if rule_id:
+            vuln_props["rule_id"] = rule_id
+        if confidence is not None:
+            vuln_props["confidence"] = float(confidence)
+
+        vuln_node = kg.add_node(type="Vuln", props=vuln_props)
+        kg.add_edge(
+            type="AFFECTS",
+            source=vuln_node.id,
+            target=surface_node_id,
+            props={"rule_id": rule_id} if rule_id else None,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "kg_emit: record_code_finding failed: %s", e, exc_info=True,
+        )
+        return None, None
+
+    return vuln_node.id, surface_node_id

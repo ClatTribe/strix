@@ -281,7 +281,7 @@ def _emit_finding(
             "Continue current posture; periodic re-attestation per audit cycle."
         )
 
-    tracer.add_vulnerability_report(
+    report_id = tracer.add_vulnerability_report(
         title=f"Monitoring posture: score {score}/6 ({severity})",
         severity=severity,
         category="monitoring_posture",
@@ -300,6 +300,27 @@ def _emit_finding(
         recommended_action=recommendations[0] if recommendations else "",
         verification_status="verified",
     )
+
+    # KG: record as ThreatIntel observation. Posture is an
+    # observation about the target's logging state — not a vuln at
+    # a surface but a property of the asset.
+    try:
+        from strix.agents.kg_emit import record_threat_intel_in_kg
+
+        record_threat_intel_in_kg(
+            source="monitoring_posture",
+            asset_type="domain",
+            asset_value=target,
+            verdict="compliance_fail" if severity in ("medium", "high", "critical") else "benign",
+            score=float(score),
+            detail=f"score {score}/6",
+            finding_id=report_id,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "monitoring_posture: ThreatIntel KG emit failed",
+            exc_info=True,
+        )
 
 
 def _start_check(category: str, surface: str) -> str | None:

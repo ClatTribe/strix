@@ -56,7 +56,7 @@ def _emit_finding(
         title = (
             f"{finding.rule_id} — {finding.message[:160]}"
         )[:480]
-        return tracer.add_vulnerability_report(
+        report_id = tracer.add_vulnerability_report(
             title=title,
             severity=calibrated_severity,
             cwe=finding.cwe,
@@ -118,6 +118,29 @@ def _emit_finding(
             ),
             cvss_breakdown=None,
         )
+
+        # KG: code-location surface (not URL-shaped). The tracer's
+        # URL-auto-emit skips this finding because the endpoint is
+        # `file:line` not http(s). We add the code-shape triple
+        # here so cross-tool chaining can see SAST hits.
+        try:
+            from strix.agents.kg_emit import record_code_finding_in_kg
+
+            record_code_finding_in_kg(
+                finding_id=report_id,
+                file_path=finding.file,
+                start_line=finding.line_start,
+                end_line=finding.line_end,
+                cwe=finding.cwe or "CWE-1390",
+                severity=calibrated_severity,
+                category=finding.category or "sast",
+                rule_id=finding.rule_id,
+                confidence=0.85,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("sast: KG code-finding emit failed", exc_info=True)
+
+        return report_id
     except Exception as e:  # noqa: BLE001
         logger.debug("sast emit failed: %s", e, exc_info=True)
         return None

@@ -283,6 +283,57 @@ def _derive_exploitation_in_wild_plain(report: dict[str, Any]) -> str | None:
     return None
 
 
+def _emit_kg_auto_for_finding(report: dict[str, Any]) -> None:
+    """Auto-populate the KG with `Vuln + Surface + AFFECTS` for any
+    finding that carries a URL endpoint. Closes the KG-integration
+    gaps surfaced in the post-#263 audit: scanners that emit findings
+    via `tracer.add_vulnerability_report` (DAST specialists, nuclei,
+    misconfig, threat-intel) now get a default KG triple without
+    having to call `record_finding_in_kg` themselves.
+
+    Scanners that need extra Vuln-node props (SQLi's `db_engine`,
+    XSS's `detection_kind`) still call `record_finding_in_kg`
+    directly — that helper is dedup-cached on the Surface side
+    so the auto-emit doesn't create duplicate Surface nodes.
+
+    Fail-open: any error logs + continues. Never raises.
+
+    Skips emission when:
+      * `endpoint` not set (code-location-only findings — SAST /
+        IaC — need a separate adapter that emits to a different
+        Surface shape; tracked as a follow-up).
+      * `verification_status` is `pattern_match` with no signal
+        beyond signature match (avoid populating the graph with
+        low-confidence noise).
+    """
+    try:
+        endpoint = report.get("endpoint") or report.get("target") or ""
+        if not isinstance(endpoint, str) or not endpoint.strip():
+            return
+        # Only URLs go through the URL-shaped Surface path. Repo-
+        # path / code-location targets need the code-location
+        # Surface adapter (separate follow-up).
+        if not endpoint.startswith(("http://", "https://")):
+            return
+
+        from strix.agents.kg_emit import record_finding_in_kg
+
+        record_finding_in_kg(
+            finding_id=report.get("id"),
+            url=endpoint,
+            param=report.get("param", "") or "",
+            cwe=report.get("cwe") or "CWE-1390",
+            severity=report.get("severity") or "medium",
+            category=report.get("category") or "",
+            method=report.get("method") or "GET",
+            detection_kind=report.get("detection_kind") or "",
+            db_engine=report.get("db_engine"),
+            confidence=report.get("confidence"),
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("tracer: KG auto-emit failed", exc_info=True)
+
+
 def _normalize_target_for_events(raw: Any) -> dict[str, str] | None:
     """Coerce a scan_config target entry into a {value, type?} dict.
 
@@ -1247,6 +1298,14 @@ class Tracer:
             status=report["severity"],
             source="strix.findings",
         )
+
+        # KG auto-emit: every finding with a URL endpoint becomes a
+        # Vuln + Surface + AFFECTS triple unless a scanner has
+        # explicitly emitted (the existing per-scanner pattern is
+        # preserved — scanners can keep calling record_finding_in_kg
+        # directly for the cases where they need extra props like
+        # `db_engine` on a SQLi Vuln; the helper dedups). Fail-open.
+        _emit_kg_auto_for_finding(report)
 
         # Roadmap §1: separate finding.kill_chain event for multi-step findings.
         # Emitted only when the agent supplied a chain — silence is honest when
