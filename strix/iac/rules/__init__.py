@@ -106,5 +106,8 @@ def list_rules(platform: str | None = None) -> list[str]:
 # Side-effect imports — register rules per platform.
 from strix.iac.rules import cloudflare_rules as _cf  # noqa: E402, F401
 from strix.iac.rules import docker_rules as _dr  # noqa: E402, F401
+from strix.iac.rules import helm_rules as _hr  # noqa: E402, F401
+from strix.iac.rules import kubernetes_rules as _kr  # noqa: E402, F401
 from strix.iac.rules import netlify_rules as _nl  # noqa: E402, F401
+from strix.iac.rules import terraform_rules as _tr  # noqa: E402, F401
 from strix.iac.rules import vercel_rules as _vr  # noqa: E402, F401

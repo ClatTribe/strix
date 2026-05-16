@@ -39,6 +39,9 @@ PLATFORM_NETLIFY = "netlify"
 PLATFORM_CLOUDFLARE = "cloudflare"
 PLATFORM_DOCKER = "docker"
 PLATFORM_DOCKER_COMPOSE = "docker-compose"
+PLATFORM_TERRAFORM = "terraform"
+PLATFORM_KUBERNETES = "kubernetes"
+PLATFORM_HELM = "helm"
 
 
 @dataclass
