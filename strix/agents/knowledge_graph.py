@@ -32,6 +32,7 @@ and queries to find unexplored chains. The shape matches the
 | `RUNS_ON` | Surface → Asset |
 | `USES` | Surface → Dependency |
 | `PIVOTED_FROM` | Vuln → Vuln (target found by exploit-pivoting from source) |
+| `EXPLOITS` | Exploit → Vuln (MOAK-style synthesised exploit attached to a CVE Vuln) |
 
 The taxonomies are **enforced** by `add_node` / `add_edge` —
 unknown types are rejected so the graph stays queryable.
@@ -86,6 +87,11 @@ NodeType = Literal[
     # `ThreatIntel` records the source + verdict; `OBSERVED`
     # connects it to the Asset it concerns.
     "ThreatIntel",
+    # Depth-of-attack — synthesised exploit artifact (MOAK-style
+    # CVE exploit-synthesiser output). Props include: cve,
+    # exploit_script_path, captured_flag_path, judge_score,
+    # is_genuine.
+    "Exploit",
 ]
 EdgeType = Literal[
     "AFFECTS",
@@ -104,18 +110,22 @@ EdgeType = Literal[
     # forward attack edge — the source's exploit *caused* the target
     # to be found.
     "PIVOTED_FROM",
+    # Depth-of-attack — Exploit → Vuln, recording that a synthesised
+    # MOAK-style working exploit was built for a Vuln node carrying
+    # a CVE. The Exploit node holds the captured flag + judge score.
+    "EXPLOITS",
 ]
 
 
 _VALID_NODE_TYPES: frozenset[str] = frozenset({
     "Surface", "Asset", "Vuln", "Credential",
     "Secret", "Dependency", "Role",
-    "ThreatIntel",
+    "ThreatIntel", "Exploit",
 })
 _VALID_EDGE_TYPES: frozenset[str] = frozenset({
     "AFFECTS", "REACHABLE_FROM", "LEAKS", "GRANTS_ACCESS_TO",
     "CHAINS_TO", "RUNS_ON", "USES",
-    "OBSERVED", "PIVOTED_FROM",
+    "OBSERVED", "PIVOTED_FROM", "EXPLOITS",
 })
 
 
