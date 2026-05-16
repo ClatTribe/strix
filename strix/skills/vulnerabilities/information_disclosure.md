@@ -137,6 +137,104 @@ Information leaks accelerate exploitation by revealing code, configuration, iden
 1. Schema reveals hidden fields/endpoints
 2. Attempt requests with those fields; confirm missing authorization
 
+## Operational Runbook
+
+Information disclosure is a wide bucket — separate "artifact discovery" from "intentional-leak" testing.
+
+### Step 1 — DVCS / backup artifacts
+
+```bash
+# .git exposed?
+curl -sI '<TARGET>/.git/HEAD' | head -3
+curl -sI '<TARGET>/.git/config' | head -3
+curl -s '<TARGET>/.git/config' 2>/dev/null | head -10
+
+# Clone if accessible (use git-dumper)
+git-dumper '<TARGET>/.git/' /tmp/dump
+
+# Backup file patterns
+for ext in bak swp old swo orig save tmp; do
+  for base in index config app web settings prod main backup db; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' "<TARGET>/$base.$ext")
+    [[ $code == 200 ]] && echo "/$base.$ext → 200"
+  done
+done
+
+# DS_Store
+curl -s '<TARGET>/.DS_Store' -o /tmp/dsstore && python3 -c "from ds_store import DSStore; [print(e) for e in DSStore.open('/tmp/dsstore')]"
+```
+
+### Step 2 — config + source-map exposure
+
+```bash
+# Source-map dump
+for js in $(curl -s '<TARGET>' | grep -oE '[a-zA-Z0-9._-]+\.js'); do
+  curl -s "<TARGET>/$js.map" 2>/dev/null | \
+    jq -r '.sourcesContent[]?' 2>/dev/null | grep -iE 'api_key|secret|token|password' | head
+done
+
+# Common config endpoint patterns
+for path in /actuator/env /actuator/configprops /actuator/heapdump /v1/env /api/config /config.json /.env /metrics; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' "<TARGET>$path")
+  [[ $code == 200 ]] && echo "$path → 200"
+done
+```
+
+### Step 3 — verbose-error triggering
+
+```bash
+# Trigger DB errors via malformed input
+curl -s "<TARGET>/api/users?id='" | tee /tmp/err.txt
+curl -s "<TARGET>/api/users?id=null" | tee -a /tmp/err.txt
+curl -s "<TARGET>/api/users?id[]=array" | tee -a /tmp/err.txt
+curl -s "<TARGET>/api/users?id=$(python3 -c 'print("a"*10000)')" | tee -a /tmp/err.txt
+
+# Search for stack-trace markers
+grep -iE 'traceback|stacktrace|at [a-z_]+\(.*:[0-9]+\)|sqlexception|fatal error' /tmp/err.txt
+```
+
+### Step 4 — diff probe (owner vs anonymous)
+
+```bash
+# Same URL, different actors
+for actor in "anon" "low_priv" "owner"; do
+  case $actor in
+    anon) HDR="" ;;
+    low_priv) HDR="-H \"Authorization: Bearer $LOW_TOKEN\"" ;;
+    owner) HDR="-H \"Authorization: Bearer $OWNER_TOKEN\"" ;;
+  esac
+  size=$(eval curl -s -o /dev/null -w "'%{size_download}'" "<TARGET>/api/profile" $HDR)
+  echo "$actor → ${size}B"
+done
+
+# A larger anon response than expected = leaked authenticated state
+```
+
+### Step 5 — schema / introspection
+
+```bash
+# OpenAPI / Swagger
+curl -s '<TARGET>/openapi.json' | jq '.paths | keys' 2>/dev/null
+
+# GraphQL introspection
+curl -s -X POST '<TARGET>/graphql' \
+    -H 'Content-Type: application/json' \
+    -d '{"query":"{ __schema { types { name fields { name type { name } } } } }"}' \
+    | jq '.data.__schema.types[]?.name' | head -30
+```
+
+### Step 6 — sort findings by impact
+
+| Leak | Severity |
+|---|---|
+| Live API keys / credentials in responses or JS bundles | **critical** |
+| Source code (via .git, source maps, bundle minification reverse) | **high** |
+| Internal hostnames / config paths via debug endpoints | **high** |
+| Stack traces / framework versions | **medium** |
+| Verbose error messages, server headers | **low** |
+
+Document: exact URL, response excerpt with the leak (redact actual key values to last-4-chars + length), and the downstream attack the leak enables.
+
 ## Testing Methodology
 
 1. **Build channel map** - Web, API, GraphQL, WebSocket, gRPC, mobile, background jobs, exports, CDN

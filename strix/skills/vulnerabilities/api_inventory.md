@@ -161,6 +161,79 @@ curl -s https://api.target/static/app.js.map | \
   jq -r '.sourcesContent[]' | grep -A3 -B3 "JWT\|secret\|api_key"
 ```
 
+## Operational Runbook
+
+Surface enumeration first; per-surface impact assessment second.
+
+### Step 1 — enumerate API versions
+
+```bash
+# Try every plausible version segment against a known path
+for v in v1 v2 v3 v4 v0 api-v1 api/v1 1.0 2.0; do
+  status=$(curl -s -o /dev/null -w '%{http_code}' "<TARGET>/$v/users")
+  echo "$v → $status"
+done
+
+# Each non-404 is a candidate. Older versions often have weaker authz.
+```
+
+### Step 2 — enumerate hostname siblings
+
+```bash
+# Cert transparency reveals every subdomain
+curl -s "https://crt.sh/?q=%25.<DOMAIN>&output=json" | jq -r '.[].name_value' | tr ',' '\n' | sort -u
+
+# Common API hosts to probe
+for sub in api api-staging api-dev api-test api-internal api-private api2 api-old api-legacy api-v1 api-v2 graphql gql; do
+  echo "$sub.<DOMAIN> → $(dig +short $sub.<DOMAIN>)"
+done
+
+# httpx / nuclei pass over the live set
+httpx -l /tmp/subs.txt -title -status-code -tech-detect -o /tmp/live.txt
+```
+
+### Step 3 — debug / swagger / spec discovery
+
+```bash
+# Try every common doc location
+for path in \
+    /openapi.json /swagger.json /swagger/v1/swagger.json \
+    /api-docs /swagger-ui /redoc /docs /docs/api \
+    /graphql /graphql/playground /graphiql \
+    /_api/v1/openapi.json \
+    /metrics /actuator /actuator/env /actuator/heapdump /actuator/mappings \
+    /.well-known/openapi /apispec.json; do
+  status=$(curl -s -o /tmp/probe.txt -w '%{http_code} %{size_download}\n' "<TARGET>$path")
+  echo "$path → $status"
+done
+```
+
+### Step 4 — JS bundle / source-map mining
+
+```bash
+# Pull every JS file; grep for hardcoded API URLs / fetch() patterns
+curl -s '<TARGET>' | grep -oE 'src="[^"]+\.js"' | sed 's/src="//;s/"//'  | \
+    xargs -I {} curl -s "<TARGET>{}" | \
+    grep -oE 'https?://[a-zA-Z0-9./_-]+' | sort -u
+
+# Source maps — full pre-minification source
+for js in $(curl -s '<TARGET>' | grep -oE '[a-zA-Z0-9._-]+\.js'); do
+  curl -sI "<TARGET>/static/$js.map" -o /dev/null -w "$js.map: %{http_code}\n"
+done
+```
+
+### Step 5 — impact per surface
+
+```bash
+# Once a surface is found, probe what it exposes — no auth, then with auth
+for path in /v1/users /v1/admin/users /internal/debug /metrics /actuator/env; do
+  echo "$path (anon):  $(curl -s -o /dev/null -w '%{http_code}' '<TARGET>'$path)"
+  echo "$path (auth):  $(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $TOKEN" '<TARGET>'$path)"
+done
+```
+
+A 200 (anon) on `/metrics` or `/v1/admin/*` is **critical**. A different status (anon → 401, auth → 200) on an undocumented endpoint is the inventory finding itself.
+
 ## Verification
 
 For each surface found:

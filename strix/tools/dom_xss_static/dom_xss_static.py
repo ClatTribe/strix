@@ -425,7 +425,7 @@ def _emit_finding(
         "snippet": snippet,
     }
 
-    return tracer.add_vulnerability_report(
+    finding_id = tracer.add_vulnerability_report(
         title=title,
         severity=severity,
         category="dom_xss",
@@ -448,6 +448,20 @@ def _emit_finding(
         verification_status="pattern_match",
         code_locations=[code_location],
     )
+    try:
+        from strix.agents.kg_emit import record_finding_in_kg
+        record_finding_in_kg(
+            finding_id=finding_id, url=source_url, param=source,
+            cwe="CWE-79", severity=severity, category="dom_xss",
+            method="GET", detection_kind="static_match",
+            confidence=0.75,
+        )
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug(
+            "dom_xss_static: kg record failed: %s", e, exc_info=True,
+        )
+    return finding_id
 
 
 def _start_check(category: str, surface: str) -> str | None:

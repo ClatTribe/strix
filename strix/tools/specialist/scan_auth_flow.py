@@ -521,6 +521,19 @@ def scan_auth_flow(
                     )
                     if rid:
                         emitted_count += 1
+                        try:
+                            from strix.agents.kg_emit import record_finding_in_kg
+                            record_finding_in_kg(
+                                finding_id=rid, url=login_url,
+                                param="default_credential",
+                                cwe="CWE-521", severity="high",
+                                category="auth",
+                                method="POST",
+                                detection_kind="default_corpus_match",
+                                confidence=1.0,
+                            )
+                        except Exception as e:  # noqa: BLE001
+                            logger.debug("scan_auth_flow: kg record failed: %s", e, exc_info=True)
             except Exception as e:  # noqa: BLE001
                 logger.debug("scan_auth_flow: emit failed: %s", e, exc_info=True)
 

