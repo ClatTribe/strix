@@ -39,6 +39,9 @@ from strix.tools.specialist import scan_idor as _scan_idor  # noqa: F401  # Phas
 from strix.tools.specialist import scan_api_rate_limit as _scan_api_rate_limit  # noqa: F401  # api target type
 from strix.tools.specialist import scan_api_bola as _scan_api_bola  # noqa: F401  # api target type / OWASP API1
 from strix.tools.specialist import scan_api_bfla as _scan_api_bfla  # noqa: F401  # api target type / OWASP API5
+from strix.tools.specialist import scan_api_mass_assignment as _scan_api_mass_assignment  # noqa: F401  # api target type / OWASP API3
+from strix.tools.specialist import graphql_introspection_deep as _graphql_introspection_deep  # noqa: F401  # api target type / GraphQL deep
+from strix.tools.specialist import scan_api_grpc_reflection as _scan_api_grpc_reflection  # noqa: F401  # api target type / gRPC
 from strix.tools.specialist import scan_multi_role_auth as _scan_multi_role_auth  # noqa: F401  # Phase 3.1
 from strix.tools.specialist import scan_oauth as _scan_oauth  # noqa: F401  # Phase 2.11
 from strix.tools.specialist import scan_request_smuggling_active as _scan_request_smuggling_active  # noqa: F401  # Phase 2.10

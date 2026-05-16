@@ -214,9 +214,12 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "openapi_spec_ingest",
         # API-specific specialists (OWASP API Top 10 — gaps not
         # covered by the web_application DAST set).
-        "scan_api_rate_limit",   # API4 — Unrestricted Resource Consumption
-        "scan_api_bola",         # API1 — Broken Object Level Authorization
-        "scan_api_bfla",         # API5 — Broken Function Level Authorization
+        "scan_api_rate_limit",       # API4 — Unrestricted Resource Consumption
+        "scan_api_bola",             # API1 — Broken Object Level Authorization
+        "scan_api_bfla",             # API5 — Broken Function Level Authorization
+        "scan_api_mass_assignment",  # API3 — Broken Object Property Level Authorization
+        "graphql_introspection_deep",  # GraphQL deep probe (intro+alias-DoS+depth+mutation auth)
+        "scan_api_grpc_reflection",  # gRPC ServerReflection probe
         # Recon — keep the tech-stack identifier; drop bfs_crawl
         # since openapi_spec_ingest replaces it for API targets.
         "fingerprint_tech_stack", "well_known_harvest",
