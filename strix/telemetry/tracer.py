@@ -907,6 +907,13 @@ class Tracer:
         # file before emitting the finding. Enforced by
         # `validate_canonical_finding`.
         proof_artifact_path: str | None = None,
+        # Depth-of-attack — chain of finding IDs going back to the
+        # root exploit that the post-exploit pivot orchestrator
+        # walked to land on this finding. Length-1 list means the
+        # immediate parent only; deeper lists encode the full
+        # ancestry. Empty / None on root findings (those NOT
+        # produced by `pivot_orchestrator.run_pivot_chain`).
+        pivot_chain_ancestors: list[str] | None = None,
     ) -> str:
         report_id = f"vuln-{len(self.vulnerability_reports) + 1:04d}"
 
@@ -968,6 +975,20 @@ class Tracer:
         # the run dir layout is the caller's contract).
         if isinstance(proof_artifact_path, str) and proof_artifact_path.strip():
             report["proof_artifact_path"] = proof_artifact_path.strip()
+
+        # Depth-of-attack — provenance chain from the pivot orchestrator.
+        # Normalise: list of non-empty strings, deduped, order preserved.
+        if pivot_chain_ancestors:
+            seen: set[str] = set()
+            ancestors: list[str] = []
+            for anc in pivot_chain_ancestors:
+                if isinstance(anc, str) and anc.strip():
+                    key = anc.strip()
+                    if key not in seen:
+                        seen.add(key)
+                        ancestors.append(key)
+            if ancestors:
+                report["pivot_chain_ancestors"] = ancestors
 
         # Kill chain — multi-step finding context. Roadmap §1.
         # Normalize each step so consumers see a stable shape.
