@@ -55,9 +55,30 @@ from typing import Any
 VALID_SEVERITIES = frozenset({"info", "low", "medium", "high", "critical"})
 
 VALID_VERIFICATION_STATUSES = frozenset({
+    # The gradient — least → most evidence:
+    #   * pattern_match  — heuristic / signature fired; no execution
+    #   * needs_review   — signal too ambiguous to auto-classify
+    #   * could_not_verify — scanner tried to confirm and failed
+    #   * inconclusive   — partial signal; auditor judgment needed
+    #   * verified       — exploit-shape confirmed via response diff
+    #                      / oracle / second-stage probe (no impact
+    #                      captured)
+    #   * exploited      — full attack executed end-to-end with
+    #                      proof-of-impact captured (stolen cookie,
+    #                      dumped column, fetched IMDS, captured flag).
+    #                      Requires `proof_artifact_path` on the
+    #                      finding pointing at the captured artifact.
     "verified", "pattern_match", "inconclusive",
-    "needs_review", "could_not_verify",
+    "needs_review", "could_not_verify", "exploited",
 })
+
+
+# Verification statuses that REQUIRE a `proof_artifact_path` —
+# enforcing the "show me the captured impact" contract for the
+# top tier. The artifact path is relative to the run dir; the
+# scanner is responsible for writing the file before emitting
+# the finding.
+PROOF_REQUIRED_VERIFICATION_STATUSES = frozenset({"exploited"})
 
 # Severity bands that REQUIRE §11 UX fields (description_plain +
 # recommended_action). Info-severity findings are exempt because
@@ -150,6 +171,24 @@ def validate_canonical_finding(report: dict[str, Any]) -> list[Violation]:
             ),
             severity="error",
         ))
+
+    # ---- Proof-of-impact required for the `exploited` tier ----
+    if vs in PROOF_REQUIRED_VERIFICATION_STATUSES:
+        proof = report.get("proof_artifact_path")
+        if not isinstance(proof, str) or not proof.strip():
+            violations.append(Violation(
+                code="finding.exploited.missing_proof",
+                field="proof_artifact_path",
+                message=(
+                    "verification_status='exploited' requires "
+                    "`proof_artifact_path` pointing at the captured "
+                    "proof-of-impact (cookie / dumped row / IMDS blob / "
+                    "captured flag). The path is relative to the run "
+                    "dir; the scanner must write the file before "
+                    "emitting the finding."
+                ),
+                severity="error",
+            ))
 
     # ---- Category presence ----
     cat = (report.get("category") or "").strip()

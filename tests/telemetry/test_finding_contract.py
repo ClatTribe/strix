@@ -123,6 +123,52 @@ def test_missing_verification_status_error() -> None:
     assert any(v.code == "finding.missing.verification_status" for v in violations)
 
 
+def test_exploited_status_accepted_with_proof() -> None:
+    """The new `exploited` tier (depth #1) is canonical when the
+    finding also carries `proof_artifact_path`."""
+    report = _canonical_finding(
+        verification_status="exploited",
+        proof_artifact_path="proof_of_impact/abcd.cookie_theft.bin",
+    )
+    violations = validate_canonical_finding(report)
+    assert not any(
+        v.code.startswith("finding.exploited.")
+        or v.code == "finding.verification_status.invalid"
+        for v in violations
+    ), violations
+
+
+def test_exploited_without_proof_path_errors() -> None:
+    """`verification_status='exploited'` without `proof_artifact_path`
+    is a contract violation — the whole point of the tier is the
+    captured artifact."""
+    report = _canonical_finding(verification_status="exploited")
+    report.pop("proof_artifact_path", None)
+    violations = validate_canonical_finding(report)
+    codes = {v.code for v in violations}
+    assert "finding.exploited.missing_proof" in codes
+
+
+def test_exploited_with_blank_proof_path_errors() -> None:
+    """Empty / whitespace-only `proof_artifact_path` is a violation
+    too — same intent."""
+    report = _canonical_finding(
+        verification_status="exploited",
+        proof_artifact_path="   ",
+    )
+    violations = validate_canonical_finding(report)
+    codes = {v.code for v in violations}
+    assert "finding.exploited.missing_proof" in codes
+
+
+def test_non_exploited_status_does_not_require_proof() -> None:
+    """`verified` findings don't need `proof_artifact_path` — only
+    the `exploited` tier carries the artifact contract."""
+    report = _canonical_finding(verification_status="verified")
+    violations = validate_canonical_finding(report)
+    assert not any(v.code == "finding.exploited.missing_proof" for v in violations)
+
+
 def test_missing_category_error() -> None:
     report = _canonical_finding()
     del report["category"]
