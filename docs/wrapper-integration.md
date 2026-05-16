@@ -43,8 +43,61 @@ Entry point: `strix` (defined in `pyproject.toml` →
 
 | Flag | Type | Notes |
 |---|---|---|
-| `-t / --target` | repeatable | URL, IP, domain, or local path. `action="append"` — pass `-t a -t b` for paired-asset scans (web + code, IP + service). |
+| `-t / --target` | repeatable | URL, IP, domain, or local path. `action="append"` — pass `-t a -t b` for paired-asset scans (web + code, IP + service). Optional `<type>:<value>` prefix forces target-type classification — see §1a. |
 | `STRIX_LLM` (env) | required | litellm-format model name, e.g. `anthropic/claude-opus-4`, `openai/gpt-5.4`. Strix exits at startup if unset. |
+
+### 1a. Target-type prefix on `--target`
+
+By default strix infers the target type from the value's shape
+(URL → `web_application`, dir → `local_code`, IP/CIDR →
+`ip_address`, git URL → `repository`). This is fine for humans
+on the CLI but ambiguous for wrappers — a JSON API at
+`https://api.example.com` looks identical to a web app at
+`https://example.com`, but the two should run different tool
+catalogs (PR #267 added the `api` target type and dropped
+browser / DOM tools from its catalog).
+
+The fix: pass `<type>:<value>` on `--target`. Strix accepts the
+override and skips inference.
+
+```bash
+# Force API target type (skips xss / browser / source_map tools,
+# enables openapi_spec_ingest + BOLA / BFLA / mass-assignment
+# / rate_limit specialists)
+strix -n --target api:https://api.example.com
+
+# Explicit web_application (redundant today, but self-documenting
+# in wrapper-generated commands)
+strix -n --target web_application:https://example.com
+
+# Multi-target scan mixing the two
+strix -n \
+  --target api:https://api.example.com \
+  --target web_application:https://www.example.com \
+  --target repository:https://github.com/org/repo
+```
+
+| Prefix | Inner value shape | Notes |
+|---|---|---|
+| `api:` | URL or bare host[/path] | Skips the git-repo HTTP probe — deterministic regardless of network reachability. Routes to the `api` tool catalog (≈50 tools; browser/DOM dropped). |
+| `web_application:` | URL or bare host[/path] | Same as bare URL today. Self-documenting for wrappers. |
+| `repository:` | `https://…/.git`, `git@…`, etc. | Must match `repository` inference; errors otherwise. |
+| `local_code:` | Existing directory path | Must match `local_code` inference. |
+| `ip_address:` | IPv4 / IPv6 / CIDR | Must match `ip_address` inference. |
+
+If the value's shape doesn't match the override, strix exits with
+config-error code **1** and a message like:
+
+```
+Target 'repository:https://example.com' uses prefix `repository:` but
+its value parses as `web_application`. Use the matching prefix or
+drop the prefix to rely on inference.
+```
+
+Wrapper recipe: when the tenant tells the UI "this is an API
+target," generate `--target api:<url>`. When they pick "web app,"
+generate `--target web_application:<url>` (or just the bare URL —
+both work).
 
 ### Headless / wrapper-friendly
 
@@ -741,5 +794,6 @@ Each should be a tracked issue.
 | No resumable scans | Re-run on worker failure with new run_id |
 | `~/.strix/` caches are global per UID | Run each scan as a unique UID, or mount `~/.strix` as a per-scan emptyDir |
 | Run-signature key (`STRIX_SIGNING_KEY`) is a path — no in-memory mode | Mount as a tmpfs secret |
+| Auth profile flip for `api` target type (Bearer-by-default) | Wrapper passes `--auth-bearer` explicitly; engine doesn't auto-prefer it for `api:` yet (PR #267 punted; tracked as item 2 in the api-target roadmap). |
 
 When you close one of these gaps in code, delete the row.

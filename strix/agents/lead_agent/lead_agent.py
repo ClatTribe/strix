@@ -328,6 +328,21 @@ _PER_ASSET_GUIDANCE: dict[str, str] = {
         "HTTP service found here as if it were a web_application target "
         "and probe it with `send_request`."
     ),
+    "api": (
+        "API target: anchor on `openapi_spec_ingest` FIRST to inventory "
+        "every (path, method) into the Surface namespace — that's the "
+        "canonical endpoint list the specialists fan out over. Then run "
+        "the API-Top-10 specialists: `scan_api_bola` (object-level "
+        "authz), `scan_api_bfla` (function-level authz), "
+        "`scan_api_mass_assignment` (unexpected-property writes via "
+        "JSON body), `scan_api_rate_limit`, plus the shared DAST set "
+        "(`scan_sqli` / `scan_ssrf` / `scan_xxe` / `scan_auth_flow` / "
+        "`scan_business_logic` / `scan_oauth`). For GraphQL endpoints "
+        "use `graphql_specialist_check`; for gRPC reflection-enabled "
+        "services use `grpc_reflection_probe`. DO NOT call browser / "
+        "DOM-rendering tools — they're dropped from the api tool "
+        "catalog because pure-JSON APIs return no HTML to render."
+    ),
 }
 
 
