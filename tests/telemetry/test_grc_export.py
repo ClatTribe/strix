@@ -45,7 +45,7 @@ def _findings() -> list[dict[str, Any]]:
             "compliance_controls": {
                 "soc2": ["CC6.1"],
                 "pci_dss": ["6.5.1"],
-                "iso_27001": ["A.14.2.5"],
+                "iso27001": ["A.8.26"],
             },
         },
         {
@@ -159,7 +159,7 @@ def test_hyperproof_emits_one_record_per_control() -> None:
     frameworks = {r["framework"] for r in out["records"]}
     assert "soc2" in frameworks
     assert "pci_dss" in frameworks
-    assert "iso_27001" in frameworks
+    assert "iso27001" in frameworks
 
 
 def test_hyperproof_unmapped_finding_gets_unmapped_record() -> None:

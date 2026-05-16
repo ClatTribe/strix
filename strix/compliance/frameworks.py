@@ -38,6 +38,10 @@ FRAMEWORK_ISO27001 = "iso27001"
 FRAMEWORK_PCI_DSS = "pci_dss"
 FRAMEWORK_OWASP_ASVS = "owasp_asvs"
 FRAMEWORK_HIPAA = "hipaa"
+FRAMEWORK_OWASP_TOP10 = "owasp_top10"
+FRAMEWORK_GDPR = "gdpr"
+FRAMEWORK_NIST_800_53 = "nist_800_53"
+FRAMEWORK_CIS = "cis"
 
 ALL_FRAMEWORKS = [
     FRAMEWORK_SOC2,
@@ -45,6 +49,10 @@ ALL_FRAMEWORKS = [
     FRAMEWORK_PCI_DSS,
     FRAMEWORK_OWASP_ASVS,
     FRAMEWORK_HIPAA,
+    FRAMEWORK_OWASP_TOP10,
+    FRAMEWORK_GDPR,
+    FRAMEWORK_NIST_800_53,
+    FRAMEWORK_CIS,
 ]
 
 
@@ -674,6 +682,242 @@ _HIPAA_CONTROLS: dict[str, Control] = {
 
 
 # ---------------------------------------------------------------------------
+# OWASP Top 10 (2021) — awareness document, distinct from ASVS
+# ---------------------------------------------------------------------------
+
+# Top 10 categorises the most common application-security risks.
+# Many compliance frameworks (SOC 2, PCI) reference it as a
+# baseline coverage map.
+
+_OWASP_TOP10_CONTROLS: dict[str, Control] = {
+    "A01:2021": Control(
+        FRAMEWORK_OWASP_TOP10, "A01:2021",
+        "Broken Access Control",
+        "Restrictions on what authenticated users are allowed "
+        "to do are often not properly enforced.",
+    ),
+    "A02:2021": Control(
+        FRAMEWORK_OWASP_TOP10, "A02:2021",
+        "Cryptographic Failures",
+        "Failures related to cryptography (or lack thereof) — "
+        "often lead to exposure of sensitive data.",
+    ),
+    "A03:2021": Control(
+        FRAMEWORK_OWASP_TOP10, "A03:2021",
+        "Injection",
+        "User-supplied data is not validated, filtered, or "
+        "sanitized — SQL / NoSQL / OS / LDAP injection.",
+    ),
+    "A04:2021": Control(
+        FRAMEWORK_OWASP_TOP10, "A04:2021",
+        "Insecure Design",
+        "Design flaws that cannot be fixed by a perfect "
+        "implementation — covers missing controls.",
+    ),
+    "A05:2021": Control(
+        FRAMEWORK_OWASP_TOP10, "A05:2021",
+        "Security Misconfiguration",
+        "Missing appropriate security hardening, "
+        "improperly-configured permissions, default accounts.",
+    ),
+    "A06:2021": Control(
+        FRAMEWORK_OWASP_TOP10, "A06:2021",
+        "Vulnerable and Outdated Components",
+        "Use of components with known vulnerabilities; "
+        "components are out of date / no longer supported.",
+    ),
+    "A07:2021": Control(
+        FRAMEWORK_OWASP_TOP10, "A07:2021",
+        "Identification and Authentication Failures",
+        "Confirmation of the user's identity, authentication, "
+        "and session management is critical.",
+    ),
+    "A08:2021": Control(
+        FRAMEWORK_OWASP_TOP10, "A08:2021",
+        "Software and Data Integrity Failures",
+        "Code + infrastructure that does not protect against "
+        "integrity violations (insecure deserialisation, etc).",
+    ),
+    "A09:2021": Control(
+        FRAMEWORK_OWASP_TOP10, "A09:2021",
+        "Security Logging and Monitoring Failures",
+        "Insufficient logging + monitoring, coupled with missing "
+        "or ineffective incident response.",
+    ),
+    "A10:2021": Control(
+        FRAMEWORK_OWASP_TOP10, "A10:2021",
+        "Server-Side Request Forgery (SSRF)",
+        "Web application fetches a remote resource without "
+        "validating the user-supplied URL.",
+    ),
+    "API6:2023": Control(
+        FRAMEWORK_OWASP_TOP10, "API6:2023",
+        "Unrestricted Access to Sensitive Business Flows (API)",
+        "OWASP API Security Top 10 — automated abuse of "
+        "business flows / mass assignment.",
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# GDPR — General Data Protection Regulation (EU 2016/679)
+# ---------------------------------------------------------------------------
+
+# We carry Art.32 (Security of processing) which is the article
+# most AppSec findings implicate. Other articles (Art.25 Privacy
+# by design, Art.33 Breach notification) are operational + legal
+# work; we carry them as untested entries so the wrapper can
+# flag coverage gaps.
+
+_GDPR_CONTROLS: dict[str, Control] = {
+    "Art.25": Control(
+        FRAMEWORK_GDPR, "Art.25",
+        "Data protection by design and by default",
+        "Implement appropriate technical + organisational "
+        "measures designed to implement data-protection "
+        "principles.",
+    ),
+    "Art.32": Control(
+        FRAMEWORK_GDPR, "Art.32",
+        "Security of processing",
+        "Implement appropriate technical + organisational "
+        "measures to ensure a level of security appropriate "
+        "to the risk — encryption, integrity, confidentiality, "
+        "availability, resilience.",
+    ),
+    "Art.33": Control(
+        FRAMEWORK_GDPR, "Art.33",
+        "Notification of personal data breach to supervisory authority",
+        "Notify the supervisory authority within 72 hours of "
+        "becoming aware of a personal data breach.",
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# NIST SP 800-53 (Rev. 5) — control families
+# ---------------------------------------------------------------------------
+
+# We carry the controls strix's AppSec rules cleanly map to.
+# Categories: AC (Access Control), IA (Identification and
+# Authentication), SC (System & Communications Protection),
+# SI (System & Information Integrity), CM (Configuration
+# Management).
+
+_NIST_800_53_CONTROLS: dict[str, Control] = {
+    "AC-3": Control(
+        FRAMEWORK_NIST_800_53, "AC-3",
+        "Access enforcement",
+        "Enforce approved authorizations for logical access to "
+        "information + system resources.",
+    ),
+    "AC-4": Control(
+        FRAMEWORK_NIST_800_53, "AC-4",
+        "Information flow enforcement",
+        "Control information flows within the system + between "
+        "connected systems (CORS, network egress).",
+    ),
+    "AC-6": Control(
+        FRAMEWORK_NIST_800_53, "AC-6",
+        "Least privilege",
+        "Employ the principle of least privilege, allowing only "
+        "authorized accesses for users / processes.",
+    ),
+    "CM-6": Control(
+        FRAMEWORK_NIST_800_53, "CM-6",
+        "Configuration settings",
+        "Establish + document configuration settings; identify, "
+        "document, approve deviations.",
+    ),
+    "IA-2": Control(
+        FRAMEWORK_NIST_800_53, "IA-2",
+        "Identification and authentication (organizational users)",
+        "Uniquely identify + authenticate organizational users + "
+        "associate that identity with processes acting on their "
+        "behalf.",
+    ),
+    "IA-11": Control(
+        FRAMEWORK_NIST_800_53, "IA-11",
+        "Re-authentication",
+        "Re-authenticate users when defined events occur "
+        "(role change, idle session timeout).",
+    ),
+    "SC-7": Control(
+        FRAMEWORK_NIST_800_53, "SC-7",
+        "Boundary protection",
+        "Monitor + control communications at the external + "
+        "internal boundaries of the system.",
+    ),
+    "SC-13": Control(
+        FRAMEWORK_NIST_800_53, "SC-13",
+        "Cryptographic protection",
+        "Use approved cryptography to protect information; "
+        "implement key management.",
+    ),
+    "SC-28": Control(
+        FRAMEWORK_NIST_800_53, "SC-28",
+        "Protection of information at rest",
+        "Protect the confidentiality + integrity of information "
+        "at rest.",
+    ),
+    "SI-2": Control(
+        FRAMEWORK_NIST_800_53, "SI-2",
+        "Flaw remediation",
+        "Identify, report, correct system flaws (vulnerability "
+        "management — patching cadence).",
+    ),
+    "SI-7": Control(
+        FRAMEWORK_NIST_800_53, "SI-7",
+        "Software, firmware, information integrity",
+        "Employ integrity verification tools to detect "
+        "unauthorized changes (SRI, code signing).",
+    ),
+    "SI-10": Control(
+        FRAMEWORK_NIST_800_53, "SI-10",
+        "Information input validation",
+        "Check the validity of information inputs (defeat "
+        "injection attacks).",
+    ),
+    "SI-11": Control(
+        FRAMEWORK_NIST_800_53, "SI-11",
+        "Error handling",
+        "Generate error messages providing information needed "
+        "for corrective actions without revealing sensitive "
+        "information.",
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# CIS Controls v8
+# ---------------------------------------------------------------------------
+
+# Center for Internet Security — operational controls. We carry
+# only the AppSec-relevant subset.
+
+_CIS_CONTROLS: dict[str, Control] = {
+    "16.10": Control(
+        FRAMEWORK_CIS, "16.10",
+        "Apply secure design principles in application architectures",
+        "Apply secure-design principles. Defensive techniques "
+        "such as least privilege + parameterised queries.",
+    ),
+    "16.11": Control(
+        FRAMEWORK_CIS, "16.11",
+        "Leverage vetted modules / services for application security",
+        "Use vetted third-party libraries / frameworks. SCA + "
+        "supply-chain controls.",
+    ),
+    "16.13": Control(
+        FRAMEWORK_CIS, "16.13",
+        "Conduct application penetration testing",
+        "Conduct application penetration testing — manual or "
+        "automated DAST against deployed code.",
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -684,6 +928,10 @@ _FRAMEWORK_CATALOGS: dict[str, dict[str, Control]] = {
     FRAMEWORK_PCI_DSS: _PCI_DSS_CONTROLS,
     FRAMEWORK_OWASP_ASVS: _OWASP_ASVS_CONTROLS,
     FRAMEWORK_HIPAA: _HIPAA_CONTROLS,
+    FRAMEWORK_OWASP_TOP10: _OWASP_TOP10_CONTROLS,
+    FRAMEWORK_GDPR: _GDPR_CONTROLS,
+    FRAMEWORK_NIST_800_53: _NIST_800_53_CONTROLS,
+    FRAMEWORK_CIS: _CIS_CONTROLS,
 }
 
 

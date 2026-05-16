@@ -24,12 +24,22 @@ from strix.compliance.frameworks import (
 
 
 def test_all_frameworks_registered() -> None:
+    from strix.compliance.frameworks import (
+        FRAMEWORK_CIS,
+        FRAMEWORK_GDPR,
+        FRAMEWORK_NIST_800_53,
+        FRAMEWORK_OWASP_TOP10,
+    )
     assert FRAMEWORK_SOC2 in ALL_FRAMEWORKS
     assert FRAMEWORK_ISO27001 in ALL_FRAMEWORKS
     assert FRAMEWORK_PCI_DSS in ALL_FRAMEWORKS
     assert FRAMEWORK_OWASP_ASVS in ALL_FRAMEWORKS
     assert FRAMEWORK_HIPAA in ALL_FRAMEWORKS
-    assert len(ALL_FRAMEWORKS) == 5
+    assert FRAMEWORK_OWASP_TOP10 in ALL_FRAMEWORKS
+    assert FRAMEWORK_GDPR in ALL_FRAMEWORKS
+    assert FRAMEWORK_NIST_800_53 in ALL_FRAMEWORKS
+    assert FRAMEWORK_CIS in ALL_FRAMEWORKS
+    assert len(ALL_FRAMEWORKS) == 9
 
 
 def test_hipaa_has_technical_safeguards() -> None:
@@ -53,10 +63,12 @@ def test_hipaa_has_administrative_safeguards() -> None:
 
 
 def test_each_framework_has_controls() -> None:
-    """Anti-rot — every framework catalog should be non-empty."""
+    """Anti-rot — every framework catalog should be non-empty. GDPR
+    + CIS catalogs are intentionally narrow (only the AppSec-testable
+    subset; Art.32 is the load-bearing one), so the floor is 3."""
     for fw in ALL_FRAMEWORKS:
         controls = get_framework_controls(fw)
-        assert len(controls) >= 5, fw
+        assert len(controls) >= 3, fw
 
 
 def test_soc2_has_cc6_controls() -> None:

@@ -47,8 +47,9 @@ def test_sqli_maps_to_pci_owasp_iso() -> None:
     })
     controls = out["compliance_controls"]
     assert "6.5.1" in controls["pci_dss"]
-    assert "A03:2021" in controls["owasp"]
-    assert "A.14.2.5" in controls["iso_27001"]
+    assert "A03:2021" in controls["owasp_top10"]
+    assert "A.8.26" in controls["iso27001"]   # ISO 27001:2022 numbering
+    assert "CC6.1" in controls["soc2"]
     assert "CC6.6" in controls["soc2"]
 
 
@@ -58,7 +59,7 @@ def test_csrf_maps_to_pci_owasp() -> None:
     })
     controls = out["compliance_controls"]
     assert "6.5.9" in controls["pci_dss"]
-    assert "A01:2021" in controls["owasp"]
+    assert "A01:2021" in controls["owasp_top10"]
 
 
 def test_weak_crypto_maps_to_hipaa_gdpr() -> None:
@@ -337,5 +338,7 @@ def test_recent_pr_cwes_all_have_at_least_one_control(cwe) -> None:
     assert "compliance_controls" in out, f"{cwe} not mapped"
     controls = out["compliance_controls"]
     # At least one framework has at least one control.
-    assert any(controls.get(fw) for fw in ("soc2", "pci_dss", "iso_27001",
-                                            "nist_800_53", "owasp", "hipaa", "gdpr", "cis"))
+    assert any(controls.get(fw) for fw in (
+        "soc2", "pci_dss", "iso27001", "owasp_asvs",
+        "nist_800_53", "owasp_top10", "hipaa", "gdpr", "cis",
+    ))

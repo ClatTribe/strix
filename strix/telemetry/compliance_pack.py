@@ -61,10 +61,11 @@ logger = logging.getLogger(__name__)
 
 
 # Frameworks we render in the control_attestation.md rollup. Keep
-# in sync with the keys in `enrich_finding_with_compliance` (#103).
+# in sync with `strix.compliance.frameworks.ALL_FRAMEWORKS` —
+# the single source of truth for framework keys.
 _FRAMEWORKS = (
-    "soc2", "pci_dss", "iso_27001", "hipaa", "gdpr",
-    "nist_800_53", "owasp", "cis",
+    "soc2", "pci_dss", "iso27001", "owasp_asvs", "hipaa",
+    "owasp_top10", "gdpr", "nist_800_53", "cis",
 )
 
 
@@ -147,11 +148,12 @@ def _build_control_attestation(
     framework_human = {
         "soc2": "SOC 2 (Trust Services Criteria)",
         "pci_dss": "PCI-DSS v4",
-        "iso_27001": "ISO 27001 Annex A",
-        "hipaa": "HIPAA Security Rule",
+        "iso27001": "ISO 27001:2022 Annex A",
+        "owasp_asvs": "OWASP ASVS 4.0",
+        "hipaa": "HIPAA Security Rule (45 CFR §164)",
+        "owasp_top10": "OWASP Top 10 / API Top 10",
         "gdpr": "GDPR Art. 32",
-        "nist_800_53": "NIST 800-53",
-        "owasp": "OWASP Top 10 / API Top 10",
+        "nist_800_53": "NIST 800-53 Rev.5",
         "cis": "CIS Controls v8",
     }
 
