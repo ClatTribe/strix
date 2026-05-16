@@ -73,7 +73,9 @@ logger = logging.getLogger(__name__)
 
 
 _TRIVY_BIN = "trivy"
+_COSIGN_BIN = "cosign"
 _DEFAULT_TIMEOUT_SECONDS = 600
+_COSIGN_TIMEOUT_SECONDS = 60
 
 
 # Map Trivy's severity strings to strix's canonical lowercase set.
@@ -577,6 +579,419 @@ def _emit_secret_finding(
         return None
 
 
+# ===========================================================================
+# Phase 5 — cosign signature + SLSA attestation verification.
+# ===========================================================================
+#
+# Run via the `cosign` binary when available. Two probe paths:
+#   1. `cosign verify <image>` — confirms image is signed.
+#   2. `cosign verify-attestation --type slsaprovenance <image>` —
+#      confirms SLSA provenance attestation exists.
+#
+# Operators can pin the EXPECTED signer identity / OIDC issuer via
+# `STRIX_COSIGN_EXPECTED_IDENTITY` / `STRIX_COSIGN_EXPECTED_ISSUER`
+# env vars (regex form per cosign's --certificate-identity-regexp /
+# --certificate-oidc-issuer-regexp). Without an expectation, we
+# attempt keyless verification (Fulcio root) and fall back to
+# "unsigned" if cosign rejects.
+#
+# Findings emitted under category `image_signing`:
+#   * **Unsigned image** — high (when policy expects signing) or
+#     medium (when policy is "best-effort").
+#   * **Missing SLSA provenance** — medium. Required for SLSA L2+
+#     attestation but optional for L1.
+#
+# Successful verification is recorded in `tool_metadata` for audit
+# trail (no finding emitted — verification success is the expected
+# state, not a vulnerability).
+
+
+def _cosign_disabled() -> bool:
+    return os.environ.get("STRIX_COSIGN_DISABLED", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _cosign_available() -> bool:
+    """True iff `cosign` binary is on PATH AND not disabled via env."""
+    if _cosign_disabled():
+        return False
+    return shutil.which(_COSIGN_BIN) is not None
+
+
+def _cosign_expected_identity() -> str | None:
+    """Operator-pinned signer identity (regex). None when not set —
+    cosign falls back to keyless Fulcio verification."""
+    val = os.environ.get(
+        "STRIX_COSIGN_EXPECTED_IDENTITY", "",
+    ).strip()
+    return val or None
+
+
+def _cosign_expected_issuer() -> str | None:
+    """Operator-pinned OIDC issuer (regex). None when not set."""
+    val = os.environ.get(
+        "STRIX_COSIGN_EXPECTED_ISSUER", "",
+    ).strip()
+    return val or None
+
+
+def _signing_policy_strict() -> bool:
+    """When True (`STRIX_COSIGN_REQUIRE_SIGNED=1`), an unsigned
+    image emits as `high` severity (image MUST be signed).
+    Default `False` — unsigned emits as `medium`."""
+    return os.environ.get(
+        "STRIX_COSIGN_REQUIRE_SIGNED", "",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _run_cosign_verify(
+    image_ref: str, *, timeout_seconds: int = _COSIGN_TIMEOUT_SECONDS,
+) -> tuple[bool, dict[str, Any] | None, str | None]:
+    """Run `cosign verify <image-ref>`. Returns
+    `(signed, payload, error)`.
+
+      * `signed=True` + `payload=<dict>` — verification succeeded;
+        the payload carries the signer certificate metadata.
+      * `signed=False` + `error=<reason>` — verification failed
+        OR cosign exited non-zero with a clear reason. The
+        finding emits with the error string in
+        `technical_analysis`.
+      * `signed=False` + `error=None` — cosign exited non-zero
+        without a clear reason (network error, malformed image).
+        Surfaced as a low-fidelity unsigned finding.
+    """
+    cmd = [
+        _COSIGN_BIN, "verify",
+        "--output", "json",
+    ]
+    identity = _cosign_expected_identity()
+    issuer = _cosign_expected_issuer()
+    if identity:
+        cmd.extend(["--certificate-identity-regexp", identity])
+    if issuer:
+        cmd.extend(["--certificate-oidc-issuer-regexp", issuer])
+    else:
+        # When no issuer is pinned, opt out of the experimental
+        # gate and let cosign default-verify against Fulcio.
+        # Newer cosign releases require --insecure-ignore-tlog for
+        # transparency-log-disabled runs; we ASSUME tlog is on
+        # (Sigstore default) so omit that flag.
+        pass
+    cmd.append(image_ref)
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            cmd, check=False, capture_output=True,
+            timeout=timeout_seconds, text=True,
+        )
+    except subprocess.TimeoutExpired:
+        return False, None, (
+            f"cosign verify timed out after {timeout_seconds}s"
+        )
+    except OSError as e:
+        return False, None, (
+            f"cosign invocation failed: {type(e).__name__}: {e}"
+        )
+
+    if result.returncode != 0:
+        return False, None, (
+            f"cosign verify exit {result.returncode}: "
+            f"{(result.stderr or '').strip()[:500]}"
+        )
+
+    payload: dict[str, Any] | None = None
+    if result.stdout.strip():
+        try:
+            parsed = json.loads(result.stdout)
+            if isinstance(parsed, list) and parsed:
+                payload = parsed[0]
+            elif isinstance(parsed, dict):
+                payload = parsed
+        except json.JSONDecodeError:
+            payload = None
+
+    return True, payload, None
+
+
+def _run_cosign_verify_attestation(
+    image_ref: str,
+    *,
+    attestation_type: str = "slsaprovenance",
+    timeout_seconds: int = _COSIGN_TIMEOUT_SECONDS,
+) -> tuple[bool, dict[str, Any] | None, str | None]:
+    """Run `cosign verify-attestation --type <type> <image-ref>`.
+    Returns `(present, payload, error)` — same shape as
+    `_run_cosign_verify`. Default attestation type is
+    `slsaprovenance` (SLSA build provenance)."""
+    cmd = [
+        _COSIGN_BIN, "verify-attestation",
+        "--type", attestation_type,
+        "--output", "json",
+    ]
+    identity = _cosign_expected_identity()
+    issuer = _cosign_expected_issuer()
+    if identity:
+        cmd.extend(["--certificate-identity-regexp", identity])
+    if issuer:
+        cmd.extend(["--certificate-oidc-issuer-regexp", issuer])
+    cmd.append(image_ref)
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            cmd, check=False, capture_output=True,
+            timeout=timeout_seconds, text=True,
+        )
+    except subprocess.TimeoutExpired:
+        return False, None, (
+            f"cosign verify-attestation timed out"
+        )
+    except OSError as e:
+        return False, None, (
+            f"cosign invocation failed: {type(e).__name__}: {e}"
+        )
+
+    if result.returncode != 0:
+        return False, None, (
+            f"cosign verify-attestation exit {result.returncode}: "
+            f"{(result.stderr or '').strip()[:500]}"
+        )
+
+    payload: dict[str, Any] | None = None
+    if result.stdout.strip():
+        try:
+            parsed = json.loads(result.stdout)
+            if isinstance(parsed, list) and parsed:
+                payload = parsed[0]
+            elif isinstance(parsed, dict):
+                payload = parsed
+        except json.JSONDecodeError:
+            payload = None
+
+    return True, payload, None
+
+
+def _extract_signer_identity(payload: dict[str, Any] | None) -> str:
+    """Pull the signer identity (cert subject / OIDC identity) from
+    cosign's verify output. Returns "" when not parseable —
+    auditors will still see the raw payload via attached evidence."""
+    if not isinstance(payload, dict):
+        return ""
+    # Cosign payload shape: `{critical: {...}, optional: {Subject: ..., Issuer: ...}}`
+    # OR (newer cosign) `{ApiVersion, Cert, ...}`. Try both.
+    opt = payload.get("optional") or {}
+    if isinstance(opt, dict):
+        subj = opt.get("Subject") or opt.get("subject")
+        if isinstance(subj, str) and subj.strip():
+            return subj.strip()
+    cert = payload.get("Cert") or payload.get("cert")
+    if isinstance(cert, str):
+        # Newer cosign emits the PEM cert; first 32 chars is enough
+        # to identify the signer in audit logs.
+        return cert.strip()[:60]
+    return ""
+
+
+def _extract_slsa_builder(payload: dict[str, Any] | None) -> str:
+    """Pull the SLSA builder ID + source repo from cosign's
+    verify-attestation output. Returns "" when not parseable."""
+    if not isinstance(payload, dict):
+        return ""
+    # Attestation payload is base64 in `payload` field; parse if
+    # present. Newer cosign already decodes — try both.
+    predicate = (
+        payload.get("predicate")
+        or payload.get("Predicate")
+        or {}
+    )
+    if isinstance(predicate, dict):
+        builder = predicate.get("builder") or predicate.get("Builder")
+        if isinstance(builder, dict):
+            bid = builder.get("id") or builder.get("ID") or ""
+            if isinstance(bid, str) and bid.strip():
+                return bid.strip()
+    return ""
+
+
+def _emit_unsigned_image_finding(
+    *, image_ref: str, error: str | None, severity: str,
+) -> str | None:
+    """Emit a finding when cosign verify fails."""
+    try:
+        from strix.telemetry.tracer import get_global_tracer
+
+        tracer = get_global_tracer()
+        if tracer is None:
+            return None
+        identity = _cosign_expected_identity()
+        issuer = _cosign_expected_issuer()
+        policy_block = (
+            f"\n\nExpected signer identity (regex): `{identity}`"
+            if identity else ""
+        ) + (
+            f"\nExpected OIDC issuer (regex): `{issuer}`"
+            if issuer else ""
+        )
+        return tracer.add_vulnerability_report(
+            title=f"Unsigned container image: {image_ref}",
+            severity=severity,
+            cwe="CWE-345",
+            endpoint=image_ref,
+            target=image_ref,
+            category="image_signing",
+            verification_status="verified",
+            confidence=0.95,
+            description=(
+                f"`cosign verify {image_ref}` failed: image is not "
+                f"signed by a trusted signer, OR the supplied "
+                f"identity/issuer policy did not match.\n\n"
+                f"Cosign error: {error or '(no detail)'}{policy_block}"
+            ),
+            impact=(
+                "Unsigned container images bypass the supply-chain "
+                "integrity layer. An attacker who compromises the "
+                "registry (or the build pipeline) can substitute a "
+                "malicious image and downstream pulls have no way "
+                "to detect the substitution. Required by SLSA L2+; "
+                "expected by SOC 2 CC9.2 supply-chain controls; "
+                "EO 14028-aligned organisations treat as a finding."
+            ),
+            technical_analysis=(
+                f"Image: {image_ref}\n"
+                f"Verification result: FAILED\n"
+                f"Cosign stderr: {error or '(empty)'}\n"
+                f"Policy identity regex: {identity or '(unpinned)'}\n"
+                f"Policy issuer regex: {issuer or '(unpinned)'}"
+            ),
+            poc_description=(
+                f"1. Try the verification yourself:\n"
+                f"   `cosign verify --output json {image_ref}`\n"
+                f"2. Cosign exits non-zero when no Sigstore "
+                f"transparency-log entry binds the image digest to "
+                f"a verifiable signer.\n"
+                f"3. Cross-reference your build pipeline's signing "
+                f"step (typically a `cosign sign` call after image "
+                f"push) — it should be wired between build and "
+                f"production deploy."
+            ),
+            poc_script_code=f"cosign verify --output json {image_ref}",
+            remediation_steps=(
+                "1. Add `cosign sign` to the image build pipeline "
+                "AFTER push. Sigstore keyless flow needs no key "
+                "material; GitHub Actions ships an OIDC token "
+                "cosign consumes automatically.\n"
+                "2. Set `STRIX_COSIGN_EXPECTED_IDENTITY` to a "
+                "regex pinning the workflow path (e.g. "
+                "`https://github.com/myorg/.+/.github/workflows/build.yml@refs/heads/main`).\n"
+                "3. Set `STRIX_COSIGN_REQUIRE_SIGNED=1` to escalate "
+                "subsequent unsigned-image findings to `high` "
+                "severity.\n"
+                "4. Optionally enforce signing at deploy with a "
+                "Kubernetes admission controller (Kyverno / Connaisseur / "
+                "OPA Gatekeeper)."
+            ),
+            cvss_breakdown=None,
+            reasoning_trace=[
+                f"Ran `cosign verify --output json {image_ref}`.",
+                f"Cosign exited non-zero — image is unsigned OR "
+                f"signer does not match policy.",
+                f"Error: {error or '(no detail)'}",
+                f"Severity: {severity} "
+                f"(strict={_signing_policy_strict()}).",
+            ],
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "scan_container_image: unsigned finding emit failed: %s",
+            e, exc_info=True,
+        )
+        return None
+
+
+def _emit_missing_slsa_finding(
+    *, image_ref: str, error: str | None,
+) -> str | None:
+    """Emit a finding when cosign verify-attestation
+    (--type slsaprovenance) fails."""
+    try:
+        from strix.telemetry.tracer import get_global_tracer
+
+        tracer = get_global_tracer()
+        if tracer is None:
+            return None
+        return tracer.add_vulnerability_report(
+            title=f"Missing SLSA provenance attestation: {image_ref}",
+            severity="medium",
+            cwe="CWE-345",
+            endpoint=image_ref,
+            target=image_ref,
+            category="image_signing",
+            verification_status="verified",
+            confidence=0.92,
+            description=(
+                f"`cosign verify-attestation --type slsaprovenance "
+                f"{image_ref}` did not find a valid SLSA Provenance "
+                f"attestation for this image. Required by SLSA L2 "
+                f"and above; even SLSA L1 organisations should "
+                f"emit provenance to satisfy supply-chain audits.\n\n"
+                f"Cosign error: {error or '(no detail)'}"
+            ),
+            impact=(
+                "Without a SLSA Provenance attestation, downstream "
+                "consumers cannot verify which builder produced "
+                "the image, from which source revision, with which "
+                "build inputs. Forensics after a supply-chain "
+                "compromise becomes near-impossible. SLSA L2 / EO "
+                "14028 / NIST SSDF expect provenance on every "
+                "production artefact."
+            ),
+            technical_analysis=(
+                f"Image: {image_ref}\n"
+                f"Attestation type queried: slsaprovenance\n"
+                f"Cosign stderr: {error or '(empty)'}"
+            ),
+            poc_description=(
+                f"1. `cosign verify-attestation --type "
+                f"slsaprovenance --output json {image_ref}`\n"
+                f"2. Cosign returns non-zero when no SLSA "
+                f"attestation is bound to the image digest in the "
+                f"Sigstore transparency log."
+            ),
+            poc_script_code=(
+                f"cosign verify-attestation --type slsaprovenance "
+                f"--output json {image_ref}"
+            ),
+            remediation_steps=(
+                "1. Add a `cosign attest --type slsaprovenance` "
+                "step to the build pipeline AFTER image push. The "
+                "predicate should be the build system's SLSA "
+                "Provenance JSON (GitHub Actions: use "
+                "`actions/attest-build-provenance`; GitLab: use "
+                "the SLSA generator).\n"
+                "2. Pin builder identity via "
+                "`STRIX_COSIGN_EXPECTED_IDENTITY` so attestations "
+                "from a rogue builder are rejected.\n"
+                "3. At deploy time enforce attestation presence "
+                "via the same admission controller that enforces "
+                "signing."
+            ),
+            cvss_breakdown=None,
+            reasoning_trace=[
+                f"Ran cosign verify-attestation --type "
+                f"slsaprovenance --output json {image_ref}.",
+                f"Cosign exited non-zero — no provenance "
+                f"attestation found.",
+                f"Error: {error or '(no detail)'}",
+            ],
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "scan_container_image: slsa finding emit failed: %s",
+            e, exc_info=True,
+        )
+        return None
+
+
 def _decorate_with_threat_intel(
     cve_id: str, trivy_severity: str,
 ) -> tuple[str, bool, float | None]:
@@ -1032,6 +1447,93 @@ def scan_container_image(
                 f"(category={category_short}, severity={trivy_sev})"
             )
 
+    # ---- Phase 5: cosign signature + SLSA provenance ----
+    # Optional layer — runs when cosign is installed AND not
+    # disabled via `STRIX_COSIGN_DISABLED=1`. Two probes per image:
+    #   1. `cosign verify` — confirms image is signed
+    #   2. `cosign verify-attestation --type slsaprovenance` —
+    #      confirms SLSA provenance attestation exists
+    # Each produces at most one finding under category=image_signing.
+    cosign_available = _cosign_available()
+    image_signed = False
+    image_signer = ""
+    slsa_present = False
+    slsa_builder = ""
+    sig_emitted = 0
+    slsa_emitted = 0
+    if cosign_available:
+        # Signature verification.
+        signed, sig_payload, sig_err = _run_cosign_verify(image_ref)
+        if signed:
+            image_signed = True
+            image_signer = _extract_signer_identity(sig_payload)
+            evidence.append(
+                f"cosign verify: PASS"
+                + (f" (signer: {image_signer})" if image_signer else "")
+            )
+        else:
+            severity = "high" if _signing_policy_strict() else "medium"
+            rid = _emit_unsigned_image_finding(
+                image_ref=image_ref, error=sig_err, severity=severity,
+            )
+            if rid:
+                sig_emitted += 1
+                drafts.append(FindingDraft(
+                    title=f"Unsigned container image: {image_ref}",
+                    severity=severity,
+                    cwe="CWE-345",
+                    endpoint=image_ref,
+                    category="image_signing",
+                    verification_status="verified",
+                    confidence=0.95,
+                    description=(
+                        f"cosign verify failed on {image_ref}: "
+                        f"{sig_err or '(no detail)'}"
+                    ),
+                ))
+            evidence.append(
+                f"cosign verify: FAIL severity={severity} "
+                f"err={sig_err or '(none)'}"
+            )
+
+        # SLSA provenance attestation.
+        slsa_ok, slsa_payload, slsa_err = (
+            _run_cosign_verify_attestation(image_ref)
+        )
+        if slsa_ok:
+            slsa_present = True
+            slsa_builder = _extract_slsa_builder(slsa_payload)
+            evidence.append(
+                f"cosign verify-attestation slsaprovenance: PASS"
+                + (f" (builder: {slsa_builder})" if slsa_builder else "")
+            )
+        else:
+            rid = _emit_missing_slsa_finding(
+                image_ref=image_ref, error=slsa_err,
+            )
+            if rid:
+                slsa_emitted += 1
+                drafts.append(FindingDraft(
+                    title=(
+                        f"Missing SLSA provenance attestation: "
+                        f"{image_ref}"
+                    ),
+                    severity="medium",
+                    cwe="CWE-345",
+                    endpoint=image_ref,
+                    category="image_signing",
+                    verification_status="verified",
+                    confidence=0.92,
+                    description=(
+                        f"cosign verify-attestation failed on "
+                        f"{image_ref}: {slsa_err or '(no detail)'}"
+                    ),
+                ))
+            evidence.append(
+                f"cosign verify-attestation slsaprovenance: FAIL "
+                f"err={slsa_err or '(none)'}"
+            )
+
     # Phase 1.6 — decision provenance log.
     try:
         from strix.agents.decision_log import record_decision
@@ -1045,10 +1547,14 @@ def scan_container_image(
                 "findings_emitted_cves": emitted_count,
                 "findings_emitted_misconfigs": misconfig_emitted,
                 "findings_emitted_secrets": secret_emitted,
+                "findings_emitted_unsigned": sig_emitted,
+                "findings_emitted_missing_slsa": slsa_emitted,
                 "packages_observed": len(packages),
                 "vulnerabilities_observed": len(vulns),
                 "misconfigurations_observed": len(misconfigs),
                 "secrets_observed": len(secrets),
+                "image_signed": image_signed,
+                "slsa_provenance_present": slsa_present,
             },
         )
     except Exception:  # noqa: BLE001
@@ -1075,11 +1581,19 @@ def scan_container_image(
             "findings_emitted_cves": emitted_count,
             "findings_emitted_misconfigs": misconfig_emitted,
             "findings_emitted_secrets": secret_emitted,
+            "findings_emitted_unsigned": sig_emitted,
+            "findings_emitted_missing_slsa": slsa_emitted,
             "findings_emitted_to_tracer": (
                 emitted_count + misconfig_emitted + secret_emitted
+                + sig_emitted + slsa_emitted
             ),
             "trivy_scanners": _trivy_scanners(),
             "trivy_schema_version": report.get("SchemaVersion"),
+            "cosign_available": cosign_available,
+            "image_signed": image_signed,
+            "image_signer": image_signer,
+            "slsa_provenance_present": slsa_present,
+            "slsa_builder": slsa_builder,
             "image_metadata": report.get("Metadata") or {},
         },
     )
