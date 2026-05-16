@@ -186,6 +186,54 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "terminal_execute",
         "lookup_known_cves", "lookup_cve_by_id",
     }),
+    "api": frozenset({
+        # API targets — REST / GraphQL / gRPC HTTP-shaped endpoints
+        # that don't render HTML. Tool set is the web_application
+        # DAST cluster MINUS browser/DOM/source-map tools (waste
+        # budget on non-rendered surfaces) PLUS the OpenAPI spec
+        # ingester that replaces bfs_crawl as the endpoint-
+        # inventory source.
+        "scan_misconfig",
+        # Specialist DAST — full carry-over EXCEPT scan_xss
+        # (HTML-rendering only; APIs that return JSON don't
+        # execute reflected scripts).
+        "scan_sqli", "scan_xxe", "scan_blind_ssrf",
+        "scan_deserialization", "scan_blind_cmd_injection",
+        "scan_oob_xxe", "scan_auth_flow", "scan_business_logic",
+        "scan_idor", "scan_multi_role_auth", "scan_oauth",
+        "scan_request_smuggling_active", "scan_ldap_injection",
+        "scan_xpath_injection", "scan_cmd_injection",
+        "scan_secrets_in_response", "scan_nosql_injection",
+        "scan_ssti", "scan_path_traversal", "scan_ssrf",
+        "scan_nuclei_templates",
+        "scan_sca_lockfiles", "scan_sast", "scan_iac",
+        "scan_response_anomaly", "scan_timing_oracle",
+        # API-shaped endpoint inventory. Replaces bfs_crawl —
+        # OpenAPI spec is exact inventory; crawling misses
+        # documented-but-unlinked endpoints.
+        "openapi_spec_ingest",
+        # Recon — keep the tech-stack identifier; drop bfs_crawl
+        # since openapi_spec_ingest replaces it for API targets.
+        "fingerprint_tech_stack", "well_known_harvest",
+        # HTTP primitive + HAR/Burp ingestion (replaces browser).
+        "send_request",
+        "ingest_har_file", "ingest_burp_file",
+        # Replay-mutation orchestrators (HAR / Burp / endpoint-
+        # list) — useful regardless of HTML rendering.
+        "replay_mutation_on_endpoints",
+        "replay_mutation_from_har_file",
+        "replay_mutation_from_burp_file",
+        # Deterministic checks that still apply to APIs.
+        "http_security_headers_audit", "tls_audit",
+        "csrf_check", "cors_deep_check", "session_entropy_check",
+        "jwt_audit", "open_redirect_check",
+        "request_smuggling_check",
+        "race_check", "sqli_check", "graphql_specialist_check",
+        "websocket_audit", "authz_matrix_check",
+        "cookie_jwt_scoping_check",
+        # Threat-intel.
+        "vt_reputation", "greynoise_classify",
+    }),
     "domain": frozenset({
         "scan_misconfig",
         # Domain recon (§7.3)
