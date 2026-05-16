@@ -176,6 +176,145 @@ def _spec_base_url(spec: dict[str, Any], discovered_at: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def _resolve_ref(
+    ref: str, spec: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Single-level `$ref` resolver. Handles `#/components/schemas/X`
+    (OpenAPI 3.x) and `#/definitions/X` (Swagger 2.x). No recursive
+    resolution — circular refs or deeply-nested chains return what
+    they land on. This is good enough for mass-assignment probing
+    (we care about the top-level property list)."""
+    if not isinstance(ref, str) or not ref.startswith("#/"):
+        return None
+    parts = ref[2:].split("/")
+    cur: Any = spec
+    for p in parts:
+        if not isinstance(cur, dict):
+            return None
+        if p not in cur:
+            return None
+        cur = cur[p]
+    return cur if isinstance(cur, dict) else None
+
+
+def _extract_request_body_schema(
+    operation: dict[str, Any], spec: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Extract JSON-body schema for a single operation.
+
+    Handles both OpenAPI 3.x and Swagger 2.x request-body shapes:
+
+      * 3.x: `operation.requestBody.content["application/json"].schema`
+      * 2.x: any `operation.parameters[*]` entry where `in: body`
+        carries a `schema` field.
+
+    Resolves a single level of `$ref` so the returned dict carries
+    `properties` / `required` / `readOnly`-bearing field metadata
+    that the mass-assignment probe consumes.
+
+    Returns a normalised dict with:
+      * `properties` — dict of `{name: {type, readOnly, description}}`
+      * `required` — list of required property names
+      * `additional_properties` — bool / dict from the schema
+      * `source` — `"openapi3" | "swagger2"` for telemetry
+
+    Returns None when no JSON body schema is declared or the
+    discovered shape is too sparse to be useful.
+    """
+    # ----- OpenAPI 3.x path: requestBody.content -----
+    body = operation.get("requestBody")
+    if isinstance(body, dict):
+        content = body.get("content") or {}
+        if isinstance(content, dict):
+            json_media = (
+                content.get("application/json")
+                or content.get("application/json; charset=utf-8")
+                or content.get("application/vnd.api+json")
+            )
+            if isinstance(json_media, dict):
+                schema = json_media.get("schema")
+                if isinstance(schema, dict):
+                    return _normalise_schema(schema, spec, source="openapi3")
+
+    # ----- Swagger 2.x path: parameters[in=body].schema -----
+    params = operation.get("parameters") or []
+    if isinstance(params, list):
+        for p in params:
+            if not isinstance(p, dict):
+                continue
+            if p.get("in") == "body":
+                schema = p.get("schema")
+                if isinstance(schema, dict):
+                    return _normalise_schema(schema, spec, source="swagger2")
+
+    return None
+
+
+def _normalise_schema(
+    schema: dict[str, Any], spec: dict[str, Any], *, source: str,
+) -> dict[str, Any] | None:
+    """Resolve `$ref` (one level) and pull `properties` /
+    `required` / `additionalProperties` into a flat shape.
+
+    Property entries carry `type`, `readOnly`, and `description` —
+    everything the mass-assignment probe needs to decide whether
+    a field is server-managed.
+    """
+    # Resolve a top-level $ref.
+    if "$ref" in schema:
+        ref = schema["$ref"]
+        resolved = _resolve_ref(ref, spec)
+        if resolved is None:
+            return None
+        schema = resolved
+
+    properties = schema.get("properties") or {}
+    if not isinstance(properties, dict) or not properties:
+        # No useful property list (e.g. allOf composition we don't
+        # unwind, or array schema). Skip — the mass-assignment probe
+        # falls back to canonical fields.
+        return None
+
+    normalised_props: dict[str, dict[str, Any]] = {}
+    for name, prop in properties.items():
+        if not isinstance(name, str) or not isinstance(prop, dict):
+            continue
+        # Resolve a $ref on the property (common in deep specs).
+        resolved_prop = prop
+        if "$ref" in prop:
+            resolved = _resolve_ref(prop["$ref"], spec)
+            if isinstance(resolved, dict):
+                resolved_prop = resolved
+        normalised_props[name] = {
+            "type": str(resolved_prop.get("type") or "") or None,
+            "read_only": bool(resolved_prop.get("readOnly", False)),
+            "description": str(resolved_prop.get("description") or "")[:200],
+        }
+
+    required = schema.get("required") or []
+    if not isinstance(required, list):
+        required = []
+    required = [str(r) for r in required if isinstance(r, str)]
+
+    additional = schema.get("additionalProperties")
+    if isinstance(additional, bool):
+        additional_normalised: bool | dict[str, Any] = additional
+    elif isinstance(additional, dict):
+        additional_normalised = additional
+    else:
+        # Default per JSON Schema is true (additional allowed) — but
+        # some servers default to false. We pass through as-is, with
+        # `None` meaning "unspecified" so the caller can decide.
+        additional_normalised = True
+
+    return {
+        "properties": normalised_props,
+        "required": required,
+        "additional_properties": additional_normalised,
+        "source": source,
+    }
+
+
 def _extract_endpoints(
     spec: dict[str, Any], *, base_url: str,
 ) -> list[dict[str, Any]]:
@@ -188,6 +327,10 @@ def _extract_endpoints(
         instantiate placeholders before probing)
       * `params` — list of `{name, in, required}` for the
         endpoint's declared parameters
+      * `request_body_schema` — for POST/PUT/PATCH, the JSON-body
+        schema with property names + readOnly flags + types +
+        descriptions. None when no JSON body declared. Drives the
+        schema-aware mass-assignment probe.
       * `auth_required` — True when the spec attaches a
         security scheme to the operation (or globally) other
         than the open-access shape
@@ -246,11 +389,21 @@ def _extract_endpoints(
                     and len(op_security) > 0
                 )
 
+            # Extract request body schema for write methods. GET /
+            # HEAD / DELETE / OPTIONS don't have semantic request
+            # bodies; skip to keep the output clean.
+            request_body_schema: dict[str, Any] | None = None
+            if method_lower.upper() in {"POST", "PUT", "PATCH"}:
+                request_body_schema = _extract_request_body_schema(
+                    operation, spec,
+                )
+
             endpoints.append({
                 "path": path,
                 "method": method_lower.upper(),
                 "url": urljoin(base_url + "/", path.lstrip("/")),
                 "params": merged_params,
+                "request_body_schema": request_body_schema,
                 "auth_required": auth_required,
                 "tags": [
                     str(t) for t in (operation.get("tags") or [])

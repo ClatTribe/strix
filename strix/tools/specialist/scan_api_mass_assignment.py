@@ -99,6 +99,127 @@ _ID_FIELDS: tuple[tuple[str, Any], ...] = (
 )
 
 
+# Name patterns for fields the SERVER typically manages — even
+# when the OpenAPI spec doesn't declare them `readOnly`. Used as a
+# secondary signal for the schema-aware probe: if the API's
+# request body schema declares a field whose name matches one of
+# these, we probe it on the assumption it's server-managed.
+#
+# These deliberately overlap with `_AUTHZ_FIELDS` / `_ID_FIELDS`
+# (the canonical set) — the schema-aware path treats overlap as
+# "probe once" via dedup.
+_SERVER_MANAGED_NAME_PATTERNS: tuple[str, ...] = (
+    # Identity / object identity
+    "id", "uuid", "guid",
+    # Audit / lifecycle timestamps
+    "created_at", "createdat", "created_on", "createdon",
+    "updated_at", "updatedat", "modified_at", "modifiedat",
+    "deleted_at", "deletedat",
+    "timestamp",
+    # Audit actors
+    "created_by", "createdby", "updated_by", "updatedby",
+    # Versioning / concurrency
+    "version", "etag", "_revision", "revision",
+    # Status (server-driven state machines)
+    "status", "state",
+    # Tenancy (assignment must come from the auth context)
+    "owner_id", "ownerid", "owner",
+    "tenant_id", "tenantid",
+    "organization_id", "organizationid",
+    "workspace_id", "workspaceid",
+)
+
+
+def _choose_probe_value_for_type(
+    name: str, type_hint: str | None,
+) -> Any:
+    """Pick a probe value for a server-managed field based on its
+    schema-declared type. Conservative defaults — primarily an
+    integer for ID-shaped fields, a sentinel string for everything
+    else, and `True` for boolean privilege markers.
+
+    The injected value carries a `STRIX-` prefix (where applicable)
+    so a successful echo in the response is unambiguously
+    attributable to our probe.
+    """
+    lname = name.lower()
+
+    # Boolean privilege markers — flip them on.
+    if any(tok in lname for tok in (
+        "admin", "superuser", "staff", "root", "verified",
+        "is_active", "isactive",
+    )):
+        return True
+
+    # Type-led default.
+    type_lower = (type_hint or "").lower()
+    if type_lower == "boolean":
+        return True
+    if type_lower in {"integer", "number"}:
+        # ID-shaped or numeric — use a probe sentinel.
+        return 1
+    if type_lower == "array":
+        return ["strix-probe"]
+    if type_lower == "object":
+        return {"strix-probe": True}
+
+    # Default — string sentinel. Includes the field name so the
+    # echo check has a strong signal.
+    return f"STRIX-{name}-probe"
+
+
+def _extract_schema_aware_probes(
+    request_body_schema: dict[str, Any] | None,
+    *,
+    canonical_field_names: set[str],
+) -> list[tuple[str, Any]]:
+    """Derive per-endpoint mass-assignment probe candidates from
+    the request body schema.
+
+    A field is a probe candidate when:
+      1. Schema declares `readOnly: true` — strongest signal; the
+         server explicitly says the client shouldn't supply this.
+      2. Field name matches `_SERVER_MANAGED_NAME_PATTERNS` —
+         server-managed by convention even when readOnly isn't
+         declared.
+
+    Returns `[(field_name, probe_value), ...]`. De-duplicated
+    against `canonical_field_names` so the caller doesn't probe
+    the same field twice (once from the canonical set, once from
+    the schema).
+    """
+    if not isinstance(request_body_schema, dict):
+        return []
+
+    properties = request_body_schema.get("properties") or {}
+    if not isinstance(properties, dict):
+        return []
+
+    candidates: list[tuple[str, Any]] = []
+    seen: set[str] = {n.lower() for n in canonical_field_names}
+
+    for name, prop in properties.items():
+        if not isinstance(name, str) or not isinstance(prop, dict):
+            continue
+        lname = name.lower()
+        if lname in seen:
+            continue
+
+        is_read_only = bool(prop.get("read_only", False))
+        name_matches_pattern = lname in _SERVER_MANAGED_NAME_PATTERNS
+
+        if not (is_read_only or name_matches_pattern):
+            continue
+
+        value = _choose_probe_value_for_type(
+            name, prop.get("type"),
+        )
+        candidates.append((name, value))
+        seen.add(lname)
+
+    return candidates
+
+
 def _kill_switched() -> bool:
     return os.environ.get("STRIX_API_MASS_ASSIGNMENT_DISABLED") == "1"
 
@@ -243,6 +364,7 @@ def scan_api_mass_assignment(
     confirm_mutation: bool = False,
     probe_authz_fields: bool = True,
     probe_id_fields: bool = False,
+    probe_schema_aware: bool = True,
     timeout_seconds: float = 8.0,
     max_endpoints: int = 20,
     _fetcher=None,
@@ -251,19 +373,32 @@ def scan_api_mass_assignment(
 
     Args:
         endpoints: list of endpoint dicts from `openapi_spec_ingest`
-            (or any source — only `url`, `method`, `auth_required`,
-            `params` are read).
+            (or any source — `url`, `method`, `auth_required`,
+            `params`, and `request_body_schema` are read).
         auth_label: AuthState label whose session to use for the
             probe.
         path_ids: optional path-param substitutions.
         confirm_mutation: MUST be True to actually run the probe.
             Mass-assignment probes mutate state on the target —
             opt-in only. When False, returns a no-op result.
-        probe_authz_fields: when True (default), probe privilege-
-            elevation fields (is_admin, role, etc.).
-        probe_id_fields: when True, ALSO probe owner-rewrite fields
-            (user_id, account_id). Default False — these can break
-            referential integrity.
+        probe_authz_fields: when True (default), probe the canonical
+            privilege-elevation field set (is_admin, role, etc.).
+        probe_id_fields: when True, ALSO probe the canonical
+            owner-rewrite fields (user_id, account_id). Default
+            False — these can break referential integrity.
+        probe_schema_aware: when True (default) AND the endpoint
+            declares a `request_body_schema` (populated by
+            `openapi_spec_ingest`), ALSO derive per-endpoint
+            probes from the schema:
+              * Fields with `readOnly: true` — server explicitly
+                marked them as client-can't-set.
+              * Fields whose name matches a server-managed
+                pattern (`id`, `created_at`, `etag`, etc.).
+            De-duplicated against the canonical probe set. This
+            catches per-customer server-managed field names the
+            canonical 22-field list can never know about (e.g.
+            an Akto-grade application-specific `account_balance`
+            or `commission_rate`).
         timeout_seconds: per-request HTTP timeout.
         max_endpoints: cap probe count.
         _fetcher: injection point for tests.
@@ -295,24 +430,27 @@ def scan_api_mass_assignment(
     headers = _auth_headers_for_label(auth_label)
     fetcher = _fetcher or _default_fetcher
 
-    probe_fields = []
+    canonical_fields: list[tuple[str, Any]] = []
     if probe_authz_fields:
-        probe_fields.extend(_AUTHZ_FIELDS)
+        canonical_fields.extend(_AUTHZ_FIELDS)
     if probe_id_fields:
-        probe_fields.extend(_ID_FIELDS)
-    if not probe_fields:
+        canonical_fields.extend(_ID_FIELDS)
+    if not canonical_fields and not probe_schema_aware:
         return SpecialistResult(
             status="error",
             error=(
-                "no probe fields enabled — set probe_authz_fields "
-                "or probe_id_fields to True"
+                "no probe fields enabled — set probe_authz_fields, "
+                "probe_id_fields, or probe_schema_aware to True"
             ),
         )
+
+    canonical_field_names: set[str] = {n for n, _ in canonical_fields}
 
     findings: list[FindingDraft] = []
     evidence: list[str] = []
     probed = 0
     skipped: dict[str, int] = {"read_only": 0, "no_url": 0, "missing_ids": 0}
+    schema_probes_total = 0
 
     for ep in endpoints:
         if probed >= max_endpoints:
@@ -335,6 +473,29 @@ def scan_api_mass_assignment(
             ep.get("params") or [],
         )
 
+        # Phase 4 schema-aware augmentation: when the endpoint
+        # declares a request_body_schema (populated by
+        # openapi_spec_ingest), derive per-endpoint server-managed
+        # field candidates and merge them in.
+        per_endpoint_probes: list[tuple[str, Any]] = list(canonical_fields)
+        if probe_schema_aware:
+            schema_aware = _extract_schema_aware_probes(
+                ep.get("request_body_schema"),
+                canonical_field_names=canonical_field_names,
+            )
+            if schema_aware:
+                schema_probes_total += len(schema_aware)
+                per_endpoint_probes.extend(schema_aware)
+                evidence.append(
+                    f"schema-aware {method} {url_template}: "
+                    f"derived {len(schema_aware)} additional probe "
+                    f"fields from request_body_schema "
+                    f"({', '.join(n for n, _ in schema_aware)})"
+                )
+
+        if not per_endpoint_probes:
+            continue
+
         # Baseline probe.
         a_status, a_text = fetcher(
             url=target_url, method=method, headers=headers,
@@ -344,7 +505,7 @@ def scan_api_mass_assignment(
             f"baseline {method} {target_url}: status={a_status}"
         )
 
-        for field_name, injected_value in probe_fields:
+        for field_name, injected_value in per_endpoint_probes:
             injected = dict(baseline_body)
             injected[field_name] = injected_value
             b_status, b_text = fetcher(
@@ -407,7 +568,8 @@ def scan_api_mass_assignment(
         tool_metadata={
             "probed": probed,
             "skipped": skipped,
-            "probe_fields_count": len(probe_fields),
+            "canonical_probe_fields_count": len(canonical_fields),
+            "schema_aware_probes_total": schema_probes_total,
             "findings_count": len(findings),
         },
     )
