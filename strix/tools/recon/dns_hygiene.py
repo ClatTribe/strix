@@ -1337,6 +1337,40 @@ def dns_hygiene_check(domain: str, checks: str | None = None) -> dict[str, Any]:
         verdict, evidence = _verdict_for_check(check_id, r)
         complete_check(cev_id, verdict, evidence=evidence)
 
+    # KG: record DNS-hygiene observations as ThreatIntel attached
+    # to the domain Asset. Per-check verdict goes onto the
+    # ThreatIntel node — so consumers can query "show every DNS-
+    # hygiene observation on this domain" and join with recon-
+    # discovered Asset records.
+    try:
+        from strix.agents.kg_emit import record_threat_intel_in_kg
+
+        for r in results:
+            check = r.get("check") or "dns_hygiene"
+            # Pick the verdict using the same heuristics the
+            # findings_emitted counter uses.
+            fail_signal = (
+                r.get("present") is False
+                or r.get("policy") == "none"
+                or r.get("signed") is False
+                or (
+                    r.get("present") is True
+                    and r.get("policy_reachable") is False
+                )
+                or bool(r.get("exposed_nameservers"))
+            )
+            verdict = "compliance_fail" if fail_signal else "benign"
+            record_threat_intel_in_kg(
+                source=f"dns_hygiene:{check}",
+                asset_type="domain",
+                asset_value=domain,
+                verdict=verdict,
+                detail=f"dns_hygiene check `{check}` "
+                + ("flagged" if fail_signal else "passed"),
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "success": True,
         "domain": domain,
