@@ -37,6 +37,7 @@ from strix.tools.workflow.objective_tools import (
     update_objective,
 )
 from strix.tools.workflow.patcher_tools import (
+    auto_verify_patch,
     list_patches,
     mark_patch_applied,
     propose_patch,
@@ -63,6 +64,7 @@ __all__ = [
     "add_child_objective",
     "advance_verification_stage",
     "advance_workflow_phase",
+    "auto_verify_patch",
     "complete_objective",
     "create_objective",
     "dispatch_specialist",

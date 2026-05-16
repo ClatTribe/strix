@@ -72,6 +72,35 @@ def test_get_profile_normalises_case_and_whitespace() -> None:
     assert p1.category == p2.category
 
 
+def test_patcher_profile_registered() -> None:
+    """P1 — Patcher specialist profile should be available and
+    expose the patch CRUD + auto_verify_patch tools."""
+    p = so.get_profile("patcher")
+    assert p.category == "patcher"
+    assert "Patcher" in p.system_prompt_addendum
+    # Patcher must have access to the patch toolchain.
+    for tool in ("propose_patch", "verify_patch", "auto_verify_patch",
+                 "list_patches", "mark_patch_applied"):
+        assert tool in p.allowed_tool_subset, (
+            f"patcher profile missing tool: {tool}"
+        )
+    # Plus the §4 verification surface for reading finding state.
+    assert "verification_status" in p.allowed_tool_subset
+    # Plus an editor for reading + writing code.
+    assert "str_replace_editor" in p.allowed_tool_subset
+    # Plus the §2 objective hooks (Patcher works from an objective).
+    assert "complete_objective" in p.allowed_tool_subset
+    # KG read access for chain reasoning.
+    assert "kg_query_nodes" in p.allowed_tool_subset
+
+
+def test_patcher_profile_cost_cap_set() -> None:
+    """Patcher gets a slightly larger cost cap than scanners
+    because diff-writing + verification eats more tokens."""
+    p = so.get_profile("patcher")
+    assert p.max_cost_usd == 0.50
+
+
 # ---------------------------------------------------------------------------
 # Dispatch — happy path + exit signal
 # ---------------------------------------------------------------------------

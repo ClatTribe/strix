@@ -280,6 +280,63 @@ def _record_in_kg(
         logger.debug("scan_xss: kg record failed: %s", e, exc_info=True)
 
 
+# ---------------------------------------------------------------------------
+# §4 / P1 — re-run handler for auto_verify_patch.
+# ---------------------------------------------------------------------------
+
+
+def _rerun_xss(*, finding_context: dict[str, Any]) -> "Any":
+    """Re-fire the reflected-XSS canary probe."""
+    from strix.agents.rerun_registry import RerunResult
+    import time as _time
+    start = _time.monotonic()
+    url = finding_context.get("url") or ""
+    param = finding_context.get("param") or ""
+    if not url or not param:
+        return RerunResult(outcome="indeterminate",
+                           detail="missing url/param")
+    try:
+        from strix.tools.proxy.proxy_manager import get_proxy_manager
+        pm = get_proxy_manager()
+    except Exception:  # noqa: BLE001
+        return RerunResult(outcome="indeterminate", detail="proxy unavailable")
+    canary = _make_canary()
+    payload = _DEFAULT_PAYLOAD_TEMPLATES[0].format(canary=canary)
+    probe_url = _build_url_with_param(url, param_name=param, value=payload)
+    try:
+        resp = pm.send_simple_request(
+            "GET", probe_url, headers={}, body="", timeout=15,
+        )
+    except Exception as e:  # noqa: BLE001
+        return RerunResult(
+            outcome="indeterminate",
+            detail=f"transport error: {e}",
+            elapsed_seconds=_time.monotonic() - start,
+        )
+    body = resp.get("body") or ""
+    if not isinstance(body, str):
+        body = ""
+    if canary in body and not _is_payload_escaped(body, canary):
+        return RerunResult(
+            outcome="still_fires",
+            detail="canary still appears unescaped",
+            elapsed_seconds=_time.monotonic() - start,
+            evidence={"probe_url": probe_url},
+        )
+    return RerunResult(
+        outcome="no_longer_fires",
+        detail="canary absent or escaped",
+        elapsed_seconds=_time.monotonic() - start,
+    )
+
+
+try:
+    from strix.agents.rerun_registry import register_rerun
+    register_rerun(category="xss", cwe="CWE-79")(_rerun_xss)
+except Exception as e:  # noqa: BLE001
+    logger.debug("scan_xss: rerun register failed: %s", e)
+
+
 @register_specialist_tool(
     category="xss-specialist",
     # Phase 3b — adaptive-retry inner-LLM enabled. When the
