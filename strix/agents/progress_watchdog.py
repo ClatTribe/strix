@@ -86,11 +86,21 @@ PROGRESS_KINDS: frozenset[str] = frozenset({
 })
 
 
+def _monotonic_now() -> float:
+    """Indirection through the time module so test fixtures can
+    monkey-patch `time.monotonic` and have the patched value flow
+    into `WatchdogState.__init__` defaults. Capturing
+    `default_factory=time.monotonic` directly binds the original
+    builtin reference and bypasses patches — that's a real bug
+    that surfaced once the snapshot deadlock was fixed."""
+    return time.monotonic()
+
+
 @dataclass
 class WatchdogState:
     """Process-singleton tracking progress across the run."""
-    created_at: float = field(default_factory=time.monotonic)
-    last_progress_at: float = field(default_factory=time.monotonic)
+    created_at: float = field(default_factory=_monotonic_now)
+    last_progress_at: float = field(default_factory=_monotonic_now)
     last_progress_kind: str = ""
     last_progress_detail: str = ""
 
@@ -105,7 +115,14 @@ class WatchdogState:
 
 
 _STATE: WatchdogState | None = None
-_LOCK = threading.Lock()
+# Re-entrant — `snapshot()` acquires the lock and then calls
+# `is_stalled()` / `should_escalate()`, each of which acquire the
+# lock for their internal read. Using a plain Lock here would
+# deadlock the snapshot path. The non-reentrant choice is preserved
+# in spirit by NOT releasing-and-reacquiring (RLock just allows the
+# same thread to re-enter); cross-thread contention behaviour is
+# unchanged.
+_LOCK = threading.RLock()
 
 
 def _get_or_create() -> WatchdogState:
@@ -120,6 +137,17 @@ def reset_for_testing() -> None:
     global _STATE
     with _LOCK:
         _STATE = None
+
+
+def init_for_testing() -> None:
+    """Force-materialize `_STATE` at the current (possibly mocked)
+    time. Tests that drive the warning ladder without first
+    calling `record_progress` use this so `last_progress_at` is
+    seeded to the fixture's clock=0 rather than to the lazy init
+    at first `get_warning_message`."""
+    global _STATE
+    with _LOCK:
+        _STATE = WatchdogState()
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +283,14 @@ def get_warning_message() -> str | None:
     """
     if is_disabled():
         return None
-    if _STATE is None or not is_stalled():
+    # Lazy-init the watchdog state on first warning check. Without
+    # this, a scan that NEVER hits a progress signal (e.g. agent
+    # spends all its time in recon without emitting findings) would
+    # never trigger the stall escalation — `_STATE is None` would
+    # short-circuit the check forever.
+    with _LOCK:
+        _get_or_create()
+    if not is_stalled():
         return None
 
     with _LOCK:

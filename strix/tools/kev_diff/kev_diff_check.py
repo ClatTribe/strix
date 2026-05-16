@@ -164,7 +164,7 @@ def _emit_finding(
     tracer = get_global_tracer()
     if tracer is None:
         return
-    tracer.add_vulnerability_report(
+    finding_id = tracer.add_vulnerability_report(
         title=title,
         severity="info",
         category="vulnerable_software",
@@ -189,6 +189,23 @@ def _emit_finding(
         recommended_action=recommended_action,
         verification_status="verified",
     )
+    # P4 — ThreatIntel projection. KEV listing for a CVE is an
+    # observation about a CVE asset.
+    try:
+        from strix.agents.kg_emit import record_threat_intel_in_kg
+        record_threat_intel_in_kg(
+            source="kev_diff",
+            asset_type="cve_id",
+            asset_value=cve,
+            verdict="kev_listed",
+            detail=title[:120],
+            finding_id=finding_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug(
+            "kev_diff: kg threat-intel record failed: %s", e, exc_info=True,
+        )
 
 
 def _start_check(category: str, surface: str) -> str | None:

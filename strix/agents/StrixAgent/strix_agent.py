@@ -78,6 +78,25 @@ class StrixAgent(BaseAgent):
         diff_scope = scan_config.get("diff_scope", {}) or {}
         self.llm.set_system_prompt_context(self._build_system_scope_context(scan_config))
 
+        # P4 — CI delta-scan seed. When STRIX_KG_SEED_PATH is set,
+        # load the previous run's kg.json BEFORE the agent loop
+        # starts so this scan builds on the prior surface map.
+        # Best-effort; no-op when the env var is unset or the file
+        # is missing.
+        try:
+            from strix.agents.knowledge_graph import load_seed_kg_from_env
+            seeded = load_seed_kg_from_env()
+            if seeded is not None:
+                import logging
+                logging.getLogger(__name__).info(
+                    "loaded seed KG (%d nodes, %d edges) from STRIX_KG_SEED_PATH",
+                    seeded.stats()["node_count"],
+                    seeded.stats()["edge_count"],
+                )
+        except Exception:  # noqa: BLE001
+            # Seed-load failures must not block scan start.
+            pass
+
         repositories = []
         local_code = []
         urls = []

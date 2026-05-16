@@ -287,7 +287,7 @@ def _emit_finding(
     tracer = get_global_tracer()
     if tracer is None:
         return
-    tracer.add_vulnerability_report(
+    finding_id = tracer.add_vulnerability_report(
         title=title,
         severity=severity,
         category="malicious_target",
@@ -310,6 +310,33 @@ def _emit_finding(
         recommended_action=recommended_action,
         verification_status="needs_review",
     )
+    # P4 — ThreatIntel KG projection. vt_reputation observes a
+    # reputation verdict on an asset (domain / ip / hash / url);
+    # record ThreatIntel + Asset + OBSERVED triple so the lead can
+    # query "show me everything VT flagged about this target."
+    try:
+        from strix.agents.kg_emit import record_threat_intel_in_kg
+        # Heuristic asset_type from target shape
+        if "://" in target:
+            asset_type = "url"
+        elif target.replace(".", "").replace(":", "").isdigit():
+            asset_type = "ip_address"
+        else:
+            asset_type = "domain"
+        verdict = "malicious" if severity in ("high", "critical") else "suspicious"
+        record_threat_intel_in_kg(
+            source="vt_reputation",
+            asset_type=asset_type,
+            asset_value=target,
+            verdict=verdict,
+            detail=title[:120],
+            finding_id=finding_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug(
+            "vt_reputation: kg threat-intel record failed: %s", e, exc_info=True,
+        )
 
 
 def _start_check(category: str, surface: str) -> str | None:

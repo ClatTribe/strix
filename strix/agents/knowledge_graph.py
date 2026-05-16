@@ -79,6 +79,12 @@ NodeType = Literal[
     "Secret",
     "Dependency",
     "Role",
+    # P4 — threat-intel projection. Scanners like vt_reputation,
+    # kev_diff, nvd_lookup, hibp_breach, otx_lookup, etc. produce
+    # observations that don't fit the Vuln→Surface→AFFECTS triple.
+    # `ThreatIntel` records the source + verdict; `OBSERVED`
+    # connects it to the Asset it concerns.
+    "ThreatIntel",
 ]
 EdgeType = Literal[
     "AFFECTS",
@@ -88,16 +94,20 @@ EdgeType = Literal[
     "CHAINS_TO",
     "RUNS_ON",
     "USES",
+    # P4 — ThreatIntel → Asset (the observation's subject).
+    "OBSERVED",
 ]
 
 
 _VALID_NODE_TYPES: frozenset[str] = frozenset({
     "Surface", "Asset", "Vuln", "Credential",
     "Secret", "Dependency", "Role",
+    "ThreatIntel",
 })
 _VALID_EDGE_TYPES: frozenset[str] = frozenset({
     "AFFECTS", "REACHABLE_FROM", "LEAKS", "GRANTS_ACCESS_TO",
     "CHAINS_TO", "RUNS_ON", "USES",
+    "OBSERVED",
 })
 
 
@@ -471,16 +481,25 @@ def _persist(kg: KnowledgeGraph) -> None:
         logger.debug("could not persist kg.json: %s", e)
 
 
-def load_kg_from_disk() -> KnowledgeGraph | None:
-    """Restore the singleton from `<run_dir>/kg.json`. Useful for
-    CI delta scans: previous run's kg.json bind-mounted into the
-    new sandbox.
+def load_kg_from_disk(path: Path | str | None = None) -> KnowledgeGraph | None:
+    """Restore the singleton from a kg.json file.
 
-    Returns the loaded graph, or None if no file exists."""
-    run_dir = _resolve_run_dir()
-    if run_dir is None:
-        return None
-    path = run_dir / "kg.json"
+    Args:
+      path: optional explicit path. When None, defaults to
+        `<run_dir>/kg.json` — the canonical resume location.
+        Pass an arbitrary path to seed the graph from a previous
+        run's artifact (the CI delta-scan use case).
+
+    Returns the loaded graph, or None if no file exists / fails
+    to parse."""
+    if path is None:
+        run_dir = _resolve_run_dir()
+        if run_dir is None:
+            return None
+        path = run_dir / "kg.json"
+    else:
+        path = Path(path)
+
     if not path.exists():
         return None
     try:
@@ -491,6 +510,32 @@ def load_kg_from_disk() -> KnowledgeGraph | None:
     kg = get_kg()
     kg.load_dict(data)
     return kg
+
+
+def load_seed_kg_from_env() -> KnowledgeGraph | None:
+    """If `STRIX_KG_SEED_PATH` is set, load that kg.json as the
+    starting graph. Used for CI delta-scan: mount the previous
+    run's artifact into the sandbox and point this env var at it.
+
+    The seed graph is loaded BEFORE the current scan starts, so
+    every new finding emitted during this run is added on top of
+    the prior run's surface map. Re-finding a known vuln re-emits
+    against the same Surface; novel findings appear as new nodes.
+
+    Returns the loaded graph (the singleton, already populated)
+    or None when:
+      * the env var is unset, OR
+      * the path doesn't exist, OR
+      * `STRIX_KG_DISABLED=1` (kill switch wins).
+
+    Best-effort — invalid JSON / unreadable file → returns None
+    with a warning log, doesn't abort scan start."""
+    if is_disabled():
+        return None
+    seed_path = os.environ.get("STRIX_KG_SEED_PATH", "").strip()
+    if not seed_path:
+        return None
+    return load_kg_from_disk(seed_path)
 
 
 def get_kg_stats() -> dict[str, Any]:

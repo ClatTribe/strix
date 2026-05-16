@@ -44,6 +44,17 @@ def _reset(monkeypatch, fake_clock):
     pw.reset_for_testing()
 
 
+@pytest.fixture
+def initialized_watchdog(fake_clock):
+    """Force-materialize the watchdog state at fixture clock=0.
+    Warning-ladder tests need this so `last_progress_at = 0`
+    instead of the lazy-init value (which would be NOW = whatever
+    the test bumped fake_clock to before the first
+    `get_warning_message` call)."""
+    pw.init_for_testing()
+    yield
+
+
 # ---------------------------------------------------------------------------
 # Recording
 # ---------------------------------------------------------------------------
@@ -133,7 +144,7 @@ def test_no_warning_when_not_stalled(fake_clock) -> None:
     assert pw.get_warning_message() is None
 
 
-def test_tier_1_warning_at_first_stall(fake_clock) -> None:
+def test_tier_1_warning_at_first_stall(fake_clock, initialized_watchdog) -> None:
     """First time the watchdog notices a stall, it emits a
     tier-1 'STALL' message. No 'REPEATED' / 'ESCALATION' prefix."""
     fake_clock["now"] = 6 * 60   # 6 min, past the 5-min threshold
@@ -144,7 +155,7 @@ def test_tier_1_warning_at_first_stall(fake_clock) -> None:
     assert "REPEATED" not in w
 
 
-def test_tier_2_warning_at_second_stall_window(fake_clock) -> None:
+def test_tier_2_warning_at_second_stall_window(fake_clock, initialized_watchdog) -> None:
     """The second stall window (after another 5 min without
     progress) emits a louder 'REPEATED_STALL' warning."""
     fake_clock["now"] = 6 * 60   # 6 min — first warning
@@ -155,7 +166,7 @@ def test_tier_2_warning_at_second_stall_window(fake_clock) -> None:
     assert "PROGRESS_WATCHDOG_REPEATED_STALL" in w
 
 
-def test_tier_3_escalation_at_threshold(fake_clock) -> None:
+def test_tier_3_escalation_at_threshold(fake_clock, initialized_watchdog) -> None:
     """At STRIX_WATCHDOG_ESCALATE_AFTER (default 3), the warning
     becomes the ESCALATION tier — agent loop should force-advance
     to report phase + request_stop."""
@@ -171,7 +182,7 @@ def test_tier_3_escalation_at_threshold(fake_clock) -> None:
     assert pw.should_escalate() is True
 
 
-def test_warning_throttled_within_stall_window(fake_clock) -> None:
+def test_warning_throttled_within_stall_window(fake_clock, initialized_watchdog) -> None:
     """Once a warning is emitted, the watchdog throttles — no
     additional warning until ANOTHER full stall window elapses.
     Without throttling, every agent loop iteration past the
@@ -186,7 +197,7 @@ def test_warning_throttled_within_stall_window(fake_clock) -> None:
     assert pw.get_warning_message() is None
 
 
-def test_progress_resets_warning_ladder(fake_clock) -> None:
+def test_progress_resets_warning_ladder(fake_clock, initialized_watchdog) -> None:
     """Recording progress in the middle of a warning ladder
     resets the counter to 0 — productive lead never sees
     escalation."""
@@ -201,7 +212,7 @@ def test_progress_resets_warning_ladder(fake_clock) -> None:
     assert pw.should_escalate() is False
 
 
-def test_custom_escalation_threshold(monkeypatch, fake_clock) -> None:
+def test_custom_escalation_threshold(monkeypatch, fake_clock, initialized_watchdog) -> None:
     """STRIX_WATCHDOG_ESCALATE_AFTER tunes the ladder length."""
     monkeypatch.setenv("STRIX_WATCHDOG_ESCALATE_AFTER", "2")
     fake_clock["now"] = 6 * 60

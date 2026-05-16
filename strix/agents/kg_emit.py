@@ -64,6 +64,117 @@ def _canonicalise_url(url: str) -> str:
         return url
 
 
+# Threat-intel asset dedup cache. ThreatIntel observations target
+# Asset nodes (domain / ip / hash / package / email), not Surface
+# nodes — so they need their own dedup keyed by `(asset_type,
+# value)`.
+_asset_cache: dict[tuple[str, str], str] = {}
+_asset_cache_lock = threading.Lock()
+
+
+def reset_asset_cache_for_testing() -> None:
+    """Clear the threat-intel asset dedup cache. Tests must call
+    this in fixtures."""
+    with _asset_cache_lock:
+        _asset_cache.clear()
+
+
+def record_threat_intel_in_kg(
+    *,
+    source: str,
+    asset_type: str,
+    asset_value: str,
+    verdict: str,
+    score: float | None = None,
+    detail: str = "",
+    finding_id: str | None = None,
+) -> tuple[str | None, str | None]:
+    """P4 — Emit `ThreatIntel` + (deduplicated) `Asset` + `OBSERVED`
+    triple for threat-intel / reputation / posture scanners.
+
+    The §3 Vuln→Surface→AFFECTS triple doesn't fit observations
+    from threat-intel feeds (vt_reputation, kev_diff, nvd_lookup,
+    hibp_breach, otx_lookup, greynoise, cve_lookup, monitoring_
+    posture, domain_reputation). Those scanners produce
+    *observations about an asset* — "domain has malicious
+    reputation," "package version matches a known CVE," "email
+    appears in HIBP breach corpus" — not vulnerabilities at a
+    Surface. This helper records them with the right shape.
+
+    Returns `(threat_intel_id, asset_id)` — both `None` when the
+    KG is disabled or emission fails. Best-effort; never raises.
+
+    Args:
+      source: which scanner / data source produced the
+        observation (`vt_reputation`, `kev_diff`, `nvd_lookup`,
+        `hibp_breach`, `otx_lookup`, `greynoise`, `cve_lookup`,
+        `monitoring_posture`, `domain_reputation`).
+      asset_type: shape of the subject — `domain`, `ip_address`,
+        `email`, `package`, `cve_id`, `hash`, `url`.
+      asset_value: the actual indicator value.
+      verdict: classification — `malicious`, `suspicious`,
+        `benign`, `breached`, `kev_listed`, `cve_match`,
+        `compliance_fail`, `unknown`.
+      score: optional numeric (0.0–1.0 or 0–100 — convention
+        varies by source; preserve as recorded).
+      detail: one-line free-form context.
+      finding_id: optional finding ID when this observation
+        was also emitted as a vulnerability finding.
+
+    Surface dedup: `(asset_type, asset_value)` → one Asset node.
+    Multiple ThreatIntel observations about the same asset fan
+    out to distinct ThreatIntel nodes pointing at the shared
+    Asset (e.g. `vt_reputation` + `domain_reputation` both
+    flag the same domain → 1 Asset, 2 ThreatIntel, 2 OBSERVED
+    edges)."""
+    try:
+        from strix.agents.knowledge_graph import get_kg, is_disabled
+    except ImportError:
+        return None, None
+
+    if is_disabled():
+        return None, None
+
+    kg = get_kg()
+    cache_key = (asset_type, asset_value)
+
+    try:
+        with _asset_cache_lock:
+            asset_id = _asset_cache.get(cache_key)
+            if asset_id is None or kg.get_node(asset_id) is None:
+                asset_node = kg.add_node(
+                    type="Asset",
+                    props={"type": asset_type, "value": asset_value},
+                )
+                asset_id = asset_node.id
+                _asset_cache[cache_key] = asset_id
+
+        ti_props: dict[str, Any] = {
+            "source": source,
+            "verdict": verdict,
+        }
+        if score is not None:
+            ti_props["score"] = float(score)
+        if detail:
+            ti_props["detail"] = detail
+        if finding_id:
+            ti_props["finding_id"] = finding_id
+
+        ti_node = kg.add_node(type="ThreatIntel", props=ti_props)
+
+        kg.add_edge(
+            type="OBSERVED",
+            source=ti_node.id,
+            target=asset_id,
+            props={"verdict": verdict} if verdict else None,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("kg_emit: record_threat_intel failed: %s", e, exc_info=True)
+        return None, None
+
+    return ti_node.id, asset_id
+
+
 def record_finding_in_kg(
     *,
     finding_id: str | None,
