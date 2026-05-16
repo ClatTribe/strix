@@ -232,6 +232,95 @@ def _detect_from_headers(headers: dict[str, str]) -> list[Detection]:
                 )
             )
 
+    # ----- Infrastructure products with header-disclosed versions -----
+    # These additions extend the corpus to detect products the MOAK
+    # image_resolver covers but fingerprint_tech_stack didn't previously
+    # surface. Each is paired with an NVD-style technology name so the
+    # downstream cve_relevance / feed_trigger filter recognises them.
+
+    # Jenkins — `X-Jenkins: <version>` is the canonical version header
+    # (set by jenkins.model.Jenkins#getVersion). Present on every page.
+    if "x-jenkins" in headers:
+        ver = headers.get("x-jenkins", "").strip()
+        out.append(
+            Detection(
+                technology="jenkins",
+                label="Jenkins",
+                version=ver if _VERSION_RE.match(ver) else None,
+                confidence="high",
+                evidence=[f"X-Jenkins: {ver}"],
+                skill=None,
+            )
+        )
+
+    # Eclipse Jetty — `Server: Jetty(11.0.x)` or `Jetty(EE10-11.0.x)`.
+    # Discriminate from Apache by the literal `Jetty(` substring.
+    if "jetty(" in server.lower():
+        m = re.search(r"jetty\(([^)]+)\)", server, re.IGNORECASE)
+        if m:
+            ver_inner = m.group(1)
+            # Strip any EE-platform prefix (`EE10-`, `EE9-`) so we
+            # extract the actual Jetty MAJOR.MINOR.PATCH after the
+            # dash. Bare digits like `10` from `EE10` would otherwise
+            # match _VERSION_RE first.
+            stripped = re.sub(r"^EE\d+-", "", ver_inner, flags=re.IGNORECASE)
+            v_match = re.search(r"(\d+\.\d+(?:\.\d+)?)", stripped)
+            out.append(
+                Detection(
+                    technology="jetty",
+                    label="Eclipse Jetty",
+                    version=v_match.group(1) if v_match else None,
+                    confidence="high",
+                    evidence=[f"Server: {server}"],
+                    skill=None,
+                )
+            )
+
+    # Kibana — `kbn-version: <semver>`. Kibana emits this on every
+    # rendered page; also `kbn-name` for the node identifier.
+    if "kbn-version" in headers:
+        out.append(
+            Detection(
+                technology="kibana",
+                label="Kibana",
+                version=headers.get("kbn-version", "").strip() or None,
+                confidence="high",
+                evidence=[f"kbn-version: {headers.get('kbn-version')}"],
+                skill=None,
+            )
+        )
+
+    # Microsoft Exchange Server (OWA) — `X-OWA-Version` carries the
+    # exact build number. Present on Outlook Web Access endpoints.
+    if "x-owa-version" in headers:
+        out.append(
+            Detection(
+                technology="exchange_server",
+                label="Microsoft Exchange Server (OWA)",
+                version=headers.get("x-owa-version", "").strip() or None,
+                confidence="high",
+                evidence=[f"X-OWA-Version: {headers.get('x-owa-version')}"],
+                skill=None,
+            )
+        )
+
+    # Apache Tomcat — `Server: Apache-Coyote/...` is the canonical
+    # connector header. Version isn't reliably exposed (Coyote version
+    # != Tomcat version), so emit without version. Better than nothing
+    # for cve_relevance product-match (drops version, relies on
+    # heuristic CVE-relevance filtering).
+    if "apache-coyote" in server.lower() or "apache tomcat" in server.lower():
+        out.append(
+            Detection(
+                technology="tomcat",
+                label="Apache Tomcat (Coyote)",
+                version=None,
+                confidence="medium",
+                evidence=[f"Server: {server}"],
+                skill=None,
+            )
+        )
+
     # WAF / CDN
     if "cloudflare" in server.lower() or "cf-ray" in headers:
         out.append(
@@ -347,6 +436,45 @@ def _detect_from_body(body: str) -> list[Detection]:
         return []
     out: list[Detection] = []
     seen: set[str] = set()
+
+    # Versioned body-signal detections run FIRST. The MOAK image_resolver
+    # needs a version to construct an image ref, so a version-bearing
+    # detection always beats a version-less one. The legacy
+    # `_BODY_SIGNALS` loop below fills in for products the versioned
+    # corpus doesn't cover, or for hardened deployments where the
+    # version meta tag has been stripped (versioned detection still
+    # fires; `version=None` is recorded).
+    for entry in _VERSIONED_BODY_SIGNALS:
+        det_pat = entry["detect"]
+        if not det_pat.search(body):
+            continue
+        tech = entry["tech"]
+        if tech in seen:
+            continue
+        seen.add(tech)
+        version: str | None = None
+        ver_pat = entry.get("version")
+        if ver_pat is not None:
+            m = ver_pat.search(body)
+            if m:
+                # The version regex may have multiple capture groups
+                # (e.g. GitLab's two-pattern alternative). Pick the
+                # first non-empty group.
+                for g in m.groups():
+                    if g:
+                        version = g
+                        break
+        out.append(
+            Detection(
+                technology=tech,
+                label=entry["label"],
+                version=version,
+                confidence=entry.get("confidence", "high"),
+                evidence=[f"Body matches {det_pat.pattern[:60]}"],
+                skill=entry.get("skill"),
+            )
+        )
+
     for pattern, tech, label, conf, skill in _BODY_SIGNALS:
         if pattern.search(body) and tech not in seen:
             seen.add(tech)
@@ -359,7 +487,245 @@ def _detect_from_body(body: str) -> list[Detection]:
                     skill=skill,
                 )
             )
+
     return out
+
+
+# ---------------------------------------------------------------------------
+# Versioned body signals — corpus expansion driven by MOAK Phase A dogfood
+# ---------------------------------------------------------------------------
+#
+# Schema: {detect, version, tech, label, confidence, skill}
+#   * `detect` — regex whose match alone confirms the product.
+#   * `version` — OPTIONAL regex with one capture group (the version).
+#     When omitted, the detection emits without a version.
+#
+# Technology names align with NVD CPE product strings (or pass through
+# the `_CPE_PRODUCT_ALIASES` map in `image_resolver`) so the downstream
+# `cve_relevance.get_asset_inventory_from_kg` + MOAK feed_trigger
+# pipeline see them as scope-matchable products.
+
+_VERSIONED_BODY_SIGNALS: tuple[dict, ...] = (
+    # ----- Atlassian (Confluence / Jira / Bitbucket) -----
+    # All three Atlassian apps embed `<meta name="ajs-version-number">`
+    # with the product version. The product itself is disambiguated by
+    # the `application-name` meta tag (or the page title / URL path).
+    {
+        "detect": re.compile(
+            r'<meta[^>]+name=["\']application-name["\'][^>]+content=["\']Confluence',
+            re.IGNORECASE,
+        ),
+        "version": re.compile(
+            r'<meta[^>]+name=["\']ajs-version-number["\'][^>]+content=["\']'
+            r'([\d.]+)',
+            re.IGNORECASE,
+        ),
+        "tech": "confluence_server",
+        "label": "Atlassian Confluence",
+        "confidence": "high",
+        "skill": None,
+    },
+    {
+        "detect": re.compile(
+            r'<meta[^>]+name=["\']application-name["\'][^>]+content=["\']JIRA'
+            r'|<meta[^>]+name=["\']ajs-app-title["\'][^>]+content=["\']JIRA',
+            re.IGNORECASE,
+        ),
+        "version": re.compile(
+            r'<meta[^>]+name=["\']ajs-version-number["\'][^>]+content=["\']'
+            r'([\d.]+)',
+            re.IGNORECASE,
+        ),
+        "tech": "jira_software",
+        "label": "Atlassian Jira Software",
+        "confidence": "high",
+        "skill": None,
+    },
+    {
+        "detect": re.compile(
+            r'<meta[^>]+name=["\']application-name["\'][^>]+content=["\']'
+            r'(?:Bitbucket|Stash)',
+            re.IGNORECASE,
+        ),
+        "version": re.compile(
+            r'<meta[^>]+name=["\']application-version["\'][^>]+content=["\']'
+            r'([\d.]+)',
+            re.IGNORECASE,
+        ),
+        "tech": "bitbucket_server",
+        "label": "Atlassian Bitbucket Server",
+        "confidence": "high",
+        "skill": None,
+    },
+    # ----- GitLab -----
+    # GitLab emits version in `gon.gitlab_version = "<v>"` in the page
+    # JS bootstrap. Some deployments also expose `<meta name="gitlab-version">`.
+    {
+        "detect": re.compile(
+            r'gon\.gitlab_version\s*=|<meta[^>]+content=["\']GitLab["\']'
+            r'|<title>[^<]*GitLab',
+            re.IGNORECASE,
+        ),
+        "version": re.compile(
+            r'gon\.gitlab_version\s*=\s*["\']([\d.]+)|'
+            r'<meta[^>]+name=["\']gitlab-version["\'][^>]+content=["\']'
+            r'([\d.]+)',
+            re.IGNORECASE,
+        ),
+        "tech": "gitlab",
+        "label": "GitLab",
+        "confidence": "high",
+        "skill": None,
+    },
+    # ----- Gitea -----
+    # Gitea's footer carries `Powered by Gitea Version: <v>`.
+    {
+        "detect": re.compile(
+            r'<meta[^>]+name=["\']?generator["\'][^>]+content=["\']?Gitea'
+            r'|Powered by Gitea',
+            re.IGNORECASE,
+        ),
+        "version": re.compile(
+            r'Powered by Gitea Version:\s*<a[^>]*>([\d.]+)|'
+            r'Powered by Gitea Version:\s*([\d.]+)',
+            re.IGNORECASE,
+        ),
+        "tech": "gitea",
+        "label": "Gitea",
+        "confidence": "high",
+        "skill": None,
+    },
+    # ----- SonarQube -----
+    # SonarQube admin UI ships `<title>SonarQube</title>` + a JS
+    # bootstrap config block carrying the version.
+    {
+        "detect": re.compile(
+            r'<title>SonarQube</title>|window\.sonarqube\s*='
+            r'|<meta[^>]+content=["\']SonarQube',
+            re.IGNORECASE,
+        ),
+        "version": re.compile(
+            r'"version"\s*:\s*"([\d.]+)"',
+            re.IGNORECASE,
+        ),
+        "tech": "sonarqube",
+        "label": "SonarQube",
+        "confidence": "high",
+        "skill": None,
+    },
+    # ----- Nexus Repository Manager -----
+    # Nexus 3 ships `<title>Nexus Repository Manager X.Y.Z</title>` —
+    # the version is in the title itself.
+    {
+        "detect": re.compile(
+            r'<title>Nexus Repository Manager',
+            re.IGNORECASE,
+        ),
+        "version": re.compile(
+            r'<title>Nexus Repository Manager[^<]*?([\d.]+)\s*</title>',
+            re.IGNORECASE,
+        ),
+        "tech": "nexus_repository_manager",
+        "label": "Sonatype Nexus Repository Manager",
+        "confidence": "high",
+        "skill": None,
+    },
+    # ----- Grafana -----
+    # Grafana ships `<meta name="grafana-version">` + `window.grafanaBootData`
+    # with the version.
+    {
+        "detect": re.compile(
+            r'<meta[^>]+name=["\']grafana-version["\']'
+            r'|window\.grafanaBootData',
+            re.IGNORECASE,
+        ),
+        "version": re.compile(
+            r'<meta[^>]+name=["\']grafana-version["\'][^>]+content=["\']'
+            r'([\d.]+)',
+            re.IGNORECASE,
+        ),
+        "tech": "grafana",
+        "label": "Grafana",
+        "confidence": "high",
+        "skill": None,
+    },
+    # ----- Elasticsearch -----
+    # Elasticsearch's root endpoint returns JSON with
+    # `"version":{"number":"X.Y.Z"}` + the tagline.
+    {
+        "detect": re.compile(
+            r'"tagline"\s*:\s*"You Know, for Search"',
+            re.IGNORECASE,
+        ),
+        "version": re.compile(
+            r'"number"\s*:\s*"([\d.]+(?:-[\w.]+)?)"',
+            re.IGNORECASE,
+        ),
+        "tech": "elasticsearch",
+        "label": "Elasticsearch",
+        "confidence": "high",
+        "skill": None,
+    },
+    # ----- Ghost -----
+    # `<meta name="generator" content="Ghost X.Y">` mirrors the
+    # WordPress / Drupal pattern.
+    {
+        "detect": re.compile(
+            r'<meta[^>]+name=["\']generator["\'][^>]+content=["\']Ghost',
+            re.IGNORECASE,
+        ),
+        "version": re.compile(
+            r'<meta[^>]+name=["\']generator["\'][^>]+content=["\']Ghost\s+'
+            r'([\d.]+)',
+            re.IGNORECASE,
+        ),
+        "tech": "ghost",
+        "label": "Ghost (CMS)",
+        "confidence": "high",
+        "skill": None,
+    },
+    # ----- WordPress (version, not just detection) -----
+    # Existing _BODY_SIGNALS detects WordPress but doesn't extract
+    # the version. The `_BODY_SIGNALS` short-circuits via `seen`, so
+    # this entry only fires when the earlier `wordpress` detection
+    # didn't (i.e. when `<meta generator>` was missing but `wp-content`
+    # is in the body — common on hardened installs). Otherwise the
+    # earlier detection already filled the slot.
+    {
+        "detect": re.compile(
+            r'/wp-content/|/wp-includes/',
+            re.IGNORECASE,
+        ),
+        "version": re.compile(
+            r'<meta[^>]+name=["\']generator["\'][^>]+content=["\']'
+            r'WordPress\s+([\d.]+)',
+            re.IGNORECASE,
+        ),
+        "tech": "wordpress",
+        "label": "WordPress",
+        "confidence": "high",
+        "skill": None,
+    },
+    # ----- Drupal version -----
+    # Drupal exposes the version in `Drupal.settings` (D7) or
+    # `drupalSettings` (D8+). The bare `<meta generator>` detection
+    # from _BODY_SIGNALS catches the product but not the version.
+    {
+        "detect": re.compile(
+            r'<meta[^>]+name=["\']Generator["\'][^>]+content=["\']Drupal',
+            re.IGNORECASE,
+        ),
+        "version": re.compile(
+            r'<meta[^>]+name=["\']Generator["\'][^>]+content=["\']'
+            r'Drupal\s+([\d.]+)',
+            re.IGNORECASE,
+        ),
+        "tech": "drupal",
+        "label": "Drupal",
+        "confidence": "high",
+        "skill": None,
+    },
+)
 
 
 def _probe_graphql(target_url: str) -> Detection | None:
