@@ -513,6 +513,28 @@ def sbom_extract(
         seen.add(key)
         deduped.append(c)
 
+    # Populate the KG `Dependency` node for each detected component
+    # so the feed-trigger's CVE-relevance evaluator has a real
+    # inventory to match against. Fail-open inside the helper.
+    try:
+        from strix.agents.kg_emit import record_dependency_in_kg
+
+        for c in deduped:
+            try:
+                record_dependency_in_kg(
+                    name=c["name"],
+                    version=c.get("version"),
+                    ecosystem=c.get("ecosystem"),
+                    source="sbom_extract",
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "sbom_extract: Dependency emit failed for %s",
+                    c.get("name"), exc_info=True,
+                )
+    except ImportError:
+        pass
+
     # Build the CycloneDX envelope.
     try:
         from strix.telemetry.tracer import get_global_tracer

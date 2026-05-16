@@ -753,6 +753,31 @@ def fingerprint_tech_stack(
             except Exception:  # noqa: BLE001
                 logger.debug("OpenAPI finding emission failed", exc_info=True)
 
+    # Populate the KG `Dependency` node for each detected tech so
+    # the feed-trigger CVE-relevance evaluator can match new CVE
+    # events against the customer's web target. This is the
+    # web_application + domain target-type inventory path —
+    # complement to SCA (source-code) + sbom_extract.
+    try:
+        from strix.agents.kg_emit import record_dependency_in_kg
+
+        for det in detections:
+            try:
+                record_dependency_in_kg(
+                    name=det.technology,
+                    version=det.version,
+                    # Web tech doesn't map to a package ecosystem.
+                    ecosystem=None,
+                    source="fingerprint_tech_stack",
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "fingerprint: Dependency emit failed for %s",
+                    det.technology, exc_info=True,
+                )
+    except ImportError:
+        pass
+
     skill_candidates = _select_skills(detections)
     skill_load_result = _load_skills_into_agent(agent_state, skill_candidates)
 

@@ -131,6 +131,43 @@ def scan_repo_lockfiles(
         skip_dev_only=skip_dev_only,
     )
 
+    # Populate the KG `Dependency` node for EVERY parsed package
+    # (not just the currently-vulnerable subset). The CVE-relevance
+    # evaluator on the feed-trigger queries this — a customer
+    # running log4j 2.14.0 today needs to be in the KG even if no
+    # CVE exists yet, so a CVE published tomorrow can route to
+    # synthesis. Fail-open inside the helper.
+    try:
+        from strix.agents.kg_emit import record_dependency_in_kg
+
+        # Build a `pkg → matched cves` index so we can attach
+        # known-CVE annotations when present.
+        cves_by_pkg: dict[tuple[str, str, str], list[str]] = {}
+        for m in matches:
+            key = (m.package.ecosystem, m.package.name, m.package.version)
+            cves_by_pkg.setdefault(key, []).extend(
+                c.cve_id for c in m.cves if c.cve_id
+            )
+
+        for pkg in all_packages:
+            try:
+                record_dependency_in_kg(
+                    name=pkg.name,
+                    version=pkg.version,
+                    ecosystem=pkg.ecosystem,
+                    source="sca_lockfiles",
+                    cve_ids=cves_by_pkg.get(
+                        (pkg.ecosystem, pkg.name, pkg.version),
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "sca: Dependency emit failed for %s", pkg.name,
+                    exc_info=True,
+                )
+    except ImportError:
+        pass
+
     return ScaReport(
         repo_path=str(p),
         lockfiles_scanned=[str(lf) for lf in lockfiles],
