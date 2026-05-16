@@ -53,51 +53,25 @@ from strix.tools.specialist.result import (
 logger = logging.getLogger(__name__)
 
 
-# (label, payload_target, fingerprint_regex, severity)
-# fingerprint_regex matches against the response body when the
-# server fetched the target.
-_INTERNAL_PROBES: tuple[tuple[str, str, str, str], ...] = (
-    (
-        "aws_metadata",
-        "http://169.254.169.254/latest/meta-data/",
-        # AWS IMDS index
-        r"\b(ami-id|instance-id|iam/|security-credentials|hostname|placement)\b",
-        "critical",
-    ),
-    (
-        "gcp_metadata",
-        "http://metadata.google.internal/computeMetadata/v1/",
-        r"\b(project-id|service-accounts|compute|metadata|instance)\b",
-        "critical",
-    ),
-    (
-        "azure_metadata",
-        "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
-        r'\b(compute|vmId|subscription|location|tenantId)\b',
-        "critical",
-    ),
-    (
-        "etc_passwd",
-        "file:///etc/passwd",
-        # uid 0 user line shape (any user with uid 0, gid 0)
-        r"^[a-z_][a-z0-9_-]*:[^:]*:0:0:",
-        "critical",
-    ),
-    (
-        "loopback",
-        "http://127.0.0.1/",
-        # Common default-page fingerprints that imply we hit an
-        # internal service that's not exposed externally.
-        r"(apache2 ubuntu default|nginx welcome|phpinfo\(\)|<title>welcome to|test page for the)",
-        "high",
-    ),
-    (
-        "localhost_alt",
-        "http://localhost:80/",
-        r"(apache2 ubuntu default|nginx welcome|phpinfo\(\)|<title>welcome to)",
-        "high",
-    ),
-)
+# Phase 4 cohort expansion — the probe library moved to
+# `strix/tools/specialist/ssrf_probes.py` so additions don't churn
+# this file. `_INTERNAL_PROBES` keeps the existing 4-tuple shape
+# `(label, target, fingerprint_regex, severity)` for backwards
+# compatibility with the probe loop below.
+from strix.tools.specialist.ssrf_probes import get_probes as _get_ssrf_probes
+
+
+def _build_probe_tuple_list() -> tuple[tuple[str, str, str, str], ...]:
+    """Adapter — flattens the `SsrfProbe` dataclasses into the
+    4-tuple shape the existing probe loop already destructures.
+    Keeps the loop free of dataclass coupling."""
+    return tuple(
+        (p.label, p.target, p.fingerprint_regex, p.severity)
+        for p in _get_ssrf_probes()
+    )
+
+
+_INTERNAL_PROBES: tuple[tuple[str, str, str, str], ...] = _build_probe_tuple_list()
 
 
 def _build_url_with_param(
