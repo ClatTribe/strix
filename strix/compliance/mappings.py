@@ -679,6 +679,37 @@ def covered_controls(
     return out
 
 
+def rules_for_control(framework: str, control_id: str) -> set[str]:
+    """Inverse of `controls_for` — for a given (framework,
+    control_id), return the set of rule-keys (CWE IDs +
+    category labels) in our corpus that map to it.
+
+    The set size is the "rule-corpus depth" for that control:
+    how many distinct rules strix would surface against it. An
+    auditor reading the evidence can use this to judge "how
+    aggressively did strix probe this control" — a control
+    with 12 mapped rules where 12 ran is well-covered; one with
+    1 mapped rule is thin.
+
+    Returns an empty set when the control isn't covered.
+    """
+    target = (framework, control_id)
+    out: set[str] = set()
+    for cwe, controls in CWE_TO_CONTROLS.items():
+        if target in controls:
+            out.add(cwe)
+    for category, controls in CATEGORY_TO_CONTROLS.items():
+        if target in controls:
+            out.add(f"category:{category}")
+    return out
+
+
+def corpus_size_for_control(framework: str, control_id: str) -> int:
+    """Count of distinct rules in our corpus mapping to this
+    control. Convenience wrapper around `rules_for_control`."""
+    return len(rules_for_control(framework, control_id))
+
+
 def untested_controls(
     frameworks: Iterable[str] | None = None,
 ) -> list[tuple[str, str]]:
