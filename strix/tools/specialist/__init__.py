@@ -36,6 +36,9 @@ from strix.tools.specialist import scan_deserialization as _scan_deserialization
 from strix.tools.specialist import scan_blind_cmd_injection as _scan_blind_cmd_injection  # noqa: F401  # Phase 4.3
 from strix.tools.specialist import scan_oob_xxe as _scan_oob_xxe  # noqa: F401  # Phase 4.2
 from strix.tools.specialist import scan_idor as _scan_idor  # noqa: F401  # Phase 4.1
+from strix.tools.specialist import scan_api_rate_limit as _scan_api_rate_limit  # noqa: F401  # api target type
+from strix.tools.specialist import scan_api_bola as _scan_api_bola  # noqa: F401  # api target type / OWASP API1
+from strix.tools.specialist import scan_api_bfla as _scan_api_bfla  # noqa: F401  # api target type / OWASP API5
 from strix.tools.specialist import scan_multi_role_auth as _scan_multi_role_auth  # noqa: F401  # Phase 3.1
 from strix.tools.specialist import scan_oauth as _scan_oauth  # noqa: F401  # Phase 2.11
 from strix.tools.specialist import scan_request_smuggling_active as _scan_request_smuggling_active  # noqa: F401  # Phase 2.10
