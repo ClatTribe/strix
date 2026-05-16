@@ -206,10 +206,16 @@ def test_id_fields_disabled_by_default() -> None:
             return 200, '{"user_id": 1, "ok": true}'
         return 400, '{"error": "missing user_id"}'
 
+    # Disable EVERY probe source — canonical authz, canonical id,
+    # AND schema-aware. With all three off, there are no probe
+    # fields and the tool returns error. (Default is
+    # probe_schema_aware=True, which keeps the run alive when
+    # endpoints have schema info; explicitly turn it off here.)
     result = scan_api_mass_assignment(
         endpoints=[_endpoint(url="https://api/v1/users", method="POST")],
         auth_label="user-a", confirm_mutation=True,
         probe_authz_fields=False, probe_id_fields=False,
+        probe_schema_aware=False,
         _fetcher=fetcher,
     )
     # No probe fields → returns error
