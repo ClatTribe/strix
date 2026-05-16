@@ -392,6 +392,29 @@ def reverse_ip_discovery(
                 verification_status="verified",
             )
 
+    # KG: emit Asset nodes for every resolved IP (RUNS_ON parent
+    # target) and every co-tenant domain discovered (sibling
+    # neighbour). Cross-tool correlation: a vt_reputation hit on
+    # one neighbour automatically lands on the same Asset.
+    try:
+        from strix.agents.kg_emit import record_asset_in_kg
+
+        for ip in ips:
+            record_asset_in_kg(
+                asset_type="ip_address",
+                value=ip,
+                source="reverse_ip",
+                parent_value=target,
+            )
+        for neighbour in merged:
+            record_asset_in_kg(
+                asset_type="domain",
+                value=neighbour,
+                source="reverse_ip",
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "success": True,
         "target": target,

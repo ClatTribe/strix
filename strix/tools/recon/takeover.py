@@ -567,6 +567,32 @@ def subdomain_takeover_check(
 
     results = [_check_one(h) for h in hosts]
     candidates = [r for r in results if r.get("candidate")]
+
+    # KG: every checked subdomain is part of the recon surface —
+    # emit an Asset per host (whether takeover-candidate or not)
+    # so the graph reflects the discovery + the subset that needs
+    # follow-up. Takeover candidates get an extra `takeover_candidate`
+    # property the wrapper can render.
+    try:
+        from strix.agents.kg_emit import record_asset_in_kg
+
+        for r in results:
+            host = r.get("subdomain") or r.get("host")
+            if not isinstance(host, str) or not host:
+                continue
+            props: dict[str, Any] = {}
+            if r.get("candidate"):
+                props["takeover_candidate"] = True
+            record_asset_in_kg(
+                asset_type="subdomain",
+                value=host,
+                source="subdomain_takeover_check",
+                parent_value=domain,
+                properties=props or None,
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "success": True,
         "domain": domain,

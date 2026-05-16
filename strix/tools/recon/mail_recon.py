@@ -444,6 +444,22 @@ def mx_fingerprint(
         f"{sum(1 for r in mx_results if r['success'])} reachable",
     )
 
+    # KG: emit an Asset per MX host so threat-intel / vuln-
+    # correlation on mail infrastructure joins on the shared node.
+    try:
+        from strix.agents.kg_emit import record_asset_in_kg
+
+        for pref, host in mx_records:
+            record_asset_in_kg(
+                asset_type="mx_record",
+                value=host,
+                source="mail_recon",
+                parent_value=domain,
+                properties={"preference": pref},
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "success": True,
         "domain": domain,
