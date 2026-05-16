@@ -472,6 +472,111 @@ def _record_in_kg(
         logger.debug("scan_sqli: kg record failed: %s", e, exc_info=True)
 
 
+# ---------------------------------------------------------------------------
+# §4 / P1 — re-run handler registration. After a Patcher proposes
+# a fix and applies it, `auto_verify_patch` calls into this to
+# re-fire the original SQLi detection against the (assumed-patched)
+# target. Returns `no_longer_fires` if the fix held, `still_fires`
+# if it didn't, or `indeterminate` on network errors.
+# ---------------------------------------------------------------------------
+
+
+def _rerun_sqli(*, finding_context: dict[str, Any]) -> "Any":
+    """Re-fire the SQLi probe that originally triggered the finding.
+    Reconstructs the (url, param) probe from the §3 KG Surface +
+    Vuln props that were captured at emit time."""
+    from strix.agents.rerun_registry import RerunResult
+    import time as _time
+    start = _time.monotonic()
+    url = finding_context.get("url") or ""
+    param = finding_context.get("param") or ""
+    detection_kind = finding_context.get("detection_kind") or "error"
+
+    if not url or not param:
+        return RerunResult(
+            outcome="indeterminate",
+            detail="missing url/param in finding_context",
+        )
+
+    try:
+        from strix.tools.proxy.proxy_manager import get_proxy_manager
+        pm = get_proxy_manager()
+    except Exception:  # noqa: BLE001
+        return RerunResult(
+            outcome="indeterminate",
+            detail="proxy_manager unavailable",
+            elapsed_seconds=_time.monotonic() - start,
+        )
+
+    if detection_kind == "error":
+        probe_payload = _PROBE_PAYLOADS["error_trigger"]
+    elif detection_kind == "auth_bypass":
+        probe_payload = "' OR 1=1--"
+    else:
+        probe_payload = _PROBE_PAYLOADS["boolean_true"]
+
+    probe_url = _build_url_with_param(
+        url, param_name=param, value=probe_payload,
+    )
+    try:
+        resp = pm.send_simple_request(
+            "GET", probe_url, headers={}, body="", timeout=15,
+        )
+    except Exception as e:  # noqa: BLE001
+        return RerunResult(
+            outcome="indeterminate",
+            detail=f"probe transport error: {e}",
+            elapsed_seconds=_time.monotonic() - start,
+        )
+
+    body = resp.get("body") or ""
+    if not isinstance(body, str):
+        body = ""
+
+    if detection_kind == "error":
+        detected, engine = _detect_db_error(body)
+        return RerunResult(
+            outcome="still_fires" if detected else "no_longer_fires",
+            detail=(
+                f"error fingerprint matched ({engine})"
+                if detected else "no error fingerprint"
+            ),
+            elapsed_seconds=_time.monotonic() - start,
+            evidence={"probe_url": probe_url, "status": resp.get("status_code")},
+        )
+    # boolean / auth_bypass — coarse equality check
+    baseline = pm.send_simple_request(
+        "GET", url, headers={}, body="", timeout=15,
+    ) if hasattr(pm, "send_simple_request") else None
+    baseline_body = (baseline or {}).get("body") or ""
+    if isinstance(baseline_body, str) and body == baseline_body:
+        return RerunResult(
+            outcome="no_longer_fires",
+            detail="response equals baseline; SQLi behaviour gone",
+            elapsed_seconds=_time.monotonic() - start,
+        )
+    return RerunResult(
+        outcome="still_fires",
+        detail=f"response still differs from baseline ({len(body)}B vs {len(baseline_body)}B)",
+        elapsed_seconds=_time.monotonic() - start,
+        evidence={"probe_url": probe_url},
+    )
+
+
+def _register_rerun_handler() -> None:
+    """Register the SQLi re-run callable in the rerun registry.
+    Called once at module load (after the registry imports the
+    scanner module)."""
+    try:
+        from strix.agents.rerun_registry import register_rerun
+        register_rerun(category="sqli", cwe="CWE-89")(_rerun_sqli)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("scan_sqli: rerun handler register failed: %s", e)
+
+
+_register_rerun_handler()
+
+
 @register_specialist_tool(
     category="sqli-specialist",
     # Phase 3b — adaptive-retry inner-LLM enabled. See scan_xss.py

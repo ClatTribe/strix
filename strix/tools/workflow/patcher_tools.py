@@ -168,3 +168,153 @@ def list_patches(
         "total": len(patches),
         "patches": [p.to_dict() for p in patches],
     }
+
+
+@register_tool(sandbox_execution=False, mitre_techniques=[])
+def auto_verify_patch(patch_id: str) -> dict[str, Any]:
+    """Auto-verify a proposed patch by re-running the original
+    detector against the (assumed-patched) target. Closes the
+    §4 EXPLOITED → PATCHED loop without the patcher needing to
+    manually re-fire the original probe.
+
+    Flow:
+      1. Look up the patch in the registry.
+      2. Locate the linked finding's §3 KG Vuln node and its
+         Surface neighbor (carries url / param / method context).
+      3. Find the registered re-run handler for the
+         `(category, cwe)` pair via `rerun_registry`.
+      4. Invoke the handler with `finding_context`.
+      5. Translate the structured `RerunResult` into a
+         `verify_patch(probe_result_still_fires=...)` call —
+         on `no_longer_fires`, the §4 pipeline auto-advances
+         the finding EXPLOITED → PATCHED.
+
+    Returns:
+      ```
+      {
+        "success": <bool>,
+        "reason": str,
+        "patch": {...},
+        "rerun_outcome": "still_fires" | "no_longer_fires" | "indeterminate",
+        "rerun_detail": str,
+        "rerun_elapsed_seconds": float,
+      }
+      ```
+
+    When no re-run handler is registered for the finding's
+    category (e.g. SAST findings, threat-intel observations, or
+    findings that pre-date the KG-adoption work), returns
+    `success=False, reason="manual_verification_required ..."`.
+    Patcher specialist should fall back to manual `verify_patch`
+    in that case.
+
+    `STRIX_RERUN_REGISTRY_DISABLED=1` causes the registry to
+    return None for every lookup, forcing the manual fallback
+    path.
+    """
+    proposal = _registry().get(patch_id)
+    if proposal is None:
+        return {
+            "success": False,
+            "reason": "patch not found",
+            "patch": None,
+            "rerun_outcome": None,
+            "rerun_detail": "",
+        }
+
+    finding_id = proposal.finding_id
+    try:
+        from strix.agents.knowledge_graph import get_kg
+        kg = get_kg()
+        vulns = kg.query_nodes(
+            type="Vuln", filters={"finding_id": finding_id},
+        )
+    except Exception as e:  # noqa: BLE001
+        return {
+            "success": False,
+            "reason": f"KG lookup failed: {e}",
+            "patch": proposal.to_dict(),
+            "rerun_outcome": None,
+            "rerun_detail": "",
+        }
+
+    if not vulns:
+        return {
+            "success": False,
+            "reason": (
+                f"no KG Vuln found for finding_id={finding_id} — "
+                f"scanner may not have populated the KG. Use "
+                f"manual `verify_patch(probe_result_still_fires=...)`."
+            ),
+            "patch": proposal.to_dict(),
+            "rerun_outcome": None,
+            "rerun_detail": "",
+        }
+
+    vuln = vulns[0]
+    category = vuln.props.get("category") or ""
+    cwe = vuln.props.get("cwe")
+
+    from strix.agents.rerun_registry import lookup_rerun_lazy
+    rerun_fn = lookup_rerun_lazy(category=category, cwe=cwe)
+    if rerun_fn is None:
+        return {
+            "success": False,
+            "reason": f"manual_verification_required ({category}/{cwe})",
+            "patch": proposal.to_dict(),
+            "rerun_outcome": None,
+            "rerun_detail": (
+                "No re-run handler registered for this category. "
+                "Manually re-fire the original detection and call "
+                "`verify_patch(probe_result_still_fires=...)`."
+            ),
+        }
+
+    finding_context: dict[str, Any] = dict(vuln.props)
+    surfaces = kg.neighbors(vuln.id, direction="out", edge_type="AFFECTS")
+    if surfaces:
+        s = surfaces[0]
+        finding_context.update({
+            "url": s.props.get("url", ""),
+            "param": s.props.get("param", ""),
+            "method": s.props.get("method", "GET"),
+        })
+
+    try:
+        result = rerun_fn(finding_context=finding_context)
+    except Exception as e:  # noqa: BLE001
+        return {
+            "success": False,
+            "reason": f"rerun handler raised: {type(e).__name__}: {e}",
+            "patch": proposal.to_dict(),
+            "rerun_outcome": "indeterminate",
+            "rerun_detail": str(e),
+        }
+
+    if result.outcome == "indeterminate":
+        return {
+            "success": False,
+            "reason": (
+                f"rerun indeterminate ({result.detail}); "
+                f"fall back to manual verify_patch"
+            ),
+            "patch": proposal.to_dict(),
+            "rerun_outcome": "indeterminate",
+            "rerun_detail": result.detail,
+        }
+
+    still_fires = (result.outcome == "still_fires")
+    verify_result = verify_patch(
+        patch_id=patch_id,
+        probe_result_still_fires=still_fires,
+        probe_evidence=result.detail,
+    )
+
+    return {
+        "success": verify_result["success"],
+        "reason": verify_result["reason"],
+        "patch": verify_result["patch"],
+        "rerun_outcome": result.outcome,
+        "rerun_detail": result.detail,
+        "rerun_elapsed_seconds": result.elapsed_seconds,
+    }

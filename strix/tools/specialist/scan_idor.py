@@ -354,6 +354,31 @@ def _record_in_kg(
         logger.debug("scan_idor: kg record failed: %s", e, exc_info=True)
 
 
+# §4 / P1 — IDOR re-run requires TWO captured sessions. Without a
+# second auth context, we can't run a cross-session probe and the
+# safe answer is "manual verification required".
+
+def _rerun_idor(*, finding_context: dict[str, Any]) -> "Any":
+    from strix.agents.rerun_registry import RerunResult
+    return RerunResult(
+        outcome="indeterminate",
+        detail=(
+            "IDOR re-run requires TWO authenticated sessions; the "
+            "auto-verifier doesn't carry session state across patcher "
+            "runs. Re-dispatch the idor specialist with both sessions "
+            "to confirm."
+        ),
+    )
+
+
+try:
+    from strix.agents.rerun_registry import register_rerun
+    register_rerun(category="idor", cwe="CWE-639")(_rerun_idor)
+    register_rerun(category="missing_auth", cwe="CWE-862")(_rerun_idor)
+except Exception as e:  # noqa: BLE001
+    logger.debug("scan_idor: rerun register failed: %s", e)
+
+
 @register_specialist_tool(
     category="idor-specialist",
     # Phase 3b — adaptive-retry inner-LLM enabled. See scan_xss.py

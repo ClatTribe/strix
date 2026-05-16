@@ -237,6 +237,64 @@ def _record_in_kg(
         logger.debug("scan_ssrf: kg record failed: %s", e, exc_info=True)
 
 
+# §4 / P1 — re-run handler. For SSRF the canonical probe is to
+# point the param at an OAST or known-internal target and check
+# the response fingerprint or callback signal. The patched target
+# should refuse outbound by host-allowlist.
+
+def _rerun_ssrf(*, finding_context: dict[str, Any]) -> "Any":
+    from strix.agents.rerun_registry import RerunResult
+    import time as _time
+    start = _time.monotonic()
+    url = finding_context.get("url") or ""
+    param = finding_context.get("param") or ""
+    if not url or not param:
+        return RerunResult(outcome="indeterminate", detail="missing url/param")
+    try:
+        from strix.tools.proxy.proxy_manager import get_proxy_manager
+        pm = get_proxy_manager()
+    except Exception:  # noqa: BLE001
+        return RerunResult(outcome="indeterminate", detail="proxy unavailable")
+    # Use AWS metadata host as the canonical internal probe — any
+    # response other than `connection error` / `403 by allowlist`
+    # means SSRF is still possible.
+    probe_url = _build_url_with_param(
+        url, param_name=param, value="http://169.254.169.254/latest/meta-data/",
+        other_params={},
+    )
+    try:
+        resp = pm.send_simple_request(
+            "GET", probe_url, headers={}, body="", timeout=15,
+        )
+    except Exception as e:  # noqa: BLE001
+        return RerunResult(
+            outcome="indeterminate", detail=f"transport: {e}",
+            elapsed_seconds=_time.monotonic() - start,
+        )
+    body = resp.get("body") or ""
+    if not isinstance(body, str):
+        body = ""
+    # AWS metadata fingerprint: lines like `iam/` etc; if any cloud-
+    # metadata fingerprint present, still vulnerable.
+    if any(m in body for m in ("ami-id", "instance-id", "iam/", "security-credentials")):
+        return RerunResult(
+            outcome="still_fires", detail="cloud metadata still reachable",
+            elapsed_seconds=_time.monotonic() - start,
+        )
+    return RerunResult(
+        outcome="no_longer_fires",
+        detail="no metadata fingerprint in response",
+        elapsed_seconds=_time.monotonic() - start,
+    )
+
+
+try:
+    from strix.agents.rerun_registry import register_rerun
+    register_rerun(category="ssrf", cwe="CWE-918")(_rerun_ssrf)
+except Exception as e:  # noqa: BLE001
+    logger.debug("scan_ssrf: rerun register failed: %s", e)
+
+
 @register_specialist_tool(
     category="ssrf-specialist",
     llm=False,

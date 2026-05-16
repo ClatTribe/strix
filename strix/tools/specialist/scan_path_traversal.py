@@ -277,6 +277,56 @@ def _emit_finding(
         return None
 
 
+# §4 / P1 — re-run handler. Re-fires the `../etc/passwd` probe
+# against the original (url, param). Patched code stops returning
+# the file contents → no passwd fingerprint.
+
+def _rerun_path_traversal(*, finding_context: dict[str, Any]) -> "Any":
+    from strix.agents.rerun_registry import RerunResult
+    import time as _time
+    start = _time.monotonic()
+    url = finding_context.get("url") or ""
+    param = finding_context.get("param") or ""
+    if not url or not param:
+        return RerunResult(outcome="indeterminate", detail="missing url/param")
+    try:
+        from strix.tools.proxy.proxy_manager import get_proxy_manager
+        pm = get_proxy_manager()
+    except Exception:  # noqa: BLE001
+        return RerunResult(outcome="indeterminate", detail="proxy unavailable")
+    from urllib.parse import urlencode, urlparse, urlunparse, parse_qs
+    parts = urlparse(url)
+    qs = parse_qs(parts.query, keep_blank_values=True)
+    flat = {k: (v[0] if v else "") for k, v in qs.items()}
+    flat[param] = "../../../../etc/passwd"
+    probe_url = urlunparse(parts._replace(query=urlencode(flat)))
+    try:
+        resp = pm.send_simple_request("GET", probe_url, headers={}, body="", timeout=15)
+    except Exception as e:  # noqa: BLE001
+        return RerunResult(outcome="indeterminate", detail=f"transport: {e}")
+    body = resp.get("body") or ""
+    if not isinstance(body, str):
+        body = ""
+    if "root:" in body and "/bin/" in body:
+        return RerunResult(
+            outcome="still_fires",
+            detail="passwd fingerprint present in response",
+            elapsed_seconds=_time.monotonic() - start,
+        )
+    return RerunResult(
+        outcome="no_longer_fires",
+        detail="no passwd fingerprint",
+        elapsed_seconds=_time.monotonic() - start,
+    )
+
+
+try:
+    from strix.agents.rerun_registry import register_rerun
+    register_rerun(category="path_traversal", cwe="CWE-22")(_rerun_path_traversal)
+except Exception as e:  # noqa: BLE001
+    logger.debug("scan_path_traversal: rerun register failed: %s", e)
+
+
 @register_specialist_tool(
     category="path-traversal-specialist",
     llm=False,
