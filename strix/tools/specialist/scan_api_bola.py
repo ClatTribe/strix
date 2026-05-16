@@ -141,6 +141,56 @@ def _auth_headers_for_label(label: str) -> dict[str, str]:
         return {}
 
 
+def _accessor_response_leaks_owner_ids(
+    accessor_body: str, owner_id_values: list[str],
+) -> tuple[bool, list[str]]:
+    """True iff the accessor's response body contains any of the
+    owner's ID values verbatim.
+
+    Used for the two non-exact-match BOLA detection paths:
+      * **Partial leak** — exact-hash check failed but accessor's
+        body still contains owner-identifying IDs (subset of
+        owner's response, or owner's record fields rendered into
+        a multi-record list).
+      * **List-endpoint BOLA** — endpoints with no path param
+        (e.g. `GET /orders`) whose list response contains
+        owner-only resource IDs the accessor shouldn't see.
+
+    Matching is conservative to avoid false positives on
+    coincidentally-shared numeric substrings:
+      * IDs containing non-numeric chars match anywhere
+        (high-entropy enough to be unambiguous).
+      * Pure-numeric IDs require word-boundary or JSON-quote
+        framing — e.g. `"42"` or `:42,` patterns.
+
+    Returns `(leaks, matched_ids)` — `matched_ids` is the subset
+    of owner IDs that appeared in the accessor's response.
+    """
+    if not accessor_body:
+        return False, []
+
+    import re
+
+    leaks: list[str] = []
+    for v in owner_id_values:
+        if not isinstance(v, str) or not v.strip():
+            continue
+        v_stripped = v.strip()
+        # High-entropy / non-numeric IDs (UUIDs, slugs, mixed-case
+        # tokens) — straight substring match is unambiguous.
+        if not v_stripped.isdigit():
+            if v_stripped in accessor_body:
+                leaks.append(v_stripped)
+            continue
+        # Numeric ID — word-boundary regex match. `\b` doesn't fall
+        # between two digits, so `\b42\b` won't match `42` inside
+        # `1042` or `4242` but DOES match `: 42,`, `[42]`, `,42}`,
+        # quoted forms `"42"`, etc. — every JSON-framed position.
+        if re.search(rf'\b{re.escape(v_stripped)}\b', accessor_body):
+            leaks.append(v_stripped)
+    return bool(leaks), leaks
+
+
 @register_specialist_tool(
     category="api-bola-specialist",
     llm=False,
@@ -156,33 +206,53 @@ def scan_api_bola(
     accessor_label: str = "user-b",
     owner_ids: dict[str, str] | None = None,
     accessor_ids: dict[str, str] | None = None,
+    probe_list_endpoints: bool = True,
     timeout_seconds: float = 8.0,
     max_endpoints: int = 50,
     _fetcher=None,
 ) -> SpecialistResult:
     """Probe OpenAPI-ingested endpoints for OWASP API1 BOLA.
 
+    Three detection paths:
+      1. **Exact BOLA** — accessor probe at owner's URL returns 200
+         AND body hash matches owner's. The strongest signal.
+      2. **Partial leak** — accessor probe returns 200 with body
+         that doesn't exact-match owner's, but owner's ID values
+         appear in the accessor's response. Catches BOLA where
+         accessor sees a SUBSET of owner's fields (e.g. a public
+         profile renderer that leaks a private field).
+      3. **List endpoint** — endpoints with NO path param but
+         `auth_required` (e.g. `GET /orders`). Probe with both
+         labels; if accessor's list response contains owner-only
+         IDs, that's BOLA-via-list (returned everyone's records).
+
     Args:
         endpoints: list of endpoint dicts from
-            `openapi_spec_ingest` — each has `url` (with
+            `openapi_spec_ingest` — each has `url` (with optional
             `{param}` placeholders), `method`, `auth_required`,
-            `params`. Only endpoints with at least one path
-            parameter AND auth_required are probed.
+            `params`.
         owner_label: AuthState label of the resource owner.
         accessor_label: AuthState label of a different user
             (who should NOT see owner's records).
         owner_ids: dict mapping path-param names → owner's
             object IDs (e.g. `{"id": "42", "orderId": "1001"}`).
+            REQUIRED — also used as the ID corpus for partial-
+            leak + list-endpoint detection.
         accessor_ids: optional accessor's own IDs. When
             supplied, the helper ALSO probes "accessor fetches
             their own record" → status_a baseline.
+        probe_list_endpoints: when True (default), endpoints
+            WITHOUT path parameters are ALSO probed for BOLA-via-
+            list. Set False to scope to the strict per-resource
+            path-param test only.
         timeout_seconds: per-request HTTP timeout.
         max_endpoints: cap probe count.
         _fetcher: injection point for tests.
 
     Returns:
         `SpecialistResult` with one finding per BOLA-positive
-        endpoint.
+        endpoint. Detection level recorded in the finding's
+        `reasoning_trace`.
 
     Kill switch: `STRIX_API_BOLA_DISABLED=1`.
     """
@@ -223,6 +293,17 @@ def scan_api_bola(
     probed = 0
     skipped_no_path_params = 0
     skipped_anonymous = 0
+    list_endpoint_probed = 0
+    list_endpoints_to_check: list[dict[str, Any]] = []
+
+    # Owner-ID values used by the partial-leak + list-endpoint
+    # checks. We accept str or stringifiable values from the
+    # caller; non-str path-param values still need to flow through
+    # the body-substring search.
+    owner_id_values: list[str] = [
+        str(v) for v in (owner_ids or {}).values()
+        if v is not None and str(v).strip()
+    ]
 
     for ep in endpoints:
         if probed >= max_endpoints:
@@ -231,10 +312,13 @@ def scan_api_bola(
         method = (ep.get("method") or "GET").upper()
         if not isinstance(url_template, str) or not url_template:
             continue
-        # Need at least one path parameter — that's the BOLA
-        # surface. No-param endpoints can't be BOLA-tested this way.
+        # No-path-param endpoints — defer to the list-endpoint
+        # pass (only when probe_list_endpoints is on AND the
+        # endpoint is auth-walled).
         if not _PATH_PARAM_RE.search(url_template):
             skipped_no_path_params += 1
+            if probe_list_endpoints and ep.get("auth_required"):
+                list_endpoints_to_check.append(ep)
             continue
         # Skip anonymous endpoints; BOLA only applies to
         # auth-walled surfaces.
@@ -322,8 +406,142 @@ def scan_api_bola(
                     f"status={accessor_status}, "
                     f"body_hash={accessor_hash}.",
                     "Hashes match → accessor read owner's record → BOLA.",
+                    "Detection level: exact-hash (full BOLA).",
                 ],
             ))
+            continue
+
+        # Partial-leak BOLA: accessor's body differs from owner's
+        # exact hash BUT contains identifying owner-IDs. Catches
+        # cases where the endpoint renders a subset of fields
+        # (public profile view that leaks a private one) OR
+        # where the endpoint returns owner's record alongside a
+        # tenant identifier the accessor shouldn't see.
+        if accessor_status == 200 and owner_id_values:
+            leaked, matched_ids = _accessor_response_leaks_owner_ids(
+                accessor_body, owner_id_values,
+            )
+            if leaked:
+                findings.append(FindingDraft(
+                    title=(
+                        f"Partial-leak BOLA at {method} {url_template} "
+                        f"— {accessor_label} saw {owner_label}'s "
+                        f"identifiers"
+                    ),
+                    severity="high",
+                    cwe="CWE-639",
+                    endpoint=target_url,
+                    category="api_bola",
+                    description=(
+                        f"Endpoint `{method} {url_template}` returned "
+                        f"a 200 response to `{accessor_label}` whose "
+                        f"body does NOT exact-match `{owner_label}`'s "
+                        f"(hashes differ) — but the accessor's body "
+                        f"contains owner-only ID(s): "
+                        f"{', '.join(repr(i) for i in matched_ids[:5])}. "
+                        f"This is the partial-leak variant of OWASP "
+                        f"API1:2023 BOLA — the endpoint renders a "
+                        f"subset of owner's record (or owner's ID in "
+                        f"a multi-record response) to an "
+                        f"unauthorised reader. Severity is high "
+                        f"because the leaked fields commonly include "
+                        f"PII the application's authz model meant to "
+                        f"restrict."
+                    ),
+                    verification_status="verified",
+                    confidence=0.85,
+                    reasoning_trace=[
+                        f"Owner probe: status={owner_status}, "
+                        f"body_hash={owner_hash}.",
+                        f"Accessor probe: status={accessor_status}, "
+                        f"body_hash={accessor_hash} (no exact match).",
+                        f"Owner ID(s) appearing in accessor body: "
+                        f"{matched_ids[:5]}.",
+                        "Detection level: partial-leak BOLA.",
+                    ],
+                ))
+
+    # ---- Phase 2: list-endpoint BOLA ----
+    # Endpoints that have NO path parameter but are auth-walled.
+    # Probe with both labels; if the accessor's response contains
+    # owner-only IDs, the endpoint returned more than just the
+    # accessor's own records.
+    if probe_list_endpoints and list_endpoints_to_check and owner_id_values:
+        for ep in list_endpoints_to_check:
+            if list_endpoint_probed >= max_endpoints:
+                break
+            url = ep.get("url", "")
+            method = (ep.get("method") or "GET").upper()
+            if not isinstance(url, str) or not url:
+                continue
+            # Only GET list endpoints — POST/PUT lists with body
+            # would need a request body too, which is out of scope
+            # for this heuristic.
+            if method != "GET":
+                continue
+
+            list_endpoint_probed += 1
+
+            owner_status, owner_body = fetcher(
+                url=url, method=method,
+                headers=owner_headers, timeout=timeout_seconds,
+            )
+            if owner_status is None or owner_status >= 400:
+                evidence.append(
+                    f"list-endpoint owner probe non-OK on {url}: "
+                    f"status={owner_status}; skipping"
+                )
+                continue
+
+            accessor_status, accessor_body = fetcher(
+                url=url, method=method,
+                headers=accessor_headers, timeout=timeout_seconds,
+            )
+            if accessor_status is None or accessor_status != 200:
+                evidence.append(
+                    f"list-endpoint accessor probe non-OK on {url}: "
+                    f"status={accessor_status}; not a leak"
+                )
+                continue
+
+            leaked, matched_ids = _accessor_response_leaks_owner_ids(
+                accessor_body, owner_id_values,
+            )
+            if leaked:
+                findings.append(FindingDraft(
+                    title=(
+                        f"List-endpoint BOLA at {method} {url} — "
+                        f"{accessor_label} saw {owner_label}'s IDs"
+                    ),
+                    severity="high",
+                    cwe="CWE-639",
+                    endpoint=url,
+                    category="api_bola",
+                    description=(
+                        f"Endpoint `{method} {url}` returned a list "
+                        f"response to `{accessor_label}` that contains "
+                        f"owner-only ID(s): "
+                        f"{', '.join(repr(i) for i in matched_ids[:5])}. "
+                        f"This is the list-endpoint variant of OWASP "
+                        f"API1:2023 BOLA — the endpoint authenticates "
+                        f"but doesn't filter by ownership; everyone "
+                        f"gets everyone's records. Common pattern on "
+                        f"`/orders`, `/transactions`, `/messages` "
+                        f"endpoints that should have been "
+                        f"`/users/{{me}}/orders`."
+                    ),
+                    verification_status="verified",
+                    confidence=0.9,
+                    reasoning_trace=[
+                        f"Owner ({owner_label}) probe at {url}: "
+                        f"status={owner_status}.",
+                        f"Accessor ({accessor_label}) probe at "
+                        f"same URL: status={accessor_status}.",
+                        f"Owner-only ID(s) in accessor body: "
+                        f"{matched_ids[:5]}.",
+                        "Detection level: list-endpoint BOLA.",
+                    ],
+                ))
 
     return SpecialistResult(
         status="ok",
@@ -331,6 +549,7 @@ def scan_api_bola(
         evidence=evidence,
         tool_metadata={
             "probed": probed,
+            "list_endpoint_probed": list_endpoint_probed,
             "skipped_no_path_params": skipped_no_path_params,
             "skipped_anonymous": skipped_anonymous,
             "bola_findings": len(findings),
