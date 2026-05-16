@@ -149,14 +149,34 @@ def _trivy_available() -> bool:
     return shutil.which(_TRIVY_BIN) is not None
 
 
+_DEFAULT_TRIVY_SCANNERS = "vuln,misconfig,secret"
+
+
+def _trivy_scanners() -> str:
+    """Trivy `--scanners` value. Defaults to `vuln,misconfig,secret`
+    so the same scan surfaces CVEs + Dockerfile/Compose misconfigs +
+    secrets-in-layers. Operators can override via
+    `STRIX_TRIVY_SCANNERS` env var (e.g. `vuln` only for fast scans).
+    """
+    raw = os.environ.get("STRIX_TRIVY_SCANNERS", "").strip()
+    return raw if raw else _DEFAULT_TRIVY_SCANNERS
+
+
 def _run_trivy_scan(
     image_ref: str, *, timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Run `trivy image --format json <ref>`. Returns `(report, error)`.
+    """Run `trivy image --format json <ref>` with the configured
+    scanners. Returns `(report, error)`.
 
-    `report` is the parsed JSON when Trivy succeeded; `None` otherwise.
-    `error` is a human-readable string when Trivy failed; `None` on
-    success.
+    `report` is the parsed JSON when Trivy succeeded; `None`
+    otherwise. `error` is a human-readable string when Trivy failed;
+    `None` on success.
+
+    Scanners default to `vuln,misconfig,secret` — covers CVE
+    package vulns + Dockerfile/Compose misconfigs (USER root,
+    exposed ports, hardcoded passwords) + secrets-in-layers
+    (AWS keys, JWT tokens, hardcoded API keys). Override via
+    `STRIX_TRIVY_SCANNERS=vuln` for the original CVE-only behaviour.
 
     Trivy exits non-zero on findings by default; we pass
     `--exit-code 0` so any non-zero exit means a real Trivy error.
@@ -170,6 +190,7 @@ def _run_trivy_scan(
         "--quiet",
         "--exit-code", "0",
         "--skip-db-update",
+        "--scanners", _trivy_scanners(),
         "--severity", "LOW,MEDIUM,HIGH,CRITICAL",
         image_ref,
     ]
@@ -273,6 +294,287 @@ def _extract_packages_and_vulns(
             })
 
     return list(packages.values()), vulns
+
+
+def _extract_misconfigurations(
+    report: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Pull Trivy's `Misconfigurations[]` entries from every Result
+    block whose `Class` is `config`. Each entry covers a single
+    Dockerfile / docker-compose / Kubernetes misconfig finding (e.g.
+    `DS002: Image user should not be 'root'`).
+
+    Augments each entry with `_target` (the file path within the
+    image — `Dockerfile` / `docker-compose.yml` / etc.) so the
+    finding-emit step can attribute the issue to a specific layer.
+    """
+    out: list[dict[str, Any]] = []
+    results = report.get("Results") or []
+    if not isinstance(results, list):
+        return []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        klass = str(r.get("Class") or "").lower()
+        if klass != "config":
+            continue
+        target = str(r.get("Target") or "").strip()
+        config_type = str(r.get("Type") or "").strip()
+        for mc in r.get("Misconfigurations") or []:
+            if not isinstance(mc, dict):
+                continue
+            # Only `FAIL` status entries are real findings —
+            # `PASS` / `EXCEPTION` shouldn't surface.
+            status = str(mc.get("Status") or "").strip().upper()
+            if status and status != "FAIL":
+                continue
+            out.append({
+                **mc,
+                "_target": target,
+                "_config_type": config_type,
+            })
+    return out
+
+
+def _extract_secrets(
+    report: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Pull Trivy's `Secrets[]` entries from every Result block
+    whose `Class` is `secret`. Each entry is a secret leak detection
+    (AWS access key, GitHub PAT, hardcoded JWT, etc.).
+
+    Augments each entry with `_target` (the file path) so the
+    emitter can point a reader at the exact location.
+    """
+    out: list[dict[str, Any]] = []
+    results = report.get("Results") or []
+    if not isinstance(results, list):
+        return []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        klass = str(r.get("Class") or "").lower()
+        if klass != "secret":
+            continue
+        target = str(r.get("Target") or "").strip()
+        for s in r.get("Secrets") or []:
+            if not isinstance(s, dict):
+                continue
+            out.append({**s, "_target": target})
+    return out
+
+
+def _emit_misconfig_finding(
+    *,
+    image_ref: str,
+    misconfig: dict[str, Any],
+    severity: str,
+) -> str | None:
+    """Emit one finding per Trivy misconfiguration via the tracer."""
+    try:
+        from strix.telemetry.tracer import get_global_tracer
+
+        tracer = get_global_tracer()
+        if tracer is None:
+            return None
+
+        rule_id = str(misconfig.get("ID") or "").strip()
+        avd_id = str(misconfig.get("AVDID") or "").strip()
+        title = str(misconfig.get("Title") or "").strip()
+        description_text = str(
+            misconfig.get("Description") or ""
+        ).strip()
+        message = str(misconfig.get("Message") or "").strip()
+        resolution = str(misconfig.get("Resolution") or "").strip()
+        primary_url = str(misconfig.get("PrimaryURL") or "").strip()
+        target_layer = misconfig.get("_target") or ""
+        config_type = misconfig.get("_config_type") or ""
+        refs = misconfig.get("References") or []
+        ref_block = (
+            "\n".join(f"  * {r}" for r in refs[:5]) if refs else ""
+        )
+
+        finding_title = (
+            f"{rule_id}: {title} in {target_layer}"
+            if rule_id and title and target_layer
+            else (title or rule_id or "Container misconfiguration")
+        )
+
+        return tracer.add_vulnerability_report(
+            title=finding_title,
+            severity=severity,
+            cwe=None,
+            endpoint=image_ref,
+            target=image_ref,
+            category="misconfiguration",
+            verification_status="pattern_match",
+            confidence=0.92,
+            description=(
+                f"Trivy misconfiguration detection in container "
+                f"image `{image_ref}`.\n\n"
+                f"Rule: {rule_id} ({avd_id or 'no AVD id'})\n"
+                f"Target file: {target_layer} ({config_type})\n\n"
+                f"{description_text}"
+                + (f"\n\nMessage: {message}" if message else "")
+            ),
+            impact=(
+                f"Container-image configuration issue. {message or title}. "
+                f"Direct exploitability depends on deployment posture; "
+                f"this finding flags the misconfiguration as a "
+                f"hardening gap."
+            ),
+            technical_analysis=(
+                f"Image: {image_ref}\n"
+                f"Target file: {target_layer}\n"
+                f"Config type: {config_type}\n"
+                f"Rule: {rule_id}\n"
+                f"AVD ID: {avd_id or '(none)'}\n"
+                f"Trivy-reported severity: {misconfig.get('Severity')}\n"
+                f"Primary reference: {primary_url}\n\n"
+                f"References:\n{ref_block}"
+            ),
+            poc_description=(
+                f"1. Re-run Trivy with config scanner:\n"
+                f"   `trivy image --scanners misconfig "
+                f"--severity HIGH,CRITICAL {image_ref}`\n"
+                f"2. Search for rule ID `{rule_id}` in the output.\n"
+                f"3. Cross-reference the rule at {primary_url} for "
+                f"vendor-recommended fix."
+            ),
+            poc_script_code=(
+                f"trivy image --scanners misconfig --severity "
+                f"HIGH,CRITICAL --quiet {image_ref} | "
+                f"grep -A5 '{rule_id}'"
+            ),
+            remediation_steps=(
+                resolution
+                or f"Apply the fix referenced at {primary_url}."
+            ),
+            cvss_breakdown=None,
+            reasoning_trace=[
+                f"Trivy misconfig scan of {image_ref} reported "
+                f"{rule_id} ({title}) in {target_layer}.",
+                f"Status: FAIL (Trivy gated on Status=FAIL only).",
+                f"Trivy-reported severity: {misconfig.get('Severity')}.",
+                f"Final calibrated severity: {severity}.",
+            ],
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "scan_container_image: misconfig emit failed: %s",
+            e, exc_info=True,
+        )
+        return None
+
+
+def _emit_secret_finding(
+    *,
+    image_ref: str,
+    secret: dict[str, Any],
+    severity: str,
+) -> str | None:
+    """Emit one finding per Trivy secret-leak detection."""
+    try:
+        from strix.telemetry.tracer import get_global_tracer
+
+        tracer = get_global_tracer()
+        if tracer is None:
+            return None
+
+        rule_id = str(secret.get("RuleID") or "").strip()
+        category = str(secret.get("Category") or "").strip()
+        title = str(secret.get("Title") or "").strip()
+        match = str(secret.get("Match") or "").strip()
+        start_line = secret.get("StartLine")
+        target_path = secret.get("_target") or ""
+
+        # Truncate the match to avoid leaking the entire secret into
+        # logs / events — first 16 chars + ellipsis is enough to
+        # identify the issue without exposing the key.
+        match_preview = match[:16] + ("..." if len(match) > 16 else "")
+
+        finding_title = (
+            f"Leaked {category} secret ({rule_id}) in "
+            f"{target_path}:{start_line}"
+            if target_path and start_line is not None
+            else f"Leaked {category or 'secret'} in container image"
+        )
+
+        return tracer.add_vulnerability_report(
+            title=finding_title,
+            severity=severity,
+            cwe="CWE-798",
+            endpoint=image_ref,
+            target=image_ref,
+            category="secrets",
+            verification_status="pattern_match",
+            confidence=0.92,
+            description=(
+                f"Trivy secret-scanner detection in container image "
+                f"`{image_ref}`.\n\n"
+                f"Rule: {rule_id} (category: {category})\n"
+                f"File: {target_path}\n"
+                f"Line: {start_line}\n"
+                f"Match (truncated): `{match_preview}`\n\n"
+                f"{title}"
+            ),
+            impact=(
+                f"Secret material baked into a container image layer "
+                f"is accessible to anyone who can pull the image. "
+                f"Treat as compromised; rotate immediately. "
+                f"Severity reflects the secret type's blast radius "
+                f"(cloud-provider credentials = critical; service-"
+                f"specific API tokens = high)."
+            ),
+            technical_analysis=(
+                f"Image: {image_ref}\n"
+                f"Target file: {target_path}\n"
+                f"Rule: {rule_id}\n"
+                f"Category: {category}\n"
+                f"Start line: {start_line}\n"
+                f"Trivy-reported severity: {secret.get('Severity')}\n"
+                f"Match preview: {match_preview}"
+            ),
+            poc_description=(
+                f"1. Pull the image: `docker pull {image_ref}`\n"
+                f"2. Inspect the offending file:\n"
+                f"   `docker run --rm {image_ref} cat {target_path}`\n"
+                f"3. Re-run Trivy secret-scanner for full match "
+                f"content:\n"
+                f"   `trivy image --scanners secret {image_ref}`"
+            ),
+            poc_script_code=(
+                f"trivy image --scanners secret --quiet {image_ref} | "
+                f"grep -A5 '{rule_id}'"
+            ),
+            remediation_steps=(
+                "1. ROTATE the leaked credential immediately — "
+                "anyone with image-pull access has it.\n"
+                "2. Remove the secret from the image layer history "
+                "(rebuilding from a clean base layer; `docker image "
+                "history` reveals when it was added).\n"
+                "3. Refactor the build to read secrets from runtime "
+                "env vars / a secret manager (AWS Secrets Manager, "
+                "HashiCorp Vault, Doppler) — NEVER bake into a layer.\n"
+                "4. Add a pre-commit / CI gate that runs "
+                "`trivy fs --scanners secret` against the build "
+                "context."
+            ),
+            cvss_breakdown=None,
+            reasoning_trace=[
+                f"Trivy secret scan of {image_ref} reported "
+                f"{rule_id} ({category}) at {target_path}:{start_line}.",
+                f"Trivy-reported severity: {secret.get('Severity')}.",
+                f"Final calibrated severity: {severity}.",
+                "Match content truncated in evidence to avoid log leak.",
+            ],
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "scan_container_image: secret emit failed: %s",
+            e, exc_info=True,
+        )
+        return None
 
 
 def _decorate_with_threat_intel(
@@ -559,6 +861,8 @@ def scan_container_image(
         )
 
     packages, vulns = _extract_packages_and_vulns(report)
+    misconfigs = _extract_misconfigurations(report)
+    secrets = _extract_secrets(report)
 
     # Phase 1: emit Dependency KG nodes for every package the image
     # contains — vulnerable or not. Feeds MOAK feed-trigger.
@@ -569,6 +873,8 @@ def scan_container_image(
     evidence: list[str] = []
     emitted_count = 0
     deduped_seen: set[tuple[str, str, str]] = set()
+    misconfig_emitted = 0
+    secret_emitted = 0
 
     # Phase 2: emit one finding per (CVE, pkg, version) — dedup so
     # the same CVE-package pair doesn't double-emit when Trivy
@@ -625,6 +931,107 @@ def scan_container_image(
                 f"epss={epss if epss is not None else 'n/a'})"
             )
 
+    # Phase 3: emit one finding per Dockerfile / docker-compose /
+    # Kubernetes misconfiguration. Trivy's `Status=FAIL` filter is
+    # applied upstream in `_extract_misconfigurations`.
+    misconfig_dedup: set[tuple[str, str]] = set()
+    for mc in misconfigs:
+        if emitted_count + misconfig_emitted >= max_findings:
+            evidence.append(
+                f"max_findings cap ({max_findings}) reached during "
+                f"misconfig phase — truncating output"
+            )
+            break
+        rule_id = str(mc.get("ID") or "").strip()
+        target_layer = str(mc.get("_target") or "").strip()
+        if not rule_id:
+            continue
+        dkey = (rule_id, target_layer)
+        if dkey in misconfig_dedup:
+            continue
+        misconfig_dedup.add(dkey)
+
+        trivy_sev = _TRIVY_SEV_MAP.get(
+            str(mc.get("Severity") or "").strip().upper(),
+            "medium",
+        )
+        report_id = _emit_misconfig_finding(
+            image_ref=image_ref, misconfig=mc, severity=trivy_sev,
+        )
+        if report_id:
+            misconfig_emitted += 1
+            drafts.append(FindingDraft(
+                title=(
+                    f"{rule_id}: {str(mc.get('Title') or '')[:60]}"
+                ),
+                severity=trivy_sev,
+                cwe=None,
+                endpoint=image_ref,
+                category="misconfiguration",
+                verification_status="pattern_match",
+                confidence=0.92,
+                description=(
+                    f"Misconfig {rule_id} in {target_layer} of "
+                    f"{image_ref}"
+                ),
+            ))
+            evidence.append(
+                f"misconfig: {rule_id} ({target_layer}) "
+                f"severity={trivy_sev}"
+            )
+
+    # Phase 4: emit one finding per secret-leak detection. Dedup by
+    # (rule_id, target_path, start_line) so the same leak isn't
+    # double-emitted from multiple layer scans.
+    secret_dedup: set[tuple[str, str, Any]] = set()
+    for s in secrets:
+        if emitted_count + misconfig_emitted + secret_emitted >= max_findings:
+            evidence.append(
+                f"max_findings cap ({max_findings}) reached during "
+                f"secret phase — truncating output"
+            )
+            break
+        rule_id = str(s.get("RuleID") or "").strip()
+        target_path = str(s.get("_target") or "").strip()
+        start_line = s.get("StartLine")
+        if not rule_id:
+            continue
+        skey = (rule_id, target_path, start_line)
+        if skey in secret_dedup:
+            continue
+        secret_dedup.add(skey)
+
+        trivy_sev = _TRIVY_SEV_MAP.get(
+            str(s.get("Severity") or "").strip().upper(),
+            "high",
+        )
+        report_id = _emit_secret_finding(
+            image_ref=image_ref, secret=s, severity=trivy_sev,
+        )
+        if report_id:
+            secret_emitted += 1
+            category_short = str(s.get("Category") or "secret")
+            drafts.append(FindingDraft(
+                title=(
+                    f"Leaked {category_short} ({rule_id}) at "
+                    f"{target_path}"
+                ),
+                severity=trivy_sev,
+                cwe="CWE-798",
+                endpoint=image_ref,
+                category="secrets",
+                verification_status="pattern_match",
+                confidence=0.92,
+                description=(
+                    f"{rule_id} secret detected at "
+                    f"{target_path}:{start_line} in {image_ref}"
+                ),
+            ))
+            evidence.append(
+                f"secret: {rule_id} at {target_path}:{start_line} "
+                f"(category={category_short}, severity={trivy_sev})"
+            )
+
     # Phase 1.6 — decision provenance log.
     try:
         from strix.agents.decision_log import record_decision
@@ -635,9 +1042,13 @@ def scan_container_image(
             actor={"tool_name": "scan_container_image"},
             input={"image_ref": image_ref},
             output={
-                "findings_emitted": emitted_count,
+                "findings_emitted_cves": emitted_count,
+                "findings_emitted_misconfigs": misconfig_emitted,
+                "findings_emitted_secrets": secret_emitted,
                 "packages_observed": len(packages),
                 "vulnerabilities_observed": len(vulns),
+                "misconfigurations_observed": len(misconfigs),
+                "secrets_observed": len(secrets),
             },
         )
     except Exception:  # noqa: BLE001
@@ -659,7 +1070,15 @@ def scan_container_image(
             "image_ref": image_ref,
             "packages_observed": len(packages),
             "vulnerabilities_observed": len(vulns),
-            "findings_emitted_to_tracer": emitted_count,
+            "misconfigurations_observed": len(misconfigs),
+            "secrets_observed": len(secrets),
+            "findings_emitted_cves": emitted_count,
+            "findings_emitted_misconfigs": misconfig_emitted,
+            "findings_emitted_secrets": secret_emitted,
+            "findings_emitted_to_tracer": (
+                emitted_count + misconfig_emitted + secret_emitted
+            ),
+            "trivy_scanners": _trivy_scanners(),
             "trivy_schema_version": report.get("SchemaVersion"),
             "image_metadata": report.get("Metadata") or {},
         },
