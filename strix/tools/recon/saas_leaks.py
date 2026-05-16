@@ -42,6 +42,15 @@ from ._common import complete_check, emit_finding, start_check
 
 
 logger = logging.getLogger(__name__)
+
+
+def _fingerprint_for_saas_leak(url: str, snippet: str) -> str:
+    """Stable fingerprint for a SaaS leak: hash of the URL + a
+    snippet excerpt. Lets dedup catch the same leak surfaced by
+    multiple provider searches without storing the snippet."""
+    import hashlib
+    data = f"{url}|{snippet[:200]}".encode("utf-8")
+    return hashlib.sha256(data).hexdigest()[:16]
 _TOOL_NAME = "saas_leak_discovery"
 _HTTP_TIMEOUT = 12
 
@@ -321,7 +330,7 @@ def saas_leak_discovery(
             title_prefix = (
                 "Possible secret leak in" if has_secret else "Public SaaS reference on"
             )
-            emit_finding(
+            finding_id = emit_finding(
                 title=f"{title_prefix} {provider}: {hit.get('name') or '(untitled)'}",
                 severity=severity,
                 category="info_disclosure",
@@ -358,6 +367,34 @@ def saas_leak_discovery(
                 ),
                 verification_status=verification,
             )
+
+            # KG: when the snippet contains secret-shaped tokens,
+            # emit a Secret node + LEAKS edge from the finding's
+            # Vuln. The masked form is the matched indicator from
+            # the regex; the raw secret value isn't extracted here
+            # (would require fetching the full document — separate
+            # follow-up action). The Secret node represents the
+            # *fact* that a secret is in a SaaS leak doc, which is
+            # itself actionable (rotate, restrict sharing).
+            if has_secret:
+                try:
+                    from strix.agents.kg_emit import record_secret_in_kg
+
+                    record_secret_in_kg(
+                        finding_id=finding_id,
+                        fingerprint=_fingerprint_for_saas_leak(
+                            hit["url"], snippet,
+                        ),
+                        masked=f"<{provider}-leak-doc>",
+                        secret_type=f"{provider}_doc_leak",
+                        detected_in=hit["url"],
+                        confidence=0.7,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "saas_leaks: Secret KG emit failed",
+                        exc_info=True,
+                    )
 
         complete_check(
             cev_id,

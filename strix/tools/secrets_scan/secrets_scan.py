@@ -419,11 +419,28 @@ def _emit_finding(*, record: dict[str, Any], target: str) -> str | None:
         code_locations=[code_loc],
     )
     try:
-        from strix.agents.kg_emit import record_finding_in_kg
+        from strix.agents.kg_emit import (
+            record_finding_in_kg,
+            record_secret_in_kg,
+        )
         record_finding_in_kg(
             finding_id=finding_id, url=record["file"], param=vendor,
             cwe="CWE-798", severity=severity, category="hardcoded_secret",
             method="FILE", detection_kind=f"{vendor}_secret_pattern",
+            confidence=0.85,
+        )
+        # Emit the Secret node + LEAKS edge so downstream KG
+        # queries ("show me every secret leaked from this scan",
+        # "find findings that share a secret") work. Raw value
+        # isn't exposed by the scanner — we fingerprint the masked
+        # form, which is stable per-vendor for cross-detection
+        # dedup but doesn't contain the actual secret material.
+        record_secret_in_kg(
+            finding_id=finding_id,
+            raw_value=f"{vendor}:{record['masked']}",
+            masked=record["masked"],
+            secret_type=vendor,
+            detected_in=f"{record['file']}:{record['line']}",
             confidence=0.85,
         )
     except Exception as e:  # noqa: BLE001

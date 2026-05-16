@@ -113,6 +113,242 @@ def reset_recon_asset_cache_for_testing() -> None:
         _recon_asset_cache.clear()
 
 
+# Secret / Credential dedup. Key is `(kind, fingerprint)` —
+# fingerprint is a sha256 of the raw secret so duplicate
+# detections in the same scan collapse, but we never store the
+# raw value. Crypto-grade dedup discipline: the same secret
+# leaked in two files = one Secret node + two Vuln-with-LEAKS-
+# edge pairs.
+_secret_cache: dict[tuple[str, str], str] = {}
+_secret_cache_lock = threading.Lock()
+
+
+def reset_secret_cache_for_testing() -> None:
+    """Clear Secret/Credential dedup cache. Tests must call this
+    in fixtures."""
+    with _secret_cache_lock:
+        _secret_cache.clear()
+
+
+def _fingerprint(raw: str | bytes) -> str:
+    """Stable opaque id for a secret. SHA-256 hex, truncated to
+    16 chars — same shape as Strix uses elsewhere for finding
+    fingerprints. Length is intentional: long enough that
+    collisions are astronomically unlikely in a single scan,
+    short enough that the KG renders cleanly."""
+    import hashlib
+    data = raw.encode("utf-8") if isinstance(raw, str) else raw
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def record_secret_in_kg(
+    *,
+    finding_id: str | None,
+    raw_value: str | None = None,
+    fingerprint: str | None = None,
+    masked: str = "",
+    secret_type: str = "unknown",
+    detected_in: str = "",
+    confidence: float | None = None,
+) -> str | None:
+    """Emit a `Secret` node + a `LEAKS` edge from the finding's
+    Vuln node when present.
+
+    Caller passes EITHER `raw_value` (we hash it locally and
+    discard) OR a pre-computed `fingerprint`. The raw value is
+    NEVER stored on the node — only the hash + the masked
+    representation the scanner already prepared for the wrapper.
+
+    Args:
+      finding_id: tracer's finding id. When supplied AND the
+        Vuln node already exists in the KG (via
+        `record_finding_in_kg` or the tracer auto-emit), a
+        `LEAKS` edge is added from that Vuln to the new Secret.
+      raw_value: the discovered secret. Hashed here, not stored.
+        Either this OR `fingerprint` must be set.
+      fingerprint: pre-computed fingerprint (when raw_value isn't
+        available — e.g. SaaS leak indicator).
+      masked: short masked form for wrapper display (e.g.
+        `AKIA****1234`). Stored on the node verbatim.
+      secret_type: canonical kind tag — `aws_access_key`,
+        `github_token`, `slack_webhook`, `gcp_service_account`,
+        `private_key`, `jwt`, `db_password`, `api_key`,
+        `oauth_token`, `unknown`.
+      detected_in: free-form locator (e.g. `src/config.py:42`).
+        Stored on the Secret node as `first_seen_in` if not
+        already set on a dedup re-hit.
+      confidence: optional 0.0-1.0 from the detector.
+
+    Returns the Secret node id (or the existing one when dedup
+    hits); `None` when the KG is disabled, the raw_value/
+    fingerprint pair is missing, or emission fails.
+    """
+    if raw_value is None and not fingerprint:
+        return None
+
+    try:
+        from strix.agents.knowledge_graph import get_kg, is_disabled
+    except ImportError:
+        return None
+
+    if is_disabled():
+        return None
+
+    fp = (fingerprint or "").strip() or _fingerprint(raw_value or "")
+    if not fp:
+        return None
+
+    kind = (secret_type or "unknown").strip().lower()
+    cache_key = (kind, fp)
+
+    kg = get_kg()
+
+    try:
+        with _secret_cache_lock:
+            secret_id = _secret_cache.get(cache_key)
+            if secret_id is None or kg.get_node(secret_id) is None:
+                props: dict[str, Any] = {
+                    "kind": kind,
+                    "fingerprint": fp,
+                }
+                if masked:
+                    props["masked"] = masked
+                if detected_in:
+                    props["first_seen_in"] = detected_in
+                if confidence is not None:
+                    props["confidence"] = float(confidence)
+                node = kg.add_node(type="Secret", props=props)
+                secret_id = node.id
+                _secret_cache[cache_key] = secret_id
+
+        # LEAKS edge from the Vuln (when we can find it by
+        # finding_id) → Secret node. Vuln nodes carry
+        # `props.finding_id` so we can resolve.
+        if finding_id:
+            vuln_match = next(
+                (
+                    n for n in kg.query_nodes(type="Vuln")
+                    if n.props.get("finding_id") == finding_id
+                ),
+                None,
+            )
+            if vuln_match is not None:
+                # Don't double-edge — check existing first.
+                existing_edges = kg.query_edges(
+                    type="LEAKS", source=vuln_match.id, target=secret_id,
+                )
+                if not existing_edges:
+                    kg.add_edge(
+                        type="LEAKS",
+                        source=vuln_match.id,
+                        target=secret_id,
+                    )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "kg_emit: record_secret failed: %s", e, exc_info=True,
+        )
+        return None
+
+    return secret_id
+
+
+def record_credential_in_kg(
+    *,
+    finding_id: str | None,
+    username: str | None = None,
+    masked_password: str = "",
+    service: str = "",
+    detected_in: str = "",
+    credential_kind: str = "username_password",
+) -> str | None:
+    """Emit a `Credential` node + a `LEAKS` edge from the finding's
+    Vuln node when present.
+
+    Different from `record_secret_in_kg` — Credential nodes are
+    USER-IDENTIFIED accounts (a username paired with a password
+    or auth proof). Secret nodes are anonymous tokens (API keys,
+    private keys).
+
+    Args:
+      finding_id: tracer's finding id (for LEAKS edge attachment).
+      username: the discovered username / email.
+      masked_password: short masked form (`hunt****` /
+        `eyJ...****`). The raw password / token is NEVER stored.
+      service: which SaaS / system the credential is for
+        (`github`, `aws`, `okta`, `internal`).
+      detected_in: free-form locator.
+      credential_kind: `username_password`, `oauth_token`,
+        `api_key`, `session_token`, `cert`, `ssh_key`.
+
+    Dedup key: `(service, username, credential_kind)` —
+    rotating a single user's password adds context to the
+    existing node rather than a duplicate.
+
+    Returns the Credential node id; `None` on disabled KG / bad
+    input / emission failure.
+    """
+    if not isinstance(username, str) or not username.strip():
+        return None
+
+    try:
+        from strix.agents.knowledge_graph import get_kg, is_disabled
+    except ImportError:
+        return None
+
+    if is_disabled():
+        return None
+
+    norm_user = username.strip().lower()
+    norm_service = (service or "unknown").strip().lower()
+    norm_kind = (credential_kind or "username_password").strip().lower()
+    cache_key = (f"{norm_service}|{norm_user}", norm_kind)
+
+    kg = get_kg()
+
+    try:
+        with _secret_cache_lock:
+            cred_id = _secret_cache.get(cache_key)
+            if cred_id is None or kg.get_node(cred_id) is None:
+                props: dict[str, Any] = {
+                    "kind": norm_kind,
+                    "username": norm_user,
+                    "service": norm_service,
+                }
+                if masked_password:
+                    props["masked_password"] = masked_password
+                if detected_in:
+                    props["first_seen_in"] = detected_in
+                node = kg.add_node(type="Credential", props=props)
+                cred_id = node.id
+                _secret_cache[cache_key] = cred_id
+
+        if finding_id:
+            vuln_match = next(
+                (
+                    n for n in kg.query_nodes(type="Vuln")
+                    if n.props.get("finding_id") == finding_id
+                ),
+                None,
+            )
+            if vuln_match is not None:
+                existing_edges = kg.query_edges(
+                    type="LEAKS", source=vuln_match.id, target=cred_id,
+                )
+                if not existing_edges:
+                    kg.add_edge(
+                        type="LEAKS",
+                        source=vuln_match.id,
+                        target=cred_id,
+                    )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "kg_emit: record_credential failed: %s", e, exc_info=True,
+        )
+        return None
+
+    return cred_id
+
+
 def record_asset_in_kg(
     *,
     asset_type: str,
