@@ -31,6 +31,7 @@ and queries to find unexplored chains. The shape matches the
 | `CHAINS_TO` | Vuln → Vuln (replaces in-memory chain edges) |
 | `RUNS_ON` | Surface → Asset |
 | `USES` | Surface → Dependency |
+| `PIVOTED_FROM` | Vuln → Vuln (target found by exploit-pivoting from source) |
 
 The taxonomies are **enforced** by `add_node` / `add_edge` —
 unknown types are rejected so the graph stays queryable.
@@ -96,6 +97,13 @@ EdgeType = Literal[
     "USES",
     # P4 — ThreatIntel → Asset (the observation's subject).
     "OBSERVED",
+    # Depth-of-attack — Vuln → Vuln, recording that the target Vuln
+    # was discovered by post-exploit pivoting from the source Vuln's
+    # captured proof-of-impact. Distinct from `CHAINS_TO` which is a
+    # narrative correlation at report-time; `PIVOTED_FROM` is a
+    # forward attack edge — the source's exploit *caused* the target
+    # to be found.
+    "PIVOTED_FROM",
 ]
 
 
@@ -107,7 +115,7 @@ _VALID_NODE_TYPES: frozenset[str] = frozenset({
 _VALID_EDGE_TYPES: frozenset[str] = frozenset({
     "AFFECTS", "REACHABLE_FROM", "LEAKS", "GRANTS_ACCESS_TO",
     "CHAINS_TO", "RUNS_ON", "USES",
-    "OBSERVED",
+    "OBSERVED", "PIVOTED_FROM",
 })
 
 
