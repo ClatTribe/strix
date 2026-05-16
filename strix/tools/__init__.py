@@ -35,6 +35,7 @@ from .traffic_ingest import *  # noqa: F403
 from .replay_mutation import *  # noqa: F403  # workitem.md Phase 5.5
 from .nuclei_runner import *  # noqa: F403  # community-corpus runner
 from .openapi_ingest import *  # noqa: F403  # OpenAPI / Swagger spec ingest for `api` target type
+from .container_image import *  # noqa: F403  # Trivy wrapper for `container_image` target type
 from .workflow import *  # noqa: F403  # Phase 3d / PR-α — workflow state machine
 
 # SCA / supply-chain analysis (Phase 6) — registers

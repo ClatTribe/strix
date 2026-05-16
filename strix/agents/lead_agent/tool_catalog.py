@@ -263,6 +263,27 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # Threat-intel
         "vt_reputation", "greynoise_classify",
     }),
+    "container_image": frozenset({
+        # Container-image targets — registry-resident artefacts
+        # (`nginx:1.25`, `registry.example.com/foo/bar@sha256:...`).
+        # The image is scanned for vulnerable OS + language packages
+        # via Trivy, with findings routed through strix's KEV / EPSS
+        # enrichment + KG dependency emission. MOAK feed-trigger
+        # consumes the emitted Dependency nodes so future CVE
+        # arrivals against the customer's pinned versions can
+        # synthesise an exploit automatically (same path repository
+        # targets use).
+        "scan_container_image",
+        # CVE lookup for cross-reference / "tell me about CVE-X"
+        # follow-ups.
+        "lookup_known_cves", "lookup_cve_by_id",
+        # SBOM extraction — when the wrapper wants the full
+        # image manifest separately from the vuln list.
+        "sbom_extract",
+        # Shell for inspecting Trivy output / running additional
+        # image probes (e.g. `docker image inspect`).
+        "terminal_execute",
+    }),
 }
 
 

@@ -1094,6 +1094,7 @@ _TARGET_TYPE_PREFIXES: frozenset[str] = frozenset({
     "repository",
     "local_code",
     "ip_address",
+    "container_image",
 })
 
 
@@ -1111,6 +1112,80 @@ def _split_type_prefix(target: str) -> tuple[str | None, str]:
     if sep and head_norm in _TARGET_TYPE_PREFIXES:
         return head_norm, rest
     return None, target
+
+
+# Image-reference shapes accepted by `container_image:<ref>`:
+#   * Short:  `nginx` → defaults to `:latest` (Docker convention)
+#   * Tag:    `nginx:1.25`
+#   * Path:   `library/nginx:1.25`
+#   * Registry: `registry.example.com/foo/bar:tag`
+#   * Registry+port: `registry.example.com:5000/foo/bar:tag`
+#   * Digest: `nginx@sha256:0123abcd...`
+#   * Registry+digest: `registry.example.com/foo/bar@sha256:...`
+#
+# Anti-shapes (rejected):
+#   * HTTP(S) URLs — those are web_application targets.
+#   * File paths — those are local_code targets.
+#   * Trailing whitespace, embedded scheme, bare schemes.
+_IMAGE_NAME_CHARS: frozenset[str] = frozenset(
+    "abcdefghijklmnopqrstuvwxyz0123456789._-/:@"
+)
+
+
+def _infer_container_image_value(value: str) -> tuple[str, dict[str, str]]:
+    """`container_image:<ref>` classification — validates the image
+    ref shape so obvious non-image strings are rejected at CLI
+    parse time rather than at Trivy invocation.
+
+    Wrappers (webappsec/) emit the prefix explicitly when the
+    tenant picks "container image" in the UI; humans on the CLI
+    must use the prefix because `nginx:1.25` is ambiguous with
+    `host:port`.
+    """
+    if not value:
+        raise ValueError("`container_image:` prefix requires a value")
+    value = value.strip()
+    if not value:
+        raise ValueError("`container_image:` value is whitespace-only")
+
+    # Reject HTTP(S) schemes — they're web_application / repository
+    # targets, not images.
+    parsed = urlparse(value)
+    if parsed.scheme in ("http", "https", "git", "ssh", "file", "ftp"):
+        raise ValueError(
+            f"`container_image:{value}` carries a URL scheme. Image "
+            f"references are not URLs — they're registry path strings "
+            f"like `nginx:1.25` or `registry.example.com/foo/bar:tag`."
+        )
+
+    # Reject embedded whitespace.
+    if any(c.isspace() for c in value):
+        raise ValueError(
+            f"`container_image:{value}` contains whitespace — image "
+            f"references must be a single contiguous token."
+        )
+
+    # Lowercase-validate: image refs are case-insensitive but
+    # conventionally lowercased. We accept uppercase but downcase
+    # for the canonical form.
+    lower = value.lower()
+
+    # Char-class check: image refs use `a-z0-9 . _ - / : @` only.
+    if any(c not in _IMAGE_NAME_CHARS for c in lower):
+        bad = sorted({c for c in lower if c not in _IMAGE_NAME_CHARS})
+        raise ValueError(
+            f"`container_image:{value}` contains illegal characters "
+            f"({bad!r}). Image references allow only `[a-z0-9._-/:@]`."
+        )
+
+    # Must not begin or end with separator chars (`/`, `:`, `@`).
+    if lower[0] in "/:@" or lower[-1] in "/:@":
+        raise ValueError(
+            f"`container_image:{value}` cannot begin or end with "
+            f"`/`, `:`, or `@`."
+        )
+
+    return "container_image", {"target_image": value}
 
 
 def _infer_api_value(value: str) -> tuple[str, dict[str, str]]:
@@ -1153,6 +1228,8 @@ def infer_target_type(target: str) -> tuple[str, dict[str, str]]:  # noqa: PLR09
             raise ValueError(f"`{override}:` prefix requires a target value")
         if override == "api":
             return _infer_api_value(remainder)
+        if override == "container_image":
+            return _infer_container_image_value(remainder)
         inferred_type, details = _infer_target_type_uncoerced(remainder)
         if inferred_type != override:
             raise ValueError(
