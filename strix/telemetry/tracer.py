@@ -900,6 +900,13 @@ class Tracer:
         confidence: float | None = None,
         reasoning_trace: list[str] | str | None = None,
         counter_proof: dict[str, Any] | None = None,
+        # Depth-of-attack — set when verification_status is `exploited`
+        # to point at the captured proof-of-impact artifact (cookie,
+        # dumped row, IMDS blob, captured flag). Path is relative to
+        # the run dir; the scanner is responsible for writing the
+        # file before emitting the finding. Enforced by
+        # `validate_canonical_finding`.
+        proof_artifact_path: str | None = None,
     ) -> str:
         report_id = f"vuln-{len(self.vulnerability_reports) + 1:04d}"
 
@@ -953,6 +960,14 @@ class Tracer:
             report["cwe"] = cwe.strip()
         if code_locations:
             report["code_locations"] = code_locations
+
+        # Depth-of-attack — proof-of-impact artifact path. Required by
+        # `validate_canonical_finding` when verification_status='exploited'.
+        # Stored as-given; relative-path semantics enforced by the
+        # scanner emitting the finding (no path canonicalisation here —
+        # the run dir layout is the caller's contract).
+        if isinstance(proof_artifact_path, str) and proof_artifact_path.strip():
+            report["proof_artifact_path"] = proof_artifact_path.strip()
 
         # Kill chain — multi-step finding context. Roadmap §1.
         # Normalize each step so consumers see a stable shape.

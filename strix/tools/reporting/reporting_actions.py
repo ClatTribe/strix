@@ -268,6 +268,7 @@ def create_vulnerability_report(  # noqa: PLR0912, PLR0913
     business_impact_plain: str | None = None,
     recommended_action: str | None = None,
     fix_time_estimate: str | None = None,
+    proof_artifact_path: str | None = None,
 ) -> dict[str, Any]:
     validation_errors = _validate_required_fields(
         title=title,
@@ -376,6 +377,7 @@ def create_vulnerability_report(  # noqa: PLR0912, PLR0913
                 business_impact_plain=business_impact_plain,
                 recommended_action=recommended_action,
                 fix_time_estimate=fix_time_estimate,
+                proof_artifact_path=proof_artifact_path,
             )
 
             return {
