@@ -69,6 +69,26 @@ _CATEGORIES_BY_TARGET_TYPE: dict[str, list[tuple[str, str]]] = {
         ("auth_review", "auth & session management code paths"),
         ("crypto_review", "weak crypto / hard-coded keys"),
     ],
+    # `api` shares most of the web_application probe surface but
+    # skips DOM-rendering specialists (xss, dom_xss) and adds the
+    # API-Top-10 categories — BOLA / BFLA / mass-assignment / rate-
+    # limit specialists landed in PRs #267-#269.
+    "api": [
+        ("openapi_ingest", "OpenAPI / Swagger spec discovery + endpoint inventory"),
+        ("tech_stack_fingerprint", "framework / WAF / CDN detection"),
+        ("sql_injection", "SQLi across all input points"),
+        ("authentication", "auth bypass / JWT / session management"),
+        ("authorization", "BOLA / BFLA / IDOR / privilege escalation"),
+        ("mass_assignment", "unexpected-property write via JSON body"),
+        ("rate_limit", "per-endpoint rate-limit / quota enforcement"),
+        ("ssrf", "SSRF + cloud-metadata exposure"),
+        ("xxe", "XXE in XML processing"),
+        ("rce", "RCE in upload / template / deserialization paths"),
+        ("path_traversal", "LFI / RFI / path traversal"),
+        ("file_upload", "insecure file uploads"),
+        ("info_disclosure", "leaked env / source / debug endpoints"),
+        ("business_logic", "business-logic abuse"),
+    ],
 }
 
 

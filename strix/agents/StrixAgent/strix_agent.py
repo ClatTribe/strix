@@ -31,7 +31,7 @@ class StrixAgent(BaseAgent):
                 value = details.get("target_repo", "")
             elif target_type == "local_code":
                 value = details.get("target_path", "")
-            elif target_type == "web_application":
+            elif target_type in ("web_application", "api"):
                 value = details.get("target_url", "")
             elif target_type == "ip_address":
                 value = details.get("target_ip", "")
@@ -100,6 +100,7 @@ class StrixAgent(BaseAgent):
         repositories = []
         local_code = []
         urls = []
+        api_endpoints = []
         ip_addresses = []
 
         for target in targets:
@@ -129,6 +130,8 @@ class StrixAgent(BaseAgent):
 
             elif target_type == "web_application":
                 urls.append(details["target_url"])
+            elif target_type == "api":
+                api_endpoints.append(details["target_url"])
             elif target_type == "ip_address":
                 ip_addresses.append(details["target_ip"])
 
@@ -151,6 +154,10 @@ class StrixAgent(BaseAgent):
         if urls:
             task_parts.append("\n\nURLs:")
             task_parts.extend(f"- {url}" for url in urls)
+
+        if api_endpoints:
+            task_parts.append("\n\nAPI Endpoints:")
+            task_parts.extend(f"- {url}" for url in api_endpoints)
 
         if ip_addresses:
             task_parts.append("\n\nIP Addresses:")

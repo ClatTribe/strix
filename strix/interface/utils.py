@@ -1082,12 +1082,93 @@ def _is_http_git_repo(url: str) -> bool:
         return False
 
 
+# Wrappers (e.g. webappsec/) need to disambiguate between target
+# types that share a URL shape — most importantly `web_application`
+# vs `api` (PR #267 added `api` to the lead tool catalog but the CLI
+# only ever emitted `web_application` for URLs). The contract is a
+# `<type>:<value>` prefix on `--target`. The allowlist matches the
+# target-type set in `strix/agents/lead_agent/tool_catalog.py`.
+_TARGET_TYPE_PREFIXES: frozenset[str] = frozenset({
+    "web_application",
+    "api",
+    "repository",
+    "local_code",
+    "ip_address",
+})
+
+
+def _split_type_prefix(target: str) -> tuple[str | None, str]:
+    """If `target` starts with a known `<type>:` prefix, return
+    `(normalised_type, remainder)`. Otherwise `(None, target)`.
+
+    The prefix only matches against the allowlist, so URL schemes
+    (`http`, `https`, `git`, `git+ssh`) and SSH paths like
+    `git@github.com:org/repo` are unaffected — none of their leading
+    tokens are in `_TARGET_TYPE_PREFIXES`.
+    """
+    head, sep, rest = target.partition(":")
+    head_norm = head.strip().lower()
+    if sep and head_norm in _TARGET_TYPE_PREFIXES:
+        return head_norm, rest
+    return None, target
+
+
+def _infer_api_value(value: str) -> tuple[str, dict[str, str]]:
+    """`api:<value>` classification — deterministic URL-shape parse.
+
+    Bypasses the `_is_http_git_repo` HTTP probe so `api:` parses the
+    same way whether or not the value's host is reachable at parse
+    time. The api tool catalog assumes URL-shaped targets keyed by
+    `target_url` (same key web_application uses), so the StrixAgent
+    dispatch only needs one branch to handle both.
+    """
+    parsed = urlparse(value)
+    if parsed.scheme in ("http", "https"):
+        return "api", {"target_url": value}
+    if "/" in value:
+        host_part, _, path_part = value.partition("/")
+        if "." in host_part and not host_part.startswith(".") and path_part:
+            return "api", {"target_url": f"https://{value}"}
+    if "." in value and not value.startswith("."):
+        parts = value.split(".")
+        if len(parts) >= 2 and all(p and p.strip() for p in parts):
+            return "api", {"target_url": f"https://{value}"}
+    raise ValueError(
+        f"`api:{value}` is not URL-shaped. The `api` target type "
+        f"requires an http(s) URL, bare host (`api.example.com`), "
+        f"or bare host+path (`example.com/v1`)."
+    )
+
+
 def infer_target_type(target: str) -> tuple[str, dict[str, str]]:  # noqa: PLR0911, PLR0912
     if not target or not isinstance(target, str):
         raise ValueError("Target must be a non-empty string")
 
     target = target.strip()
 
+    override, remainder = _split_type_prefix(target)
+    if override is not None:
+        remainder = remainder.strip()
+        if not remainder:
+            raise ValueError(f"`{override}:` prefix requires a target value")
+        if override == "api":
+            return _infer_api_value(remainder)
+        inferred_type, details = _infer_target_type_uncoerced(remainder)
+        if inferred_type != override:
+            raise ValueError(
+                f"Target '{target}' uses prefix `{override}:` but its "
+                f"value parses as `{inferred_type}`. Use the matching "
+                f"prefix or drop the prefix to rely on inference."
+            )
+        return inferred_type, details
+
+    return _infer_target_type_uncoerced(target)
+
+
+def _infer_target_type_uncoerced(target: str) -> tuple[str, dict[str, str]]:  # noqa: PLR0911, PLR0912
+    """Original inference body. `infer_target_type` strips the optional
+    `<type>:` prefix first, then either coerces via `_infer_api_value`
+    or delegates here for the heuristic path."""
     if target.startswith("git@"):
         return "repository", {"target_repo": target}
 

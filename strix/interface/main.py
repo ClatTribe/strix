@@ -318,7 +318,11 @@ Examples:
         required=True,
         action="append",
         help="Target to test (URL, repository, local directory path, domain name, or IP address). "
-        "Can be specified multiple times for multi-target scans.",
+        "Can be specified multiple times for multi-target scans. "
+        "Wrappers can disambiguate URL-shaped targets with a "
+        "`<type>:<value>` prefix, e.g. `api:https://api.example.com` "
+        "or `web_application:https://example.com`. Allowed types: "
+        "web_application, api, repository, local_code, ip_address.",
     )
     parser.add_argument(
         "--instruction",
@@ -791,8 +795,17 @@ Examples:
         try:
             target_type, target_dict = infer_target_type(target)
 
+            # Resolve the canonical display form from the parsed
+            # `target_dict` so a `<type>:<value>` prefix on `--target`
+            # is stripped from the run banner / logs (wrapper-friendly).
             if target_type == "local_code":
                 display_target = target_dict.get("target_path", target)
+            elif target_type in ("web_application", "api"):
+                display_target = target_dict.get("target_url", target)
+            elif target_type == "repository":
+                display_target = target_dict.get("target_repo", target)
+            elif target_type == "ip_address":
+                display_target = target_dict.get("target_ip", target)
             else:
                 display_target = target
 
