@@ -59,6 +59,7 @@ Out of scope for v1 (deferred to follow-up):
 """
 
 from strix.compliance.evidence import (  # noqa: F401
+    COMPLIANCE_REPORT_SCHEMA_VERSION,
     ComplianceReport,
     ControlEvidence,
     build_evidence_report,

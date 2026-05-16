@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
@@ -66,9 +68,64 @@ VERDICT_PASS = "pass"
 VERDICT_UNTESTED = "untested"
 
 
+# Evidence freshness — auditors discount evidence past this TTL. SOC 2
+# Type II default audit window is one year, but most auditors expect
+# evidence inside the testing period (commonly quarterly).
+_DEFAULT_EVIDENCE_TTL_DAYS = 90
+
+
+# Bumped when the report payload schema changes in a non-additive way.
+# Consumers (wrapper compliance dashboards, auditor handoff) gate on
+# this to refuse decode of unrecognised versions.
+COMPLIANCE_REPORT_SCHEMA_VERSION = 2
+
+
+def _iso_utc_now() -> str:
+    """Stamp wall-clock UTC time in RFC 3339 / ISO 8601 format with
+    explicit `Z` zone — what auditors expect on evidence artifacts."""
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _evidence_ttl_days() -> int:
+    """Read evidence TTL from `STRIX_EVIDENCE_TTL_DAYS` env, falling
+    back to 90. Invalid / negative values fall back too."""
+    raw = os.environ.get("STRIX_EVIDENCE_TTL_DAYS")
+    if not raw:
+        return _DEFAULT_EVIDENCE_TTL_DAYS
+    try:
+        v = int(raw)
+    except ValueError:
+        return _DEFAULT_EVIDENCE_TTL_DAYS
+    if v <= 0:
+        return _DEFAULT_EVIDENCE_TTL_DAYS
+    return v
+
+
+def _expires_at_from(collected_at_iso: str, ttl_days: int) -> str:
+    """Compute the RFC 3339 `expires_at` from a collected-at stamp."""
+    try:
+        dt = datetime.strptime(collected_at_iso, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        dt = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    expires = dt + timedelta(days=ttl_days)
+    return expires.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 @dataclass
 class ControlEvidence:
-    """Evidence for one (framework, control_id) tuple."""
+    """Evidence for one (framework, control_id) tuple.
+
+    Auditor-grade fields:
+      * `evidence_collected_at` — RFC 3339 UTC stamp of when this
+        scan ran (i.e. when the verdict was last observed).
+      * `last_verified_at` — alias for `evidence_collected_at` on a
+        single-scan report; the wrapper updates it when a re-scan
+        confirms the same verdict without changing the underlying
+        finding set.
+      * `expires_at` — `evidence_collected_at + STRIX_EVIDENCE_TTL_DAYS`
+        (default 90). Past this, auditors should treat the evidence
+        as stale and demand a fresh scan.
+    """
     framework: str
     control_id: str
     title: str
@@ -77,6 +134,9 @@ class ControlEvidence:
     finding_ids: list[str] = field(default_factory=list)
     finding_severities: list[str] = field(default_factory=list)
     rationale: str = ""
+    evidence_collected_at: str | None = None
+    last_verified_at: str | None = None
+    expires_at: str | None = None
 
     @property
     def fqid(self) -> str:
@@ -93,16 +153,22 @@ class ControlEvidence:
             "finding_ids": list(self.finding_ids),
             "finding_severities": list(self.finding_severities),
             "rationale": self.rationale,
+            "evidence_collected_at": self.evidence_collected_at,
+            "last_verified_at": self.last_verified_at,
+            "expires_at": self.expires_at,
         }
 
 
 @dataclass
 class ComplianceReport:
     """Aggregate evidence across one or more frameworks."""
-    schema_version: int = 1
+    schema_version: int = COMPLIANCE_REPORT_SCHEMA_VERSION
     frameworks: list[str] = field(default_factory=list)
     controls: list[ControlEvidence] = field(default_factory=list)
     summary: dict[str, dict[str, int]] = field(default_factory=dict)
+    generated_at: str | None = None
+    evidence_ttl_days: int | None = None
+    expires_at: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -110,6 +176,9 @@ class ComplianceReport:
             "frameworks": list(self.frameworks),
             "controls": [c.to_dict() for c in self.controls],
             "summary": dict(self.summary),
+            "generated_at": self.generated_at,
+            "evidence_ttl_days": self.evidence_ttl_days,
+            "expires_at": self.expires_at,
         }
 
     def by_framework(self, framework: str) -> list[ControlEvidence]:
@@ -165,6 +234,7 @@ def build_evidence_report(
     findings: Iterable[Finding],
     *,
     frameworks: Iterable[str] | None = None,
+    evidence_collected_at: str | None = None,
 ) -> ComplianceReport:
     """Build a `ComplianceReport` from the normalised findings.
 
@@ -174,15 +244,23 @@ def build_evidence_report(
             to convert raw vulnerability dicts).
         frameworks: subset of frameworks to report on (default:
             all 4).
+        evidence_collected_at: ISO 8601 UTC stamp to use on every
+            `ControlEvidence` + the report (default: now). Pass a
+            fixed value for deterministic test snapshots.
 
     Returns:
         `ComplianceReport`. Per-control entries cover EVERY
         control in the requested frameworks — including
-        untested ones (with verdict='untested').
+        untested ones (with verdict='untested'). Every entry is
+        stamped with `evidence_collected_at` / `last_verified_at`
+        / `expires_at` so auditors can judge freshness.
     """
     fws = list(frameworks) if frameworks else list(ALL_FRAMEWORKS)
     findings_list = list(findings)
     by_id: dict[str, Finding] = {f.id: f for f in findings_list}
+    collected_at = evidence_collected_at or _iso_utc_now()
+    ttl_days = _evidence_ttl_days()
+    expires_at = _expires_at_from(collected_at, ttl_days)
 
     # Bucket findings by (framework, control_id).
     by_control: dict[tuple[str, str], list[Finding]] = {}
@@ -232,6 +310,9 @@ def build_evidence_report(
             finding_ids=[f.id for f in hits],
             finding_severities=[f.severity for f in hits],
             rationale=rationale,
+            evidence_collected_at=collected_at,
+            last_verified_at=collected_at,
+            expires_at=expires_at,
         ))
 
     # Per-framework summary.
@@ -253,6 +334,9 @@ def build_evidence_report(
         frameworks=fws,
         controls=controls_evidence,
         summary=summary,
+        generated_at=collected_at,
+        evidence_ttl_days=ttl_days,
+        expires_at=expires_at,
     )
 
 

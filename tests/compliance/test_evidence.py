@@ -244,7 +244,7 @@ def test_to_dict_round_trip(tmp_path: Path) -> None:
     findings = [_f(cwe="CWE-89", severity="high")]
     report = build_evidence_report(findings)
     d = report.to_dict()
-    assert d["schema_version"] == 1
+    assert d["schema_version"] == 2
     assert d["frameworks"]
     assert d["controls"]
     assert d["summary"]
@@ -260,7 +260,7 @@ def test_write_compliance_evidence_creates_file(tmp_path: Path) -> None:
     written = write_compliance_evidence(report, out)
     assert out.exists()
     doc = json.loads(out.read_text())
-    assert doc["schema_version"] == 1
+    assert doc["schema_version"] == 2
 
 
 def test_write_creates_parent_dirs(tmp_path: Path) -> None:
@@ -269,3 +269,104 @@ def test_write_creates_parent_dirs(tmp_path: Path) -> None:
     out = tmp_path / "deep" / "nested" / "compliance.json"
     write_compliance_evidence(report, out)
     assert out.exists()
+
+
+# ---------------------------------------------------------------------------
+# Evidence freshness — auditors discount stale evidence
+# ---------------------------------------------------------------------------
+
+
+_ISO_RE = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"
+
+
+def test_report_stamps_generated_at_in_iso_utc() -> None:
+    """Report-level `generated_at` is required for auditor handoff —
+    SOC 2 evidence has to be timestamped."""
+    import re
+    report = build_evidence_report([])
+    assert report.generated_at is not None
+    assert re.match(_ISO_RE, report.generated_at), (
+        f"generated_at not RFC 3339 / ISO 8601 UTC: {report.generated_at!r}"
+    )
+
+
+def test_report_stamps_evidence_ttl_and_expiry() -> None:
+    """`expires_at = generated_at + STRIX_EVIDENCE_TTL_DAYS`.
+    Default TTL is 90 days (quarterly audit cadence)."""
+    report = build_evidence_report([])
+    assert report.evidence_ttl_days == 90
+    assert report.expires_at is not None
+    assert report.expires_at > report.generated_at
+
+
+def test_evidence_ttl_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("STRIX_EVIDENCE_TTL_DAYS", "30")
+    report = build_evidence_report([])
+    assert report.evidence_ttl_days == 30
+
+
+def test_evidence_ttl_env_invalid_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STRIX_EVIDENCE_TTL_DAYS", "not-a-number")
+    report = build_evidence_report([])
+    assert report.evidence_ttl_days == 90
+
+
+def test_evidence_ttl_env_negative_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STRIX_EVIDENCE_TTL_DAYS", "-5")
+    report = build_evidence_report([])
+    assert report.evidence_ttl_days == 90
+
+
+def test_every_control_stamped_with_freshness_fields() -> None:
+    """Every ControlEvidence — pass, fail, untested — gets the
+    freshness triple so the wrapper can render `Evidence as of …`
+    on each row."""
+    report = build_evidence_report([_f(cwe="CWE-89", severity="high")])
+    for c in report.controls:
+        assert c.evidence_collected_at == report.generated_at
+        assert c.last_verified_at == report.generated_at
+        assert c.expires_at == report.expires_at
+
+
+def test_explicit_evidence_collected_at_is_honored() -> None:
+    """A caller can pin `evidence_collected_at` for deterministic
+    test snapshots / replay scenarios."""
+    fixed = "2026-01-15T08:00:00Z"
+    report = build_evidence_report(
+        [_f(cwe="CWE-89", severity="high")],
+        evidence_collected_at=fixed,
+    )
+    assert report.generated_at == fixed
+    for c in report.controls:
+        assert c.evidence_collected_at == fixed
+
+
+def test_expires_at_is_collected_plus_ttl_days(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-trip the math — `expires_at` is exactly
+    `evidence_collected_at + ttl_days`."""
+    monkeypatch.setenv("STRIX_EVIDENCE_TTL_DAYS", "7")
+    fixed = "2026-01-01T00:00:00Z"
+    report = build_evidence_report(
+        [], evidence_collected_at=fixed,
+    )
+    assert report.expires_at == "2026-01-08T00:00:00Z"
+
+
+def test_serialized_report_includes_freshness_fields() -> None:
+    """The JSON artifact has the freshness triple at top level and
+    on every control."""
+    report = build_evidence_report([_f(cwe="CWE-89", severity="high")])
+    d = report.to_dict()
+    assert "generated_at" in d
+    assert "evidence_ttl_days" in d
+    assert "expires_at" in d
+    for c in d["controls"]:
+        assert "evidence_collected_at" in c
+        assert "last_verified_at" in c
+        assert "expires_at" in c
