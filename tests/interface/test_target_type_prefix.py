@@ -214,3 +214,103 @@ def test_api_prefix_dict_uses_target_url_key() -> None:
     assert "target_repo" not in details
     assert "target_path" not in details
     assert "target_ip" not in details
+
+
+# ---------------------------------------------------------------------------
+# container_image: — deterministic image-ref classification
+# ---------------------------------------------------------------------------
+
+
+def test_container_image_prefix_short_tag() -> None:
+    target_type, details = infer_target_type("container_image:nginx:1.25")
+    assert target_type == "container_image"
+    assert details == {"target_image": "nginx:1.25"}
+
+
+def test_container_image_prefix_library_path() -> None:
+    target_type, details = infer_target_type("container_image:library/nginx:1.25")
+    assert target_type == "container_image"
+    assert details["target_image"] == "library/nginx:1.25"
+
+
+def test_container_image_prefix_registry_with_port() -> None:
+    target_type, details = infer_target_type(
+        "container_image:registry.example.com:5000/foo/bar:v1.2.0",
+    )
+    assert target_type == "container_image"
+    assert details["target_image"] == "registry.example.com:5000/foo/bar:v1.2.0"
+
+
+def test_container_image_prefix_digest_pinned() -> None:
+    target_type, details = infer_target_type(
+        "container_image:nginx@sha256:0123456789abcdef",
+    )
+    assert target_type == "container_image"
+    assert details["target_image"] == "nginx@sha256:0123456789abcdef"
+
+
+def test_container_image_prefix_registry_plus_digest() -> None:
+    target_type, details = infer_target_type(
+        "container_image:registry.example.com/svc/web@sha256:abc123",
+    )
+    assert target_type == "container_image"
+    assert details["target_image"].startswith("registry.example.com/svc/web@sha256:")
+
+
+def test_container_image_prefix_rejects_empty() -> None:
+    with pytest.raises(ValueError):
+        infer_target_type("container_image:")
+
+
+def test_container_image_prefix_rejects_whitespace_value() -> None:
+    with pytest.raises(ValueError):
+        infer_target_type("container_image:   ")
+
+
+def test_container_image_prefix_rejects_url_scheme() -> None:
+    """`container_image:https://...` is nonsensical — image refs
+    aren't URLs. Reject at parse time so the lead doesn't waste a
+    Trivy invocation."""
+    with pytest.raises(ValueError) as exc:
+        infer_target_type("container_image:https://example.com/x")
+    assert "URL scheme" in str(exc.value) or "URL" in str(exc.value)
+
+
+def test_container_image_prefix_rejects_embedded_whitespace() -> None:
+    with pytest.raises(ValueError):
+        infer_target_type("container_image:nginx 1.25")
+
+
+def test_container_image_prefix_rejects_illegal_chars() -> None:
+    with pytest.raises(ValueError):
+        # `?` is not a valid char in an image ref.
+        infer_target_type("container_image:nginx?param=1")
+
+
+def test_container_image_prefix_rejects_leading_separator() -> None:
+    for v in (":nginx:1.25", "/nginx:1.25", "@nginx:1.25"):
+        with pytest.raises(ValueError):
+            infer_target_type(f"container_image:{v}")
+
+
+def test_container_image_prefix_rejects_trailing_separator() -> None:
+    for v in ("nginx:1.25:", "nginx:1.25/", "nginx:1.25@"):
+        with pytest.raises(ValueError):
+            infer_target_type(f"container_image:{v}")
+
+
+def test_container_image_case_insensitive_prefix() -> None:
+    target_type, details = infer_target_type("CONTAINER_IMAGE:nginx:1.25")
+    assert target_type == "container_image"
+    assert details["target_image"] == "nginx:1.25"
+
+
+def test_container_image_prefix_dict_uses_target_image_key() -> None:
+    """StrixAgent dispatch reads `target_image` for the
+    container_image branch — pin the key name."""
+    _, details = infer_target_type("container_image:nginx:1.25")
+    assert "target_image" in details
+    assert "target_url" not in details
+    assert "target_repo" not in details
+    assert "target_path" not in details
+    assert "target_ip" not in details

@@ -321,8 +321,8 @@ Examples:
         "Can be specified multiple times for multi-target scans. "
         "Wrappers can disambiguate URL-shaped targets with a "
         "`<type>:<value>` prefix, e.g. `api:https://api.example.com` "
-        "or `web_application:https://example.com`. Allowed types: "
-        "web_application, api, repository, local_code, ip_address.",
+        "or `container_image:nginx:1.25`. Allowed types: "
+        "web_application, api, repository, local_code, ip_address, container_image.",
     )
     parser.add_argument(
         "--instruction",
@@ -806,6 +806,8 @@ Examples:
                 display_target = target_dict.get("target_repo", target)
             elif target_type == "ip_address":
                 display_target = target_dict.get("target_ip", target)
+            elif target_type == "container_image":
+                display_target = target_dict.get("target_image", target)
             else:
                 display_target = target
 

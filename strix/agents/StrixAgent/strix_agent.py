@@ -35,6 +35,8 @@ class StrixAgent(BaseAgent):
                 value = details.get("target_url", "")
             elif target_type == "ip_address":
                 value = details.get("target_ip", "")
+            elif target_type == "container_image":
+                value = details.get("target_image", "")
             else:
                 value = target.get("original", "")
 
@@ -102,6 +104,7 @@ class StrixAgent(BaseAgent):
         urls = []
         api_endpoints = []
         ip_addresses = []
+        container_images = []
 
         for target in targets:
             target_type = target["type"]
@@ -134,6 +137,8 @@ class StrixAgent(BaseAgent):
                 api_endpoints.append(details["target_url"])
             elif target_type == "ip_address":
                 ip_addresses.append(details["target_ip"])
+            elif target_type == "container_image":
+                container_images.append(details["target_image"])
 
         task_parts = []
 
@@ -162,6 +167,10 @@ class StrixAgent(BaseAgent):
         if ip_addresses:
             task_parts.append("\n\nIP Addresses:")
             task_parts.extend(f"- {ip}" for ip in ip_addresses)
+
+        if container_images:
+            task_parts.append("\n\nContainer Images:")
+            task_parts.extend(f"- {img}" for img in container_images)
 
         if diff_scope.get("active"):
             task_parts.append("\n\nScope Constraints:")

@@ -69,6 +69,20 @@ _CATEGORIES_BY_TARGET_TYPE: dict[str, list[tuple[str, str]]] = {
         ("auth_review", "auth & session management code paths"),
         ("crypto_review", "weak crypto / hard-coded keys"),
     ],
+    # `container_image` — registry-resident artefacts scanned via
+    # Trivy. OS + language package CVEs are the headline category;
+    # the misconfig + secrets categories surface here too because
+    # Trivy detects them natively (Dockerfile USER root, hardcoded
+    # secrets in image layers, etc.) — v1 wraps the CVE path only;
+    # misconfig + secrets land as separate categories in follow-up
+    # PRs.
+    "container_image": [
+        ("os_package_cves", "OS package CVEs (debian / ubuntu / alpine / rhel / etc.)"),
+        ("lang_package_cves", "Language package CVEs (npm / pypi / cargo / maven / etc.)"),
+        ("sbom_inventory", "full image SBOM — Dependency KG nodes for every package"),
+        ("kev_decoration", "CISA KEV match → critical severity bump"),
+        ("epss_decoration", "EPSS ≥ 0.5 → severity escalation"),
+    ],
     # `api` shares most of the web_application probe surface but
     # skips DOM-rendering specialists (xss, dom_xss) and adds the
     # API-Top-10 categories — BOLA / BFLA / mass-assignment / rate-

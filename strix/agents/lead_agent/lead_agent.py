@@ -370,6 +370,22 @@ _PER_ASSET_GUIDANCE: dict[str, str] = {
         "those. The specialist tools fuzz CUSTOM code; nuclei matches "
         "KNOWN PRODUCT CVEs. Run both."
     ),
+    "container_image": (
+        "Container-image target: anchor on `scan_container_image` "
+        "FIRST — wraps Trivy and emits one finding per CVE-bearing "
+        "package the image contains (OS + language packages: "
+        "Debian/Ubuntu/Alpine/RHEL/etc. + npm/pypi/cargo/maven/gem/"
+        "composer/go). Findings carry KEV / EPSS decoration from "
+        "strix's threat-intel cache; Dependency KG nodes are emitted "
+        "for every package so cross-target correlation works "
+        "(image dep ↔ repo lockfile dep ↔ live URL fingerprint). "
+        "Use `sbom_extract` when the wrapper requested a full image "
+        "manifest separately. Use `lookup_cve_by_id` to expand on a "
+        "specific CVE Trivy reported. Trivy must be installed locally; "
+        "the specialist returns `status=partial` with "
+        "`engine_available=false` when missing — surface that to the "
+        "operator instead of probing further."
+    ),
 }
 
 
