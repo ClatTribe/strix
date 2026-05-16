@@ -36,20 +36,19 @@ Evidence pass/fail per control:
                  rule in our corpus maps to it (a coverage gap
                  the wrapper should surface)
 
-What v1 ships:
-  * 4 framework catalogs: SOC 2, ISO 27001:2022, PCI DSS 4.0,
-    OWASP ASVS 4.0
+What this ships:
+  * 5 framework catalogs: SOC 2, ISO 27001:2022, PCI DSS 4.0,
+    OWASP ASVS 4.0, HIPAA Security Rule (§164.308 / §164.310 /
+    §164.312).
   * CWE → control map for ~35 CWEs strix's specialists already
-    emit
-  * Category → control map for SCA / IaC / SAST general categories
-  * `emit_compliance_evidence` LLM specialist
+    emit.
+  * Category → control map for SCA / IaC / SAST general categories.
+  * `emit_compliance_evidence` LLM specialist.
   * `compliance_evidence.json` artifact alongside
-    `vulnerabilities.json` + `finding_chains.json`
+    `vulnerabilities.json` + `finding_chains.json`.
 
-Out of scope for v1 (deferred to follow-up):
-  * HIPAA Security Rule (164.308 / 164.312) — needs legal
-    review of the mappings.
-  * GDPR Art. 32 / EU AI Act — same.
+Out of scope (deferred to follow-up):
+  * GDPR Art. 32 / EU AI Act — pending legal-review of mappings.
   * CIS Benchmarks — infrastructure-specific; closer to IaC
     rules than control mappings.
   * PII / data-classification flow tagging — extends Phase 9
@@ -66,6 +65,11 @@ from strix.compliance.evidence import (  # noqa: F401
 )
 from strix.compliance.frameworks import (  # noqa: F401
     ALL_FRAMEWORKS,
+    FRAMEWORK_HIPAA,
+    FRAMEWORK_ISO27001,
+    FRAMEWORK_OWASP_ASVS,
+    FRAMEWORK_PCI_DSS,
+    FRAMEWORK_SOC2,
     Control,
     get_control,
     get_framework_controls,

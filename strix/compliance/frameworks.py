@@ -37,12 +37,14 @@ FRAMEWORK_SOC2 = "soc2"
 FRAMEWORK_ISO27001 = "iso27001"
 FRAMEWORK_PCI_DSS = "pci_dss"
 FRAMEWORK_OWASP_ASVS = "owasp_asvs"
+FRAMEWORK_HIPAA = "hipaa"
 
 ALL_FRAMEWORKS = [
     FRAMEWORK_SOC2,
     FRAMEWORK_ISO27001,
     FRAMEWORK_PCI_DSS,
     FRAMEWORK_OWASP_ASVS,
+    FRAMEWORK_HIPAA,
 ]
 
 
@@ -542,6 +544,136 @@ _OWASP_ASVS_CONTROLS: dict[str, Control] = {
 
 
 # ---------------------------------------------------------------------------
+# HIPAA Security Rule (45 CFR §164)
+# ---------------------------------------------------------------------------
+
+# We carry the AppSec-testable subset:
+#   * §164.308 (Administrative Safeguards) — the access-management /
+#     malware-defense / login-monitoring slice. The risk-analysis +
+#     workforce-clearance entries support audit-handoff even though
+#     scanning doesn't directly attest them.
+#   * §164.310 (Physical Safeguards) — minimal coverage; mostly
+#     facility controls outside AppSec scope.
+#   * §164.312 (Technical Safeguards) — the bulk. Access control,
+#     audit, integrity, person/entity authentication, transmission.
+#
+# Control IDs use the regulation's own notation (e.g. `164.312(a)(1)`)
+# so the wrapper can deep-link to the official text.
+
+_HIPAA_CONTROLS: dict[str, Control] = {
+    # ----- §164.308 Administrative Safeguards -----
+    "164.308(a)(1)(ii)(A)": Control(
+        FRAMEWORK_HIPAA, "164.308(a)(1)(ii)(A)",
+        "Risk analysis",
+        "Conduct accurate + thorough assessment of the potential "
+        "risks + vulnerabilities to the confidentiality / "
+        "integrity / availability of ePHI.",
+    ),
+    "164.308(a)(1)(ii)(B)": Control(
+        FRAMEWORK_HIPAA, "164.308(a)(1)(ii)(B)",
+        "Risk management",
+        "Implement security measures sufficient to reduce risks "
+        "+ vulnerabilities to a reasonable + appropriate level.",
+    ),
+    "164.308(a)(4)(ii)(B)": Control(
+        FRAMEWORK_HIPAA, "164.308(a)(4)(ii)(B)",
+        "Access authorization",
+        "Implement policies + procedures for granting access "
+        "to ePHI (least privilege, role-based access).",
+    ),
+    "164.308(a)(5)(ii)(B)": Control(
+        FRAMEWORK_HIPAA, "164.308(a)(5)(ii)(B)",
+        "Protection from malicious software",
+        "Procedures for guarding against, detecting + reporting "
+        "malicious software (vulnerable + malicious dependencies).",
+    ),
+    "164.308(a)(5)(ii)(C)": Control(
+        FRAMEWORK_HIPAA, "164.308(a)(5)(ii)(C)",
+        "Log-in monitoring",
+        "Procedures for monitoring log-in attempts + reporting "
+        "discrepancies (auth failures, brute force).",
+    ),
+    "164.308(a)(5)(ii)(D)": Control(
+        FRAMEWORK_HIPAA, "164.308(a)(5)(ii)(D)",
+        "Password management",
+        "Procedures for creating, changing, and safeguarding "
+        "passwords (no hardcoded creds; strong hashing).",
+    ),
+    # ----- §164.310 Physical Safeguards (AppSec-relevant subset) -----
+    "164.310(d)(1)": Control(
+        FRAMEWORK_HIPAA, "164.310(d)(1)",
+        "Device and media controls",
+        "Implement policies + procedures governing receipt + "
+        "removal of hardware + electronic media containing ePHI.",
+    ),
+    # ----- §164.312 Technical Safeguards -----
+    "164.312(a)(1)": Control(
+        FRAMEWORK_HIPAA, "164.312(a)(1)",
+        "Access control",
+        "Implement technical policies + procedures for systems "
+        "that maintain ePHI to allow access only to authorized "
+        "persons / programs.",
+    ),
+    "164.312(a)(2)(i)": Control(
+        FRAMEWORK_HIPAA, "164.312(a)(2)(i)",
+        "Unique user identification",
+        "Assign a unique name / number for identifying + "
+        "tracking user identity.",
+    ),
+    "164.312(a)(2)(iii)": Control(
+        FRAMEWORK_HIPAA, "164.312(a)(2)(iii)",
+        "Automatic logoff",
+        "Implement electronic procedures that terminate an "
+        "electronic session after a predetermined time of "
+        "inactivity (session timeout).",
+    ),
+    "164.312(a)(2)(iv)": Control(
+        FRAMEWORK_HIPAA, "164.312(a)(2)(iv)",
+        "Encryption and decryption (at rest)",
+        "Implement a mechanism to encrypt + decrypt ePHI at "
+        "rest.",
+    ),
+    "164.312(b)": Control(
+        FRAMEWORK_HIPAA, "164.312(b)",
+        "Audit controls",
+        "Implement hardware / software / procedural mechanisms "
+        "that record + examine activity in systems that contain "
+        "or use ePHI.",
+    ),
+    "164.312(c)(1)": Control(
+        FRAMEWORK_HIPAA, "164.312(c)(1)",
+        "Integrity",
+        "Implement policies + procedures to protect ePHI from "
+        "improper alteration or destruction.",
+    ),
+    "164.312(c)(2)": Control(
+        FRAMEWORK_HIPAA, "164.312(c)(2)",
+        "Mechanism to authenticate ePHI",
+        "Implement mechanisms to corroborate that ePHI has not "
+        "been altered / destroyed in unauthorized manner.",
+    ),
+    "164.312(d)": Control(
+        FRAMEWORK_HIPAA, "164.312(d)",
+        "Person or entity authentication",
+        "Implement procedures to verify a person or entity "
+        "seeking access to ePHI is the one claimed.",
+    ),
+    "164.312(e)(1)": Control(
+        FRAMEWORK_HIPAA, "164.312(e)(1)",
+        "Transmission security",
+        "Implement technical security measures to guard against "
+        "unauthorized access to ePHI transmitted over a network.",
+    ),
+    "164.312(e)(2)(ii)": Control(
+        FRAMEWORK_HIPAA, "164.312(e)(2)(ii)",
+        "Encryption (in transit)",
+        "Implement a mechanism to encrypt ePHI whenever deemed "
+        "appropriate.",
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -551,6 +683,7 @@ _FRAMEWORK_CATALOGS: dict[str, dict[str, Control]] = {
     FRAMEWORK_ISO27001: _ISO27001_CONTROLS,
     FRAMEWORK_PCI_DSS: _PCI_DSS_CONTROLS,
     FRAMEWORK_OWASP_ASVS: _OWASP_ASVS_CONTROLS,
+    FRAMEWORK_HIPAA: _HIPAA_CONTROLS,
 }
 
 
