@@ -808,12 +808,27 @@ def _execute_inner_tool_call(
     profile: SpecialistDispatchProfile,
 ) -> dict[str, Any]:
     """Execute one tool call from the specialist's response.
-    v0 supports only `complete_objective` (the exit signal). v1
-    should route to the real strix tool registry, intersected
-    with `profile.allowed_tool_subset`."""
+
+    v1 routes tool calls through the real strix tool registry,
+    gated by `profile.allowed_tool_subset`:
+
+      * `complete_objective` is always allowed (it's the loop's
+        exit signal — every profile needs it).
+      * Other tools are looked up in
+        `strix.tools.registry.get_tool_by_name`; the call is
+        rejected if the tool is not in the profile's allowed
+        subset.
+
+    Kill switch: `STRIX_SPECIALIST_TOOLS_DISABLED=1` reverts to
+    v0 (only `complete_objective` allowed; every other tool call
+    returns a `not supported` error). Useful for A/B-comparing
+    the v0 and v1 paths."""
     name = tc.get("tool") or ""
     args = tc.get("args") or {}
 
+    # complete_objective — the exit signal — never goes through
+    # the registry. Profile gating is also bypassed; this is the
+    # one tool every specialist must always have.
     if name == "complete_objective":
         signal_specialist_complete(
             status=args.get("status", "PASSED"),
@@ -822,14 +837,81 @@ def _execute_inner_tool_call(
         )
         return {"success": True, "signaled": "complete_objective"}
 
-    # v0 — unknown tool calls in the specialist context return
-    # a structured "not supported" error. The full registry
-    # integration is v1 work.
-    return {
-        "success": False,
-        "error": (
-            f"specialist v0 supports only complete_objective; "
-            f"got {name!r}. Full strix tool catalog integration "
-            f"will land in v1."
-        ),
-    }
+    if _is_specialist_tools_disabled():
+        return {
+            "success": False,
+            "error": (
+                f"specialist v0 mode (STRIX_SPECIALIST_TOOLS_DISABLED=1) — "
+                f"only complete_objective allowed; got {name!r}."
+            ),
+        }
+
+    # Profile gating — `allowed_tool_subset` is the catalog the
+    # specialist can call. Empty subset = full surface (legacy v0
+    # default; rarely used in practice).
+    subset = list(profile.allowed_tool_subset)
+    if subset and name not in subset:
+        return {
+            "success": False,
+            "error": (
+                f"tool {name!r} not in specialist profile "
+                f"{profile.category!r}'s allowed_tool_subset"
+            ),
+        }
+
+    # Look up + execute via the real registry.
+    try:
+        from strix.tools.registry import get_tool_by_name
+    except Exception as e:  # noqa: BLE001
+        return {
+            "success": False,
+            "error": f"tool registry unavailable: {e}",
+        }
+
+    fn = get_tool_by_name(name)
+    if fn is None:
+        return {
+            "success": False,
+            "error": f"tool {name!r} not registered with strix",
+        }
+
+    try:
+        # Tools are registered with kwargs-shaped signatures; pass
+        # the parsed args dict as kwargs. Strict — if the tool
+        # rejects an arg shape, we surface the TypeError as a
+        # structured error instead of crashing the inner loop.
+        result = fn(**(args or {}))
+    except TypeError as e:
+        return {
+            "success": False,
+            "error": f"tool {name!r} arg shape: {e}",
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "specialist[%s] tool %r raised: %s",
+            profile.category, name, e, exc_info=True,
+        )
+        return {
+            "success": False,
+            "error": f"tool {name!r} raised: {type(e).__name__}: {e}",
+        }
+
+    # If the tool returned something JSON-serialisable, pass it
+    # through; otherwise stringify.
+    if isinstance(result, dict):
+        return result
+    if result is None:
+        return {"success": True, "result": None}
+    try:
+        json.dumps(result)
+        return {"success": True, "result": result}
+    except (TypeError, ValueError):
+        return {"success": True, "result": str(result)}
+
+
+def _is_specialist_tools_disabled() -> bool:
+    """Kill switch — reverts the inner loop to v0 (complete_objective
+    only). Set `STRIX_SPECIALIST_TOOLS_DISABLED=1`."""
+    return os.environ.get(
+        "STRIX_SPECIALIST_TOOLS_DISABLED", ""
+    ).lower() in ("1", "true", "yes", "on")

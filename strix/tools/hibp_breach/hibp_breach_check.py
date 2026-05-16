@@ -365,7 +365,7 @@ def _emit_finding(
     tracer = get_global_tracer()
     if tracer is None:
         return
-    tracer.add_vulnerability_report(
+    finding_id = tracer.add_vulnerability_report(
         title=title,
         severity=severity,
         category="breach_exposure",
@@ -389,6 +389,24 @@ def _emit_finding(
         recommended_action=recommended_action,
         verification_status="verified",
     )
+    # P4 — ThreatIntel projection. HIBP observes that a domain
+    # or email appears in a breach corpus.
+    try:
+        from strix.agents.kg_emit import record_threat_intel_in_kg
+        asset_type = "email" if "@" in target else "domain"
+        record_threat_intel_in_kg(
+            source="hibp_breach",
+            asset_type=asset_type,
+            asset_value=target,
+            verdict="breached",
+            detail=title[:120],
+            finding_id=finding_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).debug(
+            "hibp_breach: kg threat-intel record failed: %s", e, exc_info=True,
+        )
 
 
 def _start_check(category: str, surface: str) -> str | None:

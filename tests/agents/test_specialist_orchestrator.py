@@ -456,3 +456,202 @@ def test_result_carries_category_and_objective_back() -> None:
     )
     assert result["category"] == "xss"
     assert result["objective"] == "probe /search"
+
+
+# ---------------------------------------------------------------------------
+# P3 — inner tool routing v1
+# ---------------------------------------------------------------------------
+
+
+def test_execute_inner_tool_calls_complete_objective_always() -> None:
+    """`complete_objective` is the exit signal — must be allowed
+    regardless of profile.allowed_tool_subset."""
+    so.reset_for_testing()
+    # Construct a profile with EMPTY allowed_tool_subset.
+    profile = so.SpecialistDispatchProfile(
+        category="restricted",
+        system_prompt_addendum="x",
+        allowed_tool_subset=[],
+    )
+    r = so._execute_inner_tool_call(
+        {"tool": "complete_objective", "args": {"status": "PASSED"}},
+        profile=profile,
+    )
+    assert r["success"] is True
+    assert r["signaled"] == "complete_objective"
+    # And the exit signal was set.
+    assert so.get_specialist_exit_signal() is not None
+
+
+def test_execute_inner_tool_rejects_tool_outside_subset() -> None:
+    """Profile gates the allowed tool surface — calling a tool
+    outside the subset returns a structured rejection."""
+    profile = so.SpecialistDispatchProfile(
+        category="sqli",
+        system_prompt_addendum="x",
+        allowed_tool_subset=["scan_sqli", "complete_objective"],
+    )
+    r = so._execute_inner_tool_call(
+        {"tool": "browser_action", "args": {}},
+        profile=profile,
+    )
+    assert r["success"] is False
+    assert "not in specialist profile" in r["error"]
+
+
+def test_execute_inner_tool_calls_real_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v1 routes through `strix.tools.registry.get_tool_by_name`.
+    Verify by injecting a fake tool that records its call."""
+    captured: dict = {}
+
+    def fake_tool(**kwargs) -> dict:
+        captured.update(kwargs)
+        return {"success": True, "echo": kwargs.get("input", "")}
+
+    from strix.tools.registry import _tools_by_name
+    monkeypatch.setitem(_tools_by_name, "fake_tool", fake_tool)
+
+    profile = so.SpecialistDispatchProfile(
+        category="custom",
+        system_prompt_addendum="x",
+        allowed_tool_subset=["fake_tool"],
+    )
+    r = so._execute_inner_tool_call(
+        {"tool": "fake_tool", "args": {"input": "hello"}},
+        profile=profile,
+    )
+    assert r["success"] is True
+    assert r["echo"] == "hello"
+    assert captured == {"input": "hello"}
+
+
+def test_execute_inner_tool_unknown_tool_returns_error() -> None:
+    profile = so.SpecialistDispatchProfile(
+        category="custom",
+        system_prompt_addendum="x",
+        allowed_tool_subset=["nonexistent_tool"],
+    )
+    r = so._execute_inner_tool_call(
+        {"tool": "nonexistent_tool", "args": {}},
+        profile=profile,
+    )
+    assert r["success"] is False
+    assert "not registered" in r["error"]
+
+
+def test_execute_inner_tool_handles_typeerror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the model passes args the tool doesn't accept, we get
+    a structured TypeError-shaped error — NOT a crashed inner loop."""
+    def fussy_tool(*, required_arg: str) -> dict:
+        return {"ok": required_arg}
+
+    from strix.tools.registry import _tools_by_name
+    monkeypatch.setitem(_tools_by_name, "fussy_tool", fussy_tool)
+
+    profile = so.SpecialistDispatchProfile(
+        category="custom",
+        system_prompt_addendum="x",
+        allowed_tool_subset=["fussy_tool"],
+    )
+    r = so._execute_inner_tool_call(
+        {"tool": "fussy_tool", "args": {"wrong_arg": "x"}},
+        profile=profile,
+    )
+    assert r["success"] is False
+    assert "arg shape" in r["error"]
+
+
+def test_execute_inner_tool_handles_tool_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def crashy_tool(**kwargs) -> dict:
+        raise RuntimeError("boom")
+
+    from strix.tools.registry import _tools_by_name
+    monkeypatch.setitem(_tools_by_name, "crashy_tool", crashy_tool)
+
+    profile = so.SpecialistDispatchProfile(
+        category="custom",
+        system_prompt_addendum="x",
+        allowed_tool_subset=["crashy_tool"],
+    )
+    r = so._execute_inner_tool_call(
+        {"tool": "crashy_tool", "args": {}},
+        profile=profile,
+    )
+    assert r["success"] is False
+    assert "RuntimeError" in r["error"]
+    assert "boom" in r["error"]
+
+
+def test_execute_inner_tool_handles_non_dict_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tools that return scalars / strings / lists get wrapped in
+    the standard {"success": True, "result": ...} envelope."""
+    def list_tool(**kwargs) -> list:
+        return [1, 2, 3]
+
+    from strix.tools.registry import _tools_by_name
+    monkeypatch.setitem(_tools_by_name, "list_tool", list_tool)
+
+    profile = so.SpecialistDispatchProfile(
+        category="custom",
+        system_prompt_addendum="x",
+        allowed_tool_subset=["list_tool"],
+    )
+    r = so._execute_inner_tool_call(
+        {"tool": "list_tool", "args": {}},
+        profile=profile,
+    )
+    assert r["success"] is True
+    assert r["result"] == [1, 2, 3]
+
+
+def test_kill_switch_reverts_to_v0(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """STRIX_SPECIALIST_TOOLS_DISABLED=1 → only complete_objective
+    allowed, every other tool returns the v0 rejection."""
+    monkeypatch.setenv("STRIX_SPECIALIST_TOOLS_DISABLED", "1")
+
+    def fake_tool(**kwargs) -> dict:
+        return {"success": True}
+
+    from strix.tools.registry import _tools_by_name
+    monkeypatch.setitem(_tools_by_name, "should_not_run", fake_tool)
+
+    profile = so.SpecialistDispatchProfile(
+        category="custom",
+        system_prompt_addendum="x",
+        allowed_tool_subset=["should_not_run"],
+    )
+    r = so._execute_inner_tool_call(
+        {"tool": "should_not_run", "args": {}},
+        profile=profile,
+    )
+    assert r["success"] is False
+    assert "v0 mode" in r["error"]
+
+
+def test_kill_switch_still_allows_complete_objective(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even in v0 mode (kill switch on), complete_objective must
+    still work — otherwise the inner loop can't exit."""
+    so.reset_for_testing()
+    monkeypatch.setenv("STRIX_SPECIALIST_TOOLS_DISABLED", "1")
+    profile = so.SpecialistDispatchProfile(
+        category="custom",
+        system_prompt_addendum="x",
+        allowed_tool_subset=[],
+    )
+    r = so._execute_inner_tool_call(
+        {"tool": "complete_objective", "args": {"status": "PASSED"}},
+        profile=profile,
+    )
+    assert r["success"] is True

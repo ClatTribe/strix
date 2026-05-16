@@ -364,3 +364,92 @@ def test_stats_breakdown_by_type() -> None:
     assert stats["node_count"] == 3
     assert stats["node_types"]["Surface"] == 2
     assert stats["node_types"]["Vuln"] == 1
+
+
+# ---------------------------------------------------------------------------
+# P4 — CI delta-scan seed loader
+# ---------------------------------------------------------------------------
+
+
+def test_load_kg_from_disk_accepts_explicit_path(tmp_path: Path) -> None:
+    """load_kg_from_disk(path) loads from arbitrary location — not
+    just <run_dir>/kg.json (the canonical resume location)."""
+    seed_dir = tmp_path / "previous_run"
+    seed_dir.mkdir()
+    g_orig = kg.get_kg()
+    a = g_orig.add_node(type="Surface", props={"url": "/x"})
+    b = g_orig.add_node(type="Vuln", props={"cwe": "CWE-89"})
+    g_orig.add_edge(type="AFFECTS", source=b.id, target=a.id)
+
+    seed_file = seed_dir / "kg.json"
+    import json as _json
+    seed_file.write_text(_json.dumps(g_orig.to_dict()))
+
+    kg.reset_for_testing()
+    loaded = kg.load_kg_from_disk(seed_file)
+    assert loaded is not None
+    assert loaded.stats()["node_count"] == 2
+    assert loaded.stats()["edge_count"] == 1
+
+
+def test_load_seed_kg_from_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("STRIX_KG_SEED_PATH", raising=False)
+    assert kg.load_seed_kg_from_env() is None
+
+
+def test_load_seed_kg_from_env_missing_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("STRIX_KG_SEED_PATH", str(tmp_path / "nope.json"))
+    assert kg.load_seed_kg_from_env() is None
+
+
+def test_load_seed_kg_from_env_happy_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """STRIX_KG_SEED_PATH points at a valid kg.json → loader
+    populates the singleton before scan start; subsequent
+    `get_kg()` returns the seeded graph and new nodes compose
+    with prior state."""
+    g = kg.get_kg()
+    g.add_node(type="Surface", props={"url": "/seed"})
+    g.add_node(type="Vuln", props={"cwe": "CWE-79"})
+
+    seed_path = tmp_path / "prior_kg.json"
+    import json as _json
+    seed_path.write_text(_json.dumps(g.to_dict()))
+
+    kg.reset_for_testing()
+    monkeypatch.setenv("STRIX_KG_SEED_PATH", str(seed_path))
+    loaded = kg.load_seed_kg_from_env()
+    assert loaded is not None
+    assert loaded.stats()["node_count"] == 2
+
+    g_after = kg.get_kg()
+    assert g_after is loaded
+    g_after.add_node(type="Surface", props={"url": "/new"})
+    assert g_after.stats()["node_count"] == 3
+
+
+def test_load_seed_kg_from_env_respects_kill_switch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """STRIX_KG_DISABLED=1 overrides — seed is NOT loaded."""
+    seed_path = tmp_path / "prior.json"
+    seed_path.write_text('{"version":1,"nodes":[],"edges":[]}')
+    monkeypatch.setenv("STRIX_KG_SEED_PATH", str(seed_path))
+    monkeypatch.setenv("STRIX_KG_DISABLED", "1")
+    assert kg.load_seed_kg_from_env() is None
+
+
+def test_load_seed_kg_from_env_malformed_seed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """Malformed seed file → warning logged, None returned. Scan
+    continues with empty KG."""
+    seed_path = tmp_path / "broken.json"
+    seed_path.write_text("{not valid json")
+    monkeypatch.setenv("STRIX_KG_SEED_PATH", str(seed_path))
+    assert kg.load_seed_kg_from_env() is None
