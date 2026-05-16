@@ -515,3 +515,32 @@ def test_asset_routing_ip_anchors_on_port_scan() -> None:
     # the cross-correlation hint is in the per-asset block, not the
     # multi-asset block (since only one asset class is in scope).
     assert "send_request" in routing
+
+
+def test_asset_routing_web_directs_nuclei_xss_tag_run() -> None:
+    """The web_application routing block must direct the lead to ALSO
+    call `scan_nuclei_templates` with an xss tag filter alongside
+    `scan_xss`. The two are complementary — scan_xss is a generic
+    reflected-XSS fuzzer for custom code, nuclei matches product-
+    specific XSS CVEs (WordPress plugins, Confluence, etc.). Without
+    this explicit instruction the agent historically called only
+    scan_xss and missed every product-XSS CVE in the customer's
+    third-party stack."""
+    agent = _make_agent("web_application")
+    routing = agent.llm._system_prompt_context.get("lead_asset_routing", "")
+    assert "scan_nuclei_templates" in routing
+    assert "xss" in routing.lower()
+    # Pair must be explicit, not vague — `tags=` filter is the
+    # critical piece nuclei needs to scope the run.
+    assert "tags=" in routing
+
+
+def test_asset_routing_api_directs_nuclei_cve_run() -> None:
+    """The api routing block must direct the lead to ALSO run nuclei
+    with a cve tag filter — many APIs ship admin / docs / swagger
+    UIs with known XSS / SSRF / RCE CVEs that the deterministic
+    API specialists won't catch."""
+    agent = _make_agent("api")
+    routing = agent.llm._system_prompt_context.get("lead_asset_routing", "")
+    assert "scan_nuclei_templates" in routing
+    assert "cve" in routing.lower()
