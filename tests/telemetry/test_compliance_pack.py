@@ -53,7 +53,7 @@ def _basic_findings() -> list[dict[str, Any]]:
             "compliance_controls": {
                 "soc2": ["CC6.1"],
                 "pci_dss": ["6.5.1"],
-                "owasp": ["A03:2021"],
+                "owasp_top10": ["A03:2021"],
             },
         },
         {
@@ -70,7 +70,7 @@ def _basic_findings() -> list[dict[str, Any]]:
             "recommended_action": "Encode output.",
             "compliance_controls": {
                 "soc2": ["CC6.1"],
-                "owasp": ["A03:2021"],
+                "owasp_top10": ["A03:2021"],
             },
         },
     ]

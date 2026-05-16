@@ -157,7 +157,7 @@ def render_hyperproof(findings: list[dict[str, Any]], run_metadata: dict[str, An
     for f in findings:
         controls = f.get("compliance_controls") or {}
         any_emitted = False
-        for framework in ("soc2", "pci_dss", "iso_27001", "hipaa", "nist_800_53"):
+        for framework in ("soc2", "pci_dss", "iso27001", "hipaa", "nist_800_53"):
             for control_id in controls.get(framework, []) or []:
                 records.append({
                     "evidence_id": f"{f.get('id')}-{framework}-{control_id}",
