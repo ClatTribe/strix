@@ -247,6 +247,34 @@ def passive_dns_history(domain: str, prefer: str | None = None) -> dict[str, Any
             ),
         )
 
+    # KG: emit Asset nodes for historical subdomains + every IP
+    # the target resolved to (live or historic). Cross-tool
+    # correlation: a domain seen here AND flagged by vt_reputation
+    # lands on the same Asset node.
+    try:
+        from strix.agents.kg_emit import record_asset_in_kg
+
+        for sub in merged_subdomains:
+            record_asset_in_kg(
+                asset_type="subdomain",
+                value=sub,
+                source="passive_dns_history",
+                parent_value=domain,
+            )
+        seen_ips: set[str] = set()
+        for resolution in merged_resolutions:
+            ip = resolution.get("ip") if isinstance(resolution, dict) else None
+            if isinstance(ip, str) and ip and ip not in seen_ips:
+                seen_ips.add(ip)
+                record_asset_in_kg(
+                    asset_type="ip_address",
+                    value=ip,
+                    source="passive_dns_history",
+                    parent_value=domain,
+                )
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "success": any(r.get("success") for r in results),
         "domain": domain,

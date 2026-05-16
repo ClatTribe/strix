@@ -501,6 +501,34 @@ def discover_cloud_assets(
         )
         complete_check(cev_id, verdict, evidence=evidence)
 
+    # KG: emit Asset per discovered cloud asset (S3 / GCS / Azure
+    # blob / org-named handle on a public registry). Asset_type
+    # picks `cloud_bucket` for storage providers, `cloud_account`
+    # for org-handle hits — both join into the KG so downstream
+    # tools that care about cloud surface (e.g. a future
+    # bucket-permission scanner) can query by Asset.
+    try:
+        from strix.agents.kg_emit import record_asset_in_kg
+
+        for hit in hits:
+            provider = hit.get("provider", "")
+            name = hit.get("name") or hit.get("url") or ""
+            if not name:
+                continue
+            is_storage = provider in _STORAGE_PROVIDERS
+            record_asset_in_kg(
+                asset_type="cloud_bucket" if is_storage else "cloud_account",
+                value=str(name),
+                source="discover_cloud_assets",
+                parent_value=org_name,
+                properties={
+                    "provider": provider,
+                    "url": hit.get("url"),
+                } if hit.get("url") else {"provider": provider},
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "success": True,
         "org_name": org_name,

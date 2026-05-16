@@ -556,6 +556,23 @@ def subdomain_enum(  # noqa: PLR0913
         for s in results:
             merged.add(s)
 
+    # KG: emit one Asset per discovered subdomain so cross-tool
+    # correlation (threat-intel observations on the subdomain;
+    # vulns at the subdomain's surfaces) joins on the shared node.
+    try:
+        from strix.agents.kg_emit import record_asset_in_kg
+
+        for sub in merged:
+            record_asset_in_kg(
+                asset_type="subdomain",
+                value=sub,
+                source="subdomain_enum_tool",
+                parent_value=domain,
+            )
+    except Exception:  # noqa: BLE001
+        # Recon emit failures must not break tool output.
+        pass
+
     return {
         "success": True,
         "domain": domain,

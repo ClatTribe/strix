@@ -96,6 +96,144 @@ def reset_dependency_cache_for_testing() -> None:
         _dependency_cache.clear()
 
 
+# Asset dedup for recon-discovered assets. Same Asset can be
+# surfaced by multiple recon tools (subfinder + crtsh + amass
+# all find the same subdomain). Dedup key is `(asset_type, value)`
+# — identical to the threat-intel Asset cache so a subdomain
+# discovered by `subdomain_enum_tool` AND flagged by
+# `vt_reputation` lands on the SAME Asset node.
+_recon_asset_cache: dict[tuple[str, str], str] = {}
+_recon_asset_cache_lock = threading.Lock()
+
+
+def reset_recon_asset_cache_for_testing() -> None:
+    """Clear the recon Asset dedup cache. Tests must call this in
+    fixtures so prior-test Asset ids don't leak."""
+    with _recon_asset_cache_lock:
+        _recon_asset_cache.clear()
+
+
+def record_asset_in_kg(
+    *,
+    asset_type: str,
+    value: str,
+    source: str = "",
+    parent_value: str | None = None,
+    properties: dict[str, Any] | None = None,
+) -> str | None:
+    """Emit (or update) an `Asset` node for a recon-discovered surface.
+
+    Designed for the recon-side discovery scanners
+    (`subdomain_enum_tool`, `reverse_ip`, `mail_recon`,
+    `passive_dns_history`, `discover_cloud_assets`, etc.) — each
+    discovered subdomain / IP / MX record / bucket / account
+    becomes an Asset node. The wrapper renders the asset tree;
+    cross-scanner correlation (threat-intel observations + recon
+    discovery) joins on the shared Asset.
+
+    Coalesces with the threat-intel Asset cache so the same node
+    surfaces both discovery AND observation. `record_threat_intel_in_kg`
+    will reuse the Asset id when called on a key that's already
+    in this cache, and vice versa.
+
+    Args:
+      asset_type: shape of the discovered thing —
+        `domain`, `subdomain`, `ip_address`, `email`, `mx_record`,
+        `cloud_bucket`, `cloud_account`, `url`.
+      value: the canonical value (lowercase for domains, IP
+        textually, URL canonicalised).
+      source: which recon scanner produced this discovery
+        (`subdomain_enum_tool`, `reverse_ip`, `mail_recon`, ...).
+        Accumulated as a `sources` list on re-discovery — multiple
+        scanners contributing to one Asset gets all sources.
+      parent_value: optional parent-asset value for hierarchical
+        recon (e.g. `parent_value="example.com"` for a discovered
+        subdomain `api.example.com`). Stored as `parent` prop —
+        the wrapper renders the parent tree without a separate
+        edge type.
+      properties: optional extra props (e.g.
+        `{"resolved_ips": ["1.2.3.4"], "asn": 13335}`). Merged
+        additively on re-discovery.
+
+    Returns the Asset node id (or the existing one when dedup
+    hits); `None` when the KG is disabled or emission fails.
+    Best-effort; never raises.
+    """
+    if not isinstance(asset_type, str) or not asset_type.strip():
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    try:
+        from strix.agents.knowledge_graph import get_kg, is_disabled
+    except ImportError:
+        return None
+
+    if is_disabled():
+        return None
+
+    norm_type = asset_type.strip().lower()
+    norm_value = value.strip().lower()
+    cache_key = (norm_type, norm_value)
+
+    kg = get_kg()
+
+    try:
+        # The recon cache + threat-intel cache share the same key
+        # shape so the dedup is cross-cache. Check both before
+        # creating a new node.
+        with _recon_asset_cache_lock:
+            existing_id = _recon_asset_cache.get(cache_key)
+        if existing_id is None:
+            with _asset_cache_lock:
+                existing_id = _asset_cache.get(cache_key)
+
+        if existing_id is not None and kg.get_node(existing_id) is not None:
+            # Update path — merge sources + properties additively.
+            node = kg.get_node(existing_id)
+            if node is not None:
+                if source:
+                    sources = set(node.props.get("sources") or [])
+                    sources.add(source)
+                    node.props["sources"] = sorted(sources)
+                if parent_value and not node.props.get("parent"):
+                    node.props["parent"] = parent_value.strip().lower()
+                if properties:
+                    for k, v in properties.items():
+                        if k not in node.props:
+                            node.props[k] = v
+            # Mirror to both caches so subsequent lookups hit.
+            with _recon_asset_cache_lock:
+                _recon_asset_cache[cache_key] = existing_id
+            return existing_id
+
+        props: dict[str, Any] = {
+            "type": norm_type,
+            "value": norm_value,
+        }
+        if source:
+            props["sources"] = [source]
+        if parent_value:
+            props["parent"] = parent_value.strip().lower()
+        if properties:
+            for k, v in properties.items():
+                if k not in props:
+                    props[k] = v
+
+        node = kg.add_node(type="Asset", props=props)
+        with _recon_asset_cache_lock:
+            _recon_asset_cache[cache_key] = node.id
+        with _asset_cache_lock:
+            _asset_cache[cache_key] = node.id
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "kg_emit: record_asset failed: %s", e, exc_info=True,
+        )
+        return None
+
+    return node.id
+
+
 def record_dependency_in_kg(
     *,
     name: str,
