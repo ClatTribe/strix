@@ -79,6 +79,155 @@ def reset_asset_cache_for_testing() -> None:
         _asset_cache.clear()
 
 
+# Dependency node dedup. Same scanner can surface the same package
+# repeatedly across a scan (lockfile parse → vuln check → SBOM
+# emit all touch the same `log4j 2.14.0`). The dedup key is
+# `(canonical_name, version_or_unknown, ecosystem_or_unknown)` so
+# a customer running log4j 2.14.0 on Maven AND a separate log4j
+# 2.17.1 in another service stays two distinct nodes.
+_dependency_cache: dict[tuple[str, str, str], str] = {}
+_dependency_cache_lock = threading.Lock()
+
+
+def reset_dependency_cache_for_testing() -> None:
+    """Clear the Dependency dedup cache. Tests must call this in
+    fixtures."""
+    with _dependency_cache_lock:
+        _dependency_cache.clear()
+
+
+def record_dependency_in_kg(
+    *,
+    name: str,
+    version: str | None = None,
+    ecosystem: str | None = None,
+    source: str = "",
+    cve_ids: list[str] | None = None,
+) -> str | None:
+    """Emit a `Dependency` node into the KG, keyed for dedup so the
+    same package surfaced twice doesn't bloat the graph.
+
+    This is the producer side of the CVE-relevance evaluator
+    (`strix.agents.exploit_builder.cve_relevance`) — every
+    inventory-aware scanner / tool that can identify a deployed
+    technology should call this. Three canonical caller classes:
+
+      * **SCA / lockfile parsers** — pass `ecosystem=<npm|pypi|
+        maven|nuget|...>`, `name=<package>`, `version=<semver>`,
+        `source="sca_lockfiles"` (or whichever scanner).
+      * **Web-target fingerprinters** — pass `name=<framework
+        or server>` (`nginx`, `react`, `wordpress`), `version=<
+        from-header-or-bundle-hash>`, `ecosystem=None` for
+        non-package techs, `source="sbom_extract"` or
+        `"fingerprint"`.
+      * **Container scanners** (future) — pass package names from
+        the image's OS layer + app layer, `ecosystem="os"` for
+        system packages.
+
+    Returns the new node id (or the existing one when dedup
+    hits); `None` when the KG is disabled or emission fails.
+    Best-effort; never raises.
+
+    Args:
+      name: the canonical product / package name. Will be
+        normalised via `cve_relevance._canonical_product` so
+        callers can pass whatever shape their data source emits
+        (Maven groupId:artifactId, npm `@scope/pkg`, Java
+        fully-qualified name, etc.).
+      version: semver / version string when known; None when
+        the scanner couldn't determine it (some fingerprinters
+        only recognise the product). Surfacing without a version
+        is still useful — `RelevanceTier.PRODUCT_MATCH`
+        downstream surfaces it as a coarse alert.
+      ecosystem: `npm`, `pypi`, `maven`, `gem`, `nuget`, `cargo`,
+        `go`, `os` (system packages), or None (web tech).
+      source: which scanner emitted this. Stored in `props`
+        so the wrapper can attribute evidence.
+      cve_ids: optional list of CVE IDs already associated with
+        this package version (typically from SCA's prior advisory
+        lookup). Stored as a list on the node.
+
+    Dedup:
+      `(canonical_name, version_or_'unknown', ecosystem_or_'unknown')`
+      → one Dependency node. Re-emission updates `cve_ids` and
+      `source` (additive — multiple scanners contributing to one
+      Dependency record).
+    """
+    if not isinstance(name, str) or not name.strip():
+        return None
+
+    try:
+        from strix.agents.exploit_builder.cve_relevance import (
+            _canonical_product,
+        )
+        from strix.agents.knowledge_graph import get_kg, is_disabled
+    except ImportError:
+        return None
+
+    if is_disabled():
+        return None
+
+    canonical = _canonical_product(name)
+    if not canonical:
+        return None
+
+    norm_version = (version or "").strip() or None
+    norm_ecosystem = (ecosystem or "").strip().lower() or None
+    cache_key = (
+        canonical,
+        norm_version or "unknown",
+        norm_ecosystem or "unknown",
+    )
+
+    kg = get_kg()
+
+    try:
+        with _dependency_cache_lock:
+            existing_id = _dependency_cache.get(cache_key)
+            if existing_id is not None and kg.get_node(existing_id) is not None:
+                # Update path — merge cve_ids + sources additively.
+                if cve_ids or source:
+                    node = kg.get_node(existing_id)
+                    if node is not None:
+                        merged_cves = set(node.props.get("cve_ids") or [])
+                        merged_cves.update(cve_ids or [])
+                        merged_sources = set(
+                            (node.props.get("sources") or [])
+                        )
+                        if source:
+                            merged_sources.add(source)
+                        # `update_node` would be ideal but for now
+                        # we mutate via direct prop write (the KG
+                        # serialiser sees the change on next
+                        # `save`).
+                        node.props["cve_ids"] = sorted(merged_cves)
+                        node.props["sources"] = sorted(merged_sources)
+                return existing_id
+
+            props: dict[str, Any] = {
+                "name": canonical,
+                "name_raw": name,
+            }
+            if norm_version:
+                props["version"] = norm_version
+            if norm_ecosystem:
+                props["ecosystem"] = norm_ecosystem
+            if source:
+                props["sources"] = [source]
+            if cve_ids:
+                props["cve_ids"] = list(cve_ids)
+
+            node = kg.add_node(type="Dependency", props=props)
+            _dependency_cache[cache_key] = node.id
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "kg_emit: record_dependency failed: %s", e, exc_info=True,
+        )
+        return None
+
+    return node.id
+
+
 def record_threat_intel_in_kg(
     *,
     source: str,

@@ -108,6 +108,24 @@ def _emit_finding(
                 f"  * {c.cve_id}{tag_str}: {(c.description or '')[:100]}"
             )
 
+        # Populate the KG `Dependency` node so the CVE-relevance
+        # evaluator (feed-triggered synthesiser) can match new CVE
+        # events against this customer's actual inventory. Fail-
+        # open: errors are swallowed by `record_dependency_in_kg`
+        # itself.
+        try:
+            from strix.agents.kg_emit import record_dependency_in_kg
+
+            record_dependency_in_kg(
+                name=pkg.name,
+                version=pkg.version,
+                ecosystem=pkg.ecosystem,
+                source="sca_lockfiles",
+                cve_ids=[c.cve_id for c in cves if c.cve_id],
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("sca: Dependency KG emit failed", exc_info=True)
+
         title = (
             f"Vulnerable dependency `{pkg.ecosystem}:{pkg.name}@{pkg.version}` "
             f"({len(cves)} CVE{'s' if len(cves) > 1 else ''})"
