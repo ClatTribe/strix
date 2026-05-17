@@ -1277,6 +1277,488 @@ def _pattern_gcp_service_account_owner_role(
     return out
 
 
+# ---------------------------------------------------------------------------
+# v4 expansion — 18 → 25 patterns
+# ---------------------------------------------------------------------------
+
+
+def _pattern_lambda_function_url_no_auth(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """Lambda function with FunctionUrl + AuthType=NONE. Distinct
+    from the generic `cap_internet_exposed_compute_with_iam` (which
+    also fires) because the remediation is different — operators
+    fix function-URL auth without changing the Lambda's IAM role.
+
+    Detection: kind=lambda_function AND
+    `metadata.function_url_auth_type` is "NONE".
+    """
+    out: list[AttackPath] = []
+    for r in graph.public_resources():
+        if r.kind != "lambda_function":
+            continue
+        auth_type = (r.attributes.get("function_url_auth_type") or "")
+        if auth_type.upper() != "NONE":
+            continue
+        url = r.attributes.get("function_url") or "(unknown)"
+        out.append(AttackPath(
+            pattern_id="cap_lambda_function_url_no_auth",
+            title=(
+                f"Lambda function URL `{url}` has AuthType=NONE"
+            ),
+            severity="high",
+            narrative=(
+                f"Lambda function `{r.arn}` has a public function "
+                f"URL with `AuthType=NONE` — anonymous callers can "
+                f"invoke the function. Combined with any IAM role "
+                f"attached to the Lambda, this is direct anonymous "
+                f"access to whatever the role grants. Function URLs "
+                f"with AuthType=NONE are typically left over from "
+                f"prototyping — flip to AWS_IAM auth + put a JWT "
+                f"verifier in the function code itself."
+            ),
+            hops=[r.arn],
+            evidence_edges=[EDGE_EXPOSED_TO_INTERNET],
+            mitre_techniques=["T1190"],
+            remediation=(
+                "1. Change the function URL AuthType to "
+                "`AWS_IAM`: `aws lambda update-function-url-config "
+                "--function-name <name> --auth-type AWS_IAM`.\n"
+                "2. If you need anonymous access (e.g. webhook "
+                "receiver from an external SaaS), add an "
+                "application-level auth check in the handler "
+                "(HMAC signature / shared secret / JWT)."
+            ),
+            confidence=0.95,
+            metadata={"function_url": url},
+        ))
+    return out
+
+
+def _pattern_iam_user_active_keys_no_mfa(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """IAM USER with active access keys AND no MFA device. Long-
+    lived programmatic credentials that aren't behind MFA are
+    the canonical credential-stuffing attack surface.
+
+    Detection: kind=iam_user AND
+    `attributes['has_active_access_key']=True` AND
+    `attributes['mfa_enabled']=False`.
+    """
+    out: list[AttackPath] = []
+    for ident in graph.nodes_by_type(CloudIdentity):
+        if not isinstance(ident, CloudIdentity):
+            continue
+        if ident.kind != "iam_user":
+            continue
+        if not ident.attributes.get("has_active_access_key"):
+            continue
+        if ident.attributes.get("mfa_enabled"):
+            continue
+        out.append(AttackPath(
+            pattern_id="cap_iam_user_active_keys_no_mfa",
+            title=(
+                f"IAM user `{ident.arn}` has active access keys "
+                f"AND no MFA"
+            ),
+            severity="high",
+            narrative=(
+                f"IAM user `{ident.arn}` has active access "
+                f"keys and no MFA device. The access keys are "
+                f"long-lived programmatic credentials — stolen "
+                f"from a developer laptop / CI log / GitHub leak, "
+                f"the attacker uses them directly. MFA on the "
+                f"user doesn't gate programmatic access, but "
+                f"MFA-required IAM conditions on critical "
+                f"actions (e.g. `aws:MultiFactorAuthPresent=true` "
+                f"on policy statements) shut this attack down."
+            ),
+            hops=[ident.arn],
+            mitre_techniques=["T1078.004", "T1556.006"],
+            remediation=(
+                "1. Rotate the access keys quarterly at minimum; "
+                "use AWS IAM Identity Center / SSO for human "
+                "users instead of static keys.\n"
+                "2. For service workloads, replace static keys "
+                "with IAM Roles + STS short-lived credentials.\n"
+                "3. Add MFA conditions on high-privilege policy "
+                "statements: `Condition: { Bool: "
+                "{ aws:MultiFactorAuthPresent: \"true\" } }`."
+            ),
+            confidence=0.9,
+        ))
+    return out
+
+
+def _pattern_cross_account_s3_share(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """S3 bucket policy granting access to an external AWS account.
+    Distinct from the public-ACL pattern — this is "intentional
+    cross-account share" but where the recipient account is
+    unknown / unaudited, the data is effectively shared with
+    whoever controls that account.
+
+    Detection: kind=s3_bucket AND any policy statement with
+    `Principal: {"AWS": "arn:aws:iam::<other-account>:..."}`.
+    """
+    out: list[AttackPath] = []
+    seen_buckets: set[str] = set()
+    for p in graph.nodes_by_type(CloudPolicy):
+        if not isinstance(p, CloudPolicy) or p.kind != "bucket_policy":
+            continue
+        # Find the bucket this policy is attached to.
+        bucket_arn: str | None = None
+        for ident_key in graph.incoming(p.arn, EDGE_HAS_POLICY):
+            node = graph.get_node(ident_key)
+            if isinstance(node, CloudResource) and node.kind == "s3_bucket":
+                bucket_arn = node.arn
+                break
+        if not bucket_arn or bucket_arn in seen_buckets:
+            continue
+        # Look for cross-account principals.
+        bucket_account = (bucket_arn.split(":") + [""] * 5)[4] or ""
+        cross_accounts: set[str] = set()
+        for stmt in p.statements:
+            if (stmt.get("effect") or "").lower() != "allow":
+                continue
+            principal_block = stmt.get("principal") or stmt.get("Principal")
+            if not isinstance(principal_block, dict):
+                continue
+            aws_principals = principal_block.get("AWS") or []
+            if isinstance(aws_principals, str):
+                aws_principals = [aws_principals]
+            for pr in aws_principals:
+                # Pull account ID from the principal ARN.
+                parts = str(pr).split(":")
+                if len(parts) >= 5 and parts[4] and parts[4] != bucket_account:
+                    cross_accounts.add(parts[4])
+        if not cross_accounts:
+            continue
+        seen_buckets.add(bucket_arn)
+        out.append(AttackPath(
+            pattern_id="cap_cross_account_s3_share",
+            title=(
+                f"S3 bucket `{bucket_arn}` shared with "
+                f"external accounts {sorted(cross_accounts)}"
+            ),
+            severity="medium",
+            narrative=(
+                f"Bucket policy on `{bucket_arn}` grants read / "
+                f"write access to {len(cross_accounts)} external "
+                f"AWS account(s) ({', '.join(sorted(cross_accounts))}). "
+                f"Each external account is a potential pivot — if "
+                f"any of them is compromised, the attacker inherits "
+                f"the granted access to this bucket. The control "
+                f"isn't broken by default; it's a *data-flow* "
+                f"finding the operator should explicitly audit."
+            ),
+            hops=[bucket_arn],
+            mitre_techniques=["T1530"],
+            remediation=(
+                "1. Audit each cross-account principal — is the "
+                "external account still trusted? Was the share "
+                "granted with an explicit business owner?\n"
+                "2. Use `Condition: { StringEquals: "
+                "{ aws:PrincipalOrgID: \"o-xxxxx\" } }` to "
+                "restrict cross-account access to within your "
+                "AWS Organization.\n"
+                "3. Replace shared bucket access with explicit "
+                "cross-account IAM role assumption (more "
+                "auditable)."
+            ),
+            confidence=0.85,
+            metadata={
+                "cross_account_principals": sorted(cross_accounts),
+                "bucket_account": bucket_account,
+            },
+        ))
+    return out
+
+
+def _pattern_unused_iam_role_high_priv(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """High-privilege IAM role with no recent usage. Orphan
+    attack surface — the role still exists but nobody's
+    monitoring its usage; if compromised, the breach goes
+    unnoticed longer.
+
+    Detection: kind=iam_role AND `attributes['days_since_used']`
+    > 90 AND identity has wildcard-admin policy attached.
+    """
+    out: list[AttackPath] = []
+    admin_idents: set[str] = set()
+    for p in graph.nodes_by_type(CloudPolicy):
+        if not isinstance(p, CloudPolicy) or not p.has_wildcard_admin():
+            continue
+        for ident_key in graph.incoming(p.arn, EDGE_HAS_POLICY):
+            admin_idents.add(ident_key)
+
+    for ident in graph.nodes_by_type(CloudIdentity):
+        if not isinstance(ident, CloudIdentity):
+            continue
+        if ident.kind != "iam_role":
+            continue
+        if ident.arn not in admin_idents:
+            continue
+        days_since_used = ident.attributes.get("days_since_used")
+        if days_since_used is None or days_since_used < 90:
+            continue
+        out.append(AttackPath(
+            pattern_id="cap_unused_iam_role_high_priv",
+            title=(
+                f"Unused admin-equivalent role `{ident.arn}` "
+                f"(idle {days_since_used} days)"
+            ),
+            severity="medium",
+            narrative=(
+                f"IAM role `{ident.arn}` has admin-equivalent "
+                f"permissions AND hasn't been used in "
+                f"{days_since_used} days. Orphan high-privilege "
+                f"roles compound risk: nobody's monitoring usage, "
+                f"trust-policy changes go unaudited, and if "
+                f"compromised the breach goes undetected longer. "
+                f"Roles unused for 90+ days are typically safe to "
+                f"delete — confirm with the team that owned them."
+            ),
+            hops=[ident.arn],
+            mitre_techniques=["T1078.004"],
+            remediation=(
+                "1. Confirm with the owning team that the role is "
+                "no longer needed.\n"
+                "2. Delete the role: `aws iam delete-role --role-name "
+                "<name>`.\n"
+                "3. If the role IS still needed (rare DR / "
+                "incident-response use), tighten the trust policy "
+                "to require MFA + short session duration."
+            ),
+            confidence=0.8,
+            metadata={"days_since_used": days_since_used},
+        ))
+    return out
+
+
+def _pattern_default_vpc_with_resources(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """Default VPC has resources running in it. Default VPCs are
+    auto-created with overly-permissive defaults (default SG
+    allows all internal traffic; main route table includes IGW
+    route). Best-practice cloud accounts delete the default
+    VPC and use only purpose-built VPCs.
+
+    Detection: any resource with `attributes.vpc_id` matching a
+    default-VPC node (`attributes.is_default_vpc=True`).
+    """
+    out: list[AttackPath] = []
+    default_vpcs = {
+        r.arn for r in graph.nodes_by_type(CloudResource)
+        if isinstance(r, CloudResource)
+        and r.kind == "ec2_vpc"
+        and r.attributes.get("is_default_vpc")
+    }
+    if not default_vpcs:
+        return []
+    affected: dict[str, list[str]] = {}
+    for r in graph.nodes_by_type(CloudResource):
+        if not isinstance(r, CloudResource):
+            continue
+        vpc_arn = r.attributes.get("vpc_arn") or r.attributes.get("vpc_id")
+        if not vpc_arn:
+            continue
+        # Match either ARN or just the VPC id substring.
+        for d in default_vpcs:
+            if vpc_arn == d or d.endswith(f"/{vpc_arn}"):
+                affected.setdefault(d, []).append(r.arn)
+                break
+    for vpc_arn, resources in affected.items():
+        out.append(AttackPath(
+            pattern_id="cap_default_vpc_with_resources",
+            title=(
+                f"Default VPC `{vpc_arn}` has {len(resources)} "
+                f"resource(s) running"
+            ),
+            severity="medium",
+            narrative=(
+                f"Default VPC `{vpc_arn}` has {len(resources)} "
+                f"resource(s) deployed into it. Default VPCs have "
+                f"insecure defaults (open default SG, IGW-routed "
+                f"main route table). Best practice: delete the "
+                f"default VPC in every region + deploy only into "
+                f"purpose-built VPCs with explicit subnet / route-"
+                f"table / SG design."
+            ),
+            hops=[vpc_arn],
+            mitre_techniques=["T1190"],
+            remediation=(
+                "1. Migrate the affected resources to a purpose-"
+                "built VPC.\n"
+                "2. Delete the default VPC: `aws ec2 delete-vpc "
+                "--vpc-id <vpc-id>`.\n"
+                "3. Add an SCP at the Organization level that "
+                "denies `ec2:CreateDefaultVpc` to prevent "
+                "accidental re-creation."
+            ),
+            confidence=0.7,
+            metadata={
+                "vpc_arn": vpc_arn,
+                "resources_in_default_vpc": resources[:20],
+                "resource_count": len(resources),
+            },
+        ))
+    return out
+
+
+def _pattern_secrets_via_environment(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """Lambda / ECS task with `secret`-shaped environment-variable
+    keys. Tools like Trivy detect actual secret VALUES baked into
+    images; this pattern catches the lighter signal of suspicious
+    env-var NAMES the operator should audit (often left over
+    from prototyping with hardcoded keys).
+    """
+    out: list[AttackPath] = []
+    suspicious = ("password", "secret", "api_key", "token", "private_key")
+    for r in graph.nodes_by_type(CloudResource):
+        if not isinstance(r, CloudResource):
+            continue
+        if r.kind not in ("lambda_function", "ecs_task"):
+            continue
+        env_vars = r.attributes.get("environment_vars") or {}
+        if not isinstance(env_vars, dict):
+            continue
+        matched_keys = sorted(
+            k for k in env_vars
+            if any(s in str(k).lower() for s in suspicious)
+        )
+        if not matched_keys:
+            continue
+        out.append(AttackPath(
+            pattern_id="cap_secrets_via_environment",
+            title=(
+                f"`{r.arn}` has secret-shaped env var(s): "
+                f"{', '.join(matched_keys[:3])}"
+                + (f" (+{len(matched_keys)-3} more)"
+                   if len(matched_keys) > 3 else "")
+            ),
+            severity="medium",
+            narrative=(
+                f"Resource `{r.arn}` defines environment variables "
+                f"with secret-shaped names ({', '.join(matched_keys)}). "
+                f"Whether the VALUES are actual secrets or merely "
+                f"references to Secrets Manager / Parameter Store, "
+                f"the env-var-direct pattern is risky:\n"
+                f"  * If the value is hardcoded, it's in the "
+                f"Lambda's `Configuration.Environment.Variables` "
+                f"which is readable by anyone with "
+                f"`lambda:GetFunctionConfiguration`.\n"
+                f"  * Even Secrets Manager refs leak the secret "
+                f"name (telegraphing what's protected). Use "
+                f"runtime-fetch + IAM scoped to the secret instead."
+            ),
+            hops=[r.arn],
+            mitre_techniques=["T1552.001"],
+            remediation=(
+                "1. Move hardcoded values to AWS Secrets Manager.\n"
+                "2. In the Lambda, fetch the secret at runtime "
+                "(boto3 `secretsmanager:GetSecretValue`); add IAM "
+                "policy scoped to the specific secret ARN.\n"
+                "3. Scrub the env vars: `aws lambda update-function-"
+                "configuration --environment Variables={}`."
+            ),
+            confidence=0.7,
+            metadata={"matched_keys": matched_keys,
+                      "resource_kind": r.kind},
+        ))
+    return out
+
+
+def _pattern_overpermissive_secrets_manager_resource_policy(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """Secrets Manager secret with a resource policy that grants
+    GetSecretValue to a wide principal (`*` or large-account
+    list). Even when the secret isn't fully public, overly broad
+    in-account / cross-account access is the second-most-common
+    Secrets Manager leak shape.
+
+    Detection: kind=secrets_manager_secret AND any attached
+    policy with `Action: secretsmanager:GetSecretValue` AND
+    Principal is wildcard.
+    """
+    out: list[AttackPath] = []
+    for r in graph.nodes_by_type(CloudResource):
+        if not isinstance(r, CloudResource):
+            continue
+        if r.kind != "secrets_manager_secret":
+            continue
+        # Find attached resource policies via has_policy edges.
+        policies = graph.incoming(r.arn, EDGE_HAS_POLICY) | \
+                   graph.outgoing(r.arn, EDGE_HAS_POLICY)
+        for p_key in policies:
+            p_node = graph.get_node(p_key) if p_key else None
+            if not isinstance(p_node, CloudPolicy):
+                continue
+            for stmt in p_node.statements:
+                if (stmt.get("effect") or "").lower() != "allow":
+                    continue
+                actions = stmt.get("actions") or []
+                if isinstance(actions, str):
+                    actions = [actions]
+                if not any(
+                    str(a).lower() in (
+                        "secretsmanager:getsecretvalue",
+                        "secretsmanager:*", "*",
+                    ) for a in actions
+                ):
+                    continue
+                principal = stmt.get("principal") or stmt.get("Principal")
+                wide = False
+                if principal == "*":
+                    wide = True
+                elif isinstance(principal, dict):
+                    aws_p = principal.get("AWS")
+                    if aws_p == "*":
+                        wide = True
+                if not wide:
+                    continue
+                out.append(AttackPath(
+                    pattern_id="cap_overpermissive_secrets_manager_resource_policy",
+                    title=(
+                        f"Secret `{r.arn}` has a wildcard resource "
+                        f"policy granting GetSecretValue"
+                    ),
+                    severity="critical",
+                    narrative=(
+                        f"Secrets Manager resource `{r.arn}` has "
+                        f"a resource policy with `Principal: *` "
+                        f"AND `Action: secretsmanager:GetSecretValue`. "
+                        f"Any IAM principal (or anonymous "
+                        f"requester, depending on the AWS account's "
+                        f"public-access settings) can fetch the "
+                        f"secret value. Replace immediately with "
+                        f"specific account / role principals."
+                    ),
+                    hops=[r.arn, p_node.arn],
+                    evidence_edges=[EDGE_HAS_POLICY],
+                    mitre_techniques=["T1552"],
+                    remediation=(
+                        "Replace the resource policy with explicit "
+                        "principals. For cross-account use: "
+                        "`Principal: { AWS: "
+                        "\"arn:aws:iam::<target-account>:root\" }`. "
+                        "Never use `Principal: *` on Secrets "
+                        "Manager resource policies."
+                    ),
+                    confidence=0.95,
+                ))
+                break  # one finding per (secret, policy) pair
+    return out
+
+
 def _pattern_internet_resource_unencrypted(
     graph: CloudGraph,
 ) -> list[AttackPath]:
@@ -1370,6 +1852,21 @@ BUILTIN_PATTERNS: dict[str, PatternFn] = {
         _pattern_azure_storage_public_blob,
     "cap_azure_owner_role_user":
         _pattern_azure_owner_role_user,
+    # v4 expansion (this PR — 18 → 25).
+    "cap_lambda_function_url_no_auth":
+        _pattern_lambda_function_url_no_auth,
+    "cap_iam_user_active_keys_no_mfa":
+        _pattern_iam_user_active_keys_no_mfa,
+    "cap_cross_account_s3_share":
+        _pattern_cross_account_s3_share,
+    "cap_unused_iam_role_high_priv":
+        _pattern_unused_iam_role_high_priv,
+    "cap_default_vpc_with_resources":
+        _pattern_default_vpc_with_resources,
+    "cap_secrets_via_environment":
+        _pattern_secrets_via_environment,
+    "cap_overpermissive_secrets_manager_resource_policy":
+        _pattern_overpermissive_secrets_manager_resource_policy,
 }
 
 
