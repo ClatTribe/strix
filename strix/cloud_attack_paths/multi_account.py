@@ -88,6 +88,85 @@ class AccountScanResult:
         }
 
 
+def enumerate_org_accounts(
+    *,
+    profile_name: str | None = None,
+    role_arn: str | None = None,
+    role_name_template: str = "OrganizationAccountAccessRole",
+    _make_factory: Any | None = None,
+) -> list[str]:
+    """Enumerate AWS Organization member accounts and synthesise
+    the standard cross-account role ARN for each.
+
+    Args:
+        profile_name: AWS profile to source the management-account
+            credentials from.
+        role_arn: optional cross-account role to assume into the
+            management account before calling
+            `organizations:ListAccounts`.
+        role_name_template: the role NAME (not full ARN) strix
+            should target in each member account. Default
+            `OrganizationAccountAccessRole` is the AWS-default
+            role auto-created when accounts are added to an
+            organization.
+        _make_factory: DI hook for tests.
+
+    Returns:
+        List of role ARNs (one per active member account), shaped
+        as `arn:aws:iam::<account-id>:role/<role_name_template>`.
+        Suspended accounts are skipped.
+
+    Per-call errors (org permission denied / not a management
+    account) return an empty list with a logged warning rather
+    than raising. Caller can fall back to explicit role-arn list.
+    """
+    if _make_factory is None:
+        from strix.cspm.aws.client import (  # noqa: PLC0415
+            make_default_client_factory,
+        )
+        _make_factory = make_default_client_factory
+
+    try:
+        factory = _make_factory(
+            profile_name=profile_name, role_arn=role_arn,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "enumerate_org_accounts: factory build failed: %s", e,
+            exc_info=True,
+        )
+        return []
+
+    try:
+        org = factory("organizations", region="us-east-1")
+        paginator = org.get_paginator("list_accounts")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "enumerate_org_accounts: organizations client / "
+            "paginator unavailable: %s", e,
+        )
+        return []
+
+    role_arns: list[str] = []
+    try:
+        for page in paginator.paginate():
+            for account in (page.get("Accounts") or []):
+                if (account.get("Status") or "").upper() != "ACTIVE":
+                    continue
+                account_id = account.get("Id")
+                if not account_id:
+                    continue
+                role_arns.append(
+                    f"arn:aws:iam::{account_id}:role/{role_name_template}"
+                )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "enumerate_org_accounts: ListAccounts paginate failed: %s",
+            e, exc_info=True,
+        )
+    return role_arns
+
+
 def scan_multi_account(
     role_arns: list[str],
     *,

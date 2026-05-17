@@ -85,6 +85,7 @@ from strix.cloud_attack_paths.discovery import discover_aws_assets
 from strix.cloud_attack_paths.ingest import build_graph_from_cspm
 from strix.cloud_attack_paths.multi_account import (
     AccountScanResult,
+    enumerate_org_accounts,
     scan_multi_account,
     summarise as summarise_multi_account,
     union_assets,
@@ -147,6 +148,7 @@ __all__ = [
     "compute_priority",
     # Multi-account
     "scan_multi_account",
+    "enumerate_org_accounts",
     "AccountScanResult",
     "union_findings",
     "union_assets",

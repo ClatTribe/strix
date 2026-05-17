@@ -161,6 +161,8 @@ def scan_cloud_attack_paths(
     agentless_snapshot_ids: list[str] | None = None,
     cloudtrail_events_path: str | None = None,
     cloudtrail_events: list[dict[str, Any]] | None = None,
+    enumerate_org_accounts: bool = False,
+    org_role_name: str = "OrganizationAccountAccessRole",
 ) -> SpecialistResult:
     """Run a CSPM scan, build the cloud graph, detect attack paths,
     emit each path to the tracer.
@@ -211,6 +213,19 @@ def scan_cloud_attack_paths(
             — pre-parsed event list. Useful when the caller is
             ingesting from `cloudtrail:LookupEvents` API or
             another live source.
+        enumerate_org_accounts: when True, calls
+            `organizations:ListAccounts` from the
+            management-account credentials (resolved via
+            `profile_name` / `role_arn`) and auto-populates the
+            `additional_role_arns` list with the cross-account
+            role ARNs for every active member account. Removes
+            the manual "list every account's role" step for
+            customers running an AWS Organization. AWS-only.
+        org_role_name: role NAME (not full ARN) strix should
+            assume in each member account when enumerating an
+            org. Default `OrganizationAccountAccessRole` is
+            the AWS-default created automatically when accounts
+            are added to an organization.
 
     Returns:
         `SpecialistResult` with one finding per detected attack
@@ -269,8 +284,44 @@ def scan_cloud_attack_paths(
     # fan-out.
     multi_account_summary: dict[str, Any] | None = None
     extra_cspm_assets: list[dict[str, Any]] = []
+
+    # Org-wide enumeration: when set, calls
+    # `organizations:ListAccounts` from management-account
+    # credentials and auto-populates additional_role_arns. Removes
+    # the manual per-account-list maintenance for AWS Org
+    # customers.
+    org_enumerated_arns: list[str] = []
+    if enumerate_org_accounts and provider == "aws":
+        try:
+            from strix.cloud_attack_paths.multi_account import (  # noqa: PLC0415
+                enumerate_org_accounts as _enum_org,
+            )
+            org_enumerated_arns = _enum_org(
+                profile_name=profile_name, role_arn=role_arn,
+                role_name_template=org_role_name,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "scan_cloud_attack_paths: org enumeration failed: "
+                "%s", e, exc_info=True,
+            )
+            cspm_errors.append({
+                "source": "org_enumeration",
+                "error": f"{type(e).__name__}: {e}",
+            })
+
+    # Combined list = caller-supplied + org-enumerated. Dedupe
+    # to avoid scanning the same account twice if a role was
+    # both explicitly listed AND in the org enumeration.
+    combined_role_arns: list[str] = []
+    if additional_role_arns:
+        combined_role_arns.extend(additional_role_arns)
+    for arn in org_enumerated_arns:
+        if arn not in combined_role_arns:
+            combined_role_arns.append(arn)
+
     if (
-        additional_role_arns
+        combined_role_arns
         and provider == "aws"
     ):
         try:
@@ -279,7 +330,7 @@ def scan_cloud_attack_paths(
                 union_assets, union_findings,
             )
             multi_results = scan_multi_account(
-                additional_role_arns,
+                combined_role_arns,
                 profile_name=profile_name,
                 regions=regions,
             )
@@ -441,6 +492,8 @@ def scan_cloud_attack_paths(
     }
     if multi_account_summary is not None:
         tool_metadata["multi_account_summary"] = multi_account_summary
+    if org_enumerated_arns:
+        tool_metadata["org_enumerated_accounts"] = len(org_enumerated_arns)
     if agentless_summary is not None:
         tool_metadata["agentless_scan_summary"] = agentless_summary
     if cdr_summary is not None:
