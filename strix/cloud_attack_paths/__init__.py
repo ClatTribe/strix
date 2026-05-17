@@ -85,6 +85,12 @@ from strix.cloud_attack_paths.patterns import (
     BUILTIN_PATTERNS,
     find_attack_paths,
 )
+from strix.cloud_attack_paths.reachability import (
+    apply_reachability_to_paths,
+    compute_priority,
+    compute_reachability,
+    score_path,
+)
 
 
 # Side-effect import — register specialist tool.
@@ -113,6 +119,11 @@ __all__ = [
     "discover_aws_assets",
     "find_attack_paths",
     "BUILTIN_PATTERNS",
+    # Reachability scoring
+    "compute_reachability",
+    "score_path",
+    "apply_reachability_to_paths",
+    "compute_priority",
     # Live-probe API (opt-in PoC verification)
     "ProbeResult",
     "PROBE_VERIFIED",

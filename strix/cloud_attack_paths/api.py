@@ -196,6 +196,19 @@ def analyze_cloud_attack_paths(
         graph, patterns=patterns, custom_patterns=custom_patterns,
     )
 
+    # Reachability scoring (masterroadmap §5 P0 — biggest noise
+    # reducer). Single BFS from public resources; stamp each
+    # path's `reachability_score` so wrappers can sort / filter
+    # by it. Score 0.0 when no public resources exist (account
+    # has no reachable seeds — every path is "structurally
+    # isolated" for the purposes of v1 reachability).
+    from strix.cloud_attack_paths.reachability import (  # noqa: PLC0415
+        apply_reachability_to_paths,
+        compute_reachability,
+    )
+    reachability_scores = compute_reachability(graph)
+    apply_reachability_to_paths(paths, reachability_scores)
+
     # Live-probe verification (opt-in). When enabled, each path
     # whose pattern has a registered probe gets externally probed;
     # the AttackPath is upgraded in-place with proof / non-proof
