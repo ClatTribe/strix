@@ -246,22 +246,43 @@ def _mask_secret(value: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _run_gitleaks(repo_root: Path) -> list[dict[str, Any]] | None:
-    """Run `gitleaks detect --no-git --report-format json --report-path -`
-    on the repo. Returns a list of finding dicts, or None when the
-    binary isn't available / the call failed."""
+def _run_gitleaks(
+    repo_root: Path, *, scan_git_history: bool = True
+) -> list[dict[str, Any]] | None:
+    """Run `gitleaks detect` on the repo. Returns a list of finding
+    dicts, or None when the binary isn't available / the call failed.
+
+    Git-history mode (`scan_git_history=True`, default) walks every
+    commit in the repo's history — catches `committed → git rm →
+    pushed` patterns where the secret survives in the past. Requires
+    `.git/` to be a real repository; if it isn't, falls back to
+    working-tree-only (`--no-git`).
+
+    Working-tree mode (`scan_git_history=False`) scans only the
+    current files. Faster for huge histories; misses past leaks.
+    """
     if not shutil.which("gitleaks"):
         return None
+
+    # Without a real `.git` dir, gitleaks would error on the history
+    # walk — auto-downgrade to working-tree-only so the scan still
+    # produces useful results in non-git directories (extracted
+    # zips, sandboxes, etc.).
+    use_history = scan_git_history and (repo_root / ".git").is_dir()
+
+    cmd = ["gitleaks", "detect"]
+    if not use_history:
+        cmd.append("--no-git")
+    cmd += [
+        "--source", str(repo_root),
+        "--report-format", "json",
+        "--report-path", "-",
+        "--no-banner",
+    ]
+
     try:
         proc = subprocess.run(
-            [
-                "gitleaks", "detect",
-                "--no-git",
-                "--source", str(repo_root),
-                "--report-format", "json",
-                "--report-path", "-",
-                "--no-banner",
-            ],
+            cmd,
             capture_output=True,
             text=True,
             timeout=_EXTERNAL_TIMEOUT_SECONDS,
@@ -487,6 +508,7 @@ def secrets_scan(
     scan_tests: bool = False,
     max_files: int = 5000,
     prefer_external: bool = True,
+    scan_git_history: bool = True,
 ) -> dict[str, Any]:
     """Scan a repository / local code dir for hard-coded secrets.
 
@@ -500,6 +522,14 @@ def secrets_scan(
         prefer_external: when True (default), tries `gitleaks` first
             for highest-precision matching. Set False to force the
             built-in catalogue (useful in tests or air-gapped envs).
+        scan_git_history: when True (default), gitleaks walks every
+            commit so `committed → git rm → pushed` leaks surface
+            even after the file is gone. Auto-downgrades to working-
+            tree-only when the target isn't a real git repo. Set
+            False to scan only current files (faster on huge
+            histories; misses past leaks). Built-in fallback scanner
+            never has access to history — it walks the working tree
+            regardless.
 
     Returns:
         ```
@@ -536,7 +566,9 @@ def secrets_scan(
 
     # ---- Try gitleaks first (preferred). ----
     if prefer_external:
-        gitleaks_findings = _run_gitleaks(root)
+        gitleaks_findings = _run_gitleaks(
+            root, scan_git_history=scan_git_history,
+        )
         if gitleaks_findings is not None:
             scanner_used = "gitleaks"
             for raw in gitleaks_findings:

@@ -383,7 +383,9 @@ def test_gitleaks_findings_normalised(monkeypatch, tmp_path) -> None:
             "Secret": "AKIAIOSFODNN7EXAMPLE",
         },
     ]
-    monkeypatch.setattr(ss_module, "_run_gitleaks", lambda _root: fake_gitleaks_output)
+    monkeypatch.setattr(
+        ss_module, "_run_gitleaks", lambda _root, **kw: fake_gitleaks_output,
+    )
 
     out = secrets_scan(str(repo), prefer_external=True)
     assert out["scanner_used"] == "gitleaks"
@@ -400,11 +402,97 @@ def test_gitleaks_not_installed_falls_back(monkeypatch, tmp_path) -> None:
         "src/cfg.py": 'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n',
     })
 
-    monkeypatch.setattr(ss_module, "_run_gitleaks", lambda _root: None)
+    monkeypatch.setattr(
+        ss_module, "_run_gitleaks", lambda _root, **kw: None,
+    )
 
     out = secrets_scan(str(repo), prefer_external=True)
     assert out["scanner_used"] == "builtin"
     assert out["findings_emitted"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Git-history scanning (audit item §6) — default-on, opt-out via kwarg
+# ---------------------------------------------------------------------------
+
+
+class _FakeCompleted:
+    def __init__(self, stdout: str = "[]", returncode: int = 0):
+        self.stdout = stdout
+        self.stderr = ""
+        self.returncode = returncode
+
+
+def _stub_gitleaks_capture(monkeypatch) -> dict[str, list[str]]:
+    """Patch shutil.which + subprocess.run inside ss_module so we
+    capture the exact gitleaks argv without spawning a real process.
+    Returns a dict whose `argv` key gets populated on first call."""
+    captured: dict[str, list[str]] = {"argv": []}
+
+    monkeypatch.setattr(ss_module.shutil, "which", lambda _name: "/usr/bin/gitleaks")
+
+    def _fake_run(argv, **_kwargs):
+        captured["argv"] = list(argv)
+        return _FakeCompleted(stdout="[]", returncode=0)
+
+    monkeypatch.setattr(ss_module.subprocess, "run", _fake_run)
+    return captured
+
+
+def _make_git_repo(tmp_path: Path, files: dict[str, str]) -> Path:
+    """Like _make_repo but also creates a .git/ directory so the
+    git-history scanner doesn't auto-downgrade to --no-git."""
+    repo = _make_repo(tmp_path, files)
+    (repo / ".git").mkdir(exist_ok=True)
+    return repo
+
+
+def test_gitleaks_scans_history_by_default(monkeypatch, tmp_path) -> None:
+    """Default invocation against a real git repo MUST NOT pass
+    `--no-git` — committed-then-deleted secrets are the whole point
+    of an external scanner, and we lost them under the prior default."""
+    repo = _make_git_repo(tmp_path, {"src/cfg.py": "# clean\n"})
+    captured = _stub_gitleaks_capture(monkeypatch)
+
+    secrets_scan(str(repo), prefer_external=True)
+
+    assert captured["argv"], "gitleaks was not invoked"
+    assert "--no-git" not in captured["argv"]
+    assert "--source" in captured["argv"]
+    # Sanity: it's actually the detect subcommand.
+    assert captured["argv"][:2] == ["gitleaks", "detect"]
+
+
+def test_gitleaks_scan_git_history_false_passes_no_git(monkeypatch, tmp_path) -> None:
+    """Opt-out kwarg restores the old working-tree-only behavior."""
+    repo = _make_git_repo(tmp_path, {"src/cfg.py": "# clean\n"})
+    captured = _stub_gitleaks_capture(monkeypatch)
+
+    secrets_scan(str(repo), prefer_external=True, scan_git_history=False)
+
+    assert "--no-git" in captured["argv"]
+
+
+def test_gitleaks_auto_downgrades_when_no_dot_git(monkeypatch, tmp_path) -> None:
+    """Non-git directory + default kwargs → auto-downgrade to
+    working-tree-only so gitleaks doesn't error on the history walk.
+    Important for scanning extracted zips / sandboxes / temp dirs."""
+    # _make_repo deliberately does NOT create .git/.
+    repo = _make_repo(tmp_path, {"src/cfg.py": "# clean\n"})
+    captured = _stub_gitleaks_capture(monkeypatch)
+
+    secrets_scan(str(repo), prefer_external=True, scan_git_history=True)
+
+    assert "--no-git" in captured["argv"]
+
+
+def test_run_gitleaks_default_kwarg_is_history_on() -> None:
+    """The internal helper's default must match the public API's
+    default — both default-on. Documents intent so a future refactor
+    can't silently flip the default back to working-tree-only."""
+    import inspect
+    sig = inspect.signature(ss_module._run_gitleaks)
+    assert sig.parameters["scan_git_history"].default is True
 
 
 # ---------------------------------------------------------------------------
