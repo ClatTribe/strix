@@ -936,6 +936,347 @@ def _pattern_admin_attached_to_compute_with_internet(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Multi-cloud patterns (GCP + Azure) — masterroadmap §5 P1
+# ---------------------------------------------------------------------------
+
+
+def _pattern_gcp_default_compute_sa_with_internet(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """GCE VM running as the Compute Engine **default service
+    account** with the `cloud-platform` scope, exposed to the
+    public internet. Privilege-escalation primitive specific to
+    GCP: the default SA has `Editor` role across the project by
+    default, and `cloud-platform` scope grants it access to
+    every Cloud API.
+
+    Detection: `kind=gcp_compute_instance` + `is_public=True` +
+    `attributes['default_service_account']=True` (caller-supplied
+    via `cloud_assets`).
+    """
+    out: list[AttackPath] = []
+    for r in graph.public_resources():
+        if r.kind != "gcp_compute_instance":
+            continue
+        if not r.attributes.get("default_service_account"):
+            continue
+        scopes = r.attributes.get("scopes") or []
+        has_full_scope = any(
+            "cloud-platform" in str(s) for s in scopes
+        )
+        if not has_full_scope:
+            # Default SA is still a problem but `cloud-platform`
+            # scope is the escalation primitive that makes this
+            # critical. Without it, severity stays high.
+            severity = "high"
+        else:
+            severity = "critical"
+        out.append(AttackPath(
+            pattern_id="cap_gcp_default_compute_sa_with_internet",
+            title=(
+                f"Public GCE VM `{r.arn}` runs as default Compute "
+                f"Engine SA"
+                + (" with cloud-platform scope" if has_full_scope else "")
+            ),
+            severity=severity,
+            narrative=(
+                f"`{r.arn}` is reachable from the public internet "
+                f"AND runs under the Compute Engine **default** "
+                f"service account "
+                + (
+                    f"with the `cloud-platform` access scope. The "
+                    f"default SA has `Editor` at the project "
+                    f"level by default; combined with `cloud-"
+                    f"platform`, RCE on the VM yields full "
+                    f"project access via the metadata service "
+                    f"(`http://metadata.google.internal/computeMetadata"
+                    f"/v1/instance/service-accounts/default/token`)."
+                    if has_full_scope else
+                    f". The default SA has `Editor` role at the "
+                    f"project level — RCE on the VM yields wide "
+                    f"project access via the metadata service."
+                )
+            ),
+            hops=[r.arn],
+            evidence_edges=[EDGE_EXPOSED_TO_INTERNET],
+            mitre_techniques=["T1190", "T1078.004", "T1552.005"],
+            remediation=(
+                "1. Attach a dedicated service account to the VM "
+                "with only the permissions it actually needs.\n"
+                "2. Restrict scopes — for most workloads, the "
+                "`cloud-platform` scope is far too broad.\n"
+                "3. Disable the default SA at the project level "
+                "via `gcloud iam service-accounts disable "
+                "<default-sa-email>` once no VM uses it.\n"
+                "4. Block metadata-service access from inside the "
+                "VM for non-system processes (kernel-level "
+                "iptables rule on 169.254.169.254)."
+            ),
+            confidence=0.95,
+            metadata={
+                "compute_kind": r.kind,
+                "has_cloud_platform_scope": has_full_scope,
+            },
+        ))
+    return out
+
+
+def _pattern_gcp_public_bigquery_dataset(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """BigQuery dataset with `allUsers` / `allAuthenticatedUsers`
+    IAM binding. Critical: BigQuery datasets routinely store
+    analytics data with PII / customer records.
+
+    Distinct from `cap_public_database` (which fires on the kind
+    alone) because BigQuery's public binding semantics are
+    IAM-binding-based, not subnet / firewall-based — calling it
+    out separately gives the operator the right remediation."""
+    out: list[AttackPath] = []
+    for r in graph.public_resources():
+        if r.kind != "gcp_bigquery_dataset":
+            continue
+        out.append(AttackPath(
+            pattern_id="cap_gcp_public_bigquery_dataset",
+            title=(
+                f"BigQuery dataset `{r.arn}` allows anonymous "
+                f"access"
+            ),
+            severity="critical",
+            narrative=(
+                f"BigQuery dataset `{r.arn}` has an IAM binding "
+                f"with `allUsers` or `allAuthenticatedUsers` — "
+                f"any Google account holder (or any anonymous "
+                f"requester, in the `allUsers` case) can run "
+                f"queries against the dataset. BigQuery datasets "
+                f"are routinely populated by analytics pipelines "
+                f"with PII, customer records, and aggregated "
+                f"behavioural data."
+            ),
+            hops=[r.arn],
+            evidence_edges=[EDGE_EXPOSED_TO_INTERNET],
+            mitre_techniques=["T1530", "T1213"],
+            remediation=(
+                "1. Remove the `allUsers` / "
+                "`allAuthenticatedUsers` binding via:\n"
+                "   `bq update --source <iam-json> "
+                "<project>:<dataset>`\n"
+                "2. Use explicit IAM bindings per group / user; "
+                "BigQuery supports table-level + row-level "
+                "policies for fine-grained sharing.\n"
+                "3. Enable Cloud Audit Logs > Data Access for "
+                "BigQuery so future public reads are auditable."
+            ),
+            confidence=1.0,
+        ))
+    return out
+
+
+def _pattern_azure_storage_public_blob(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """Azure storage account with `allowBlobPublicAccess=true`
+    AND at least one container with public access level. The
+    Azure-specific narrative — different remediation from AWS
+    S3 (storage-account-level toggle vs. bucket-level ACL).
+    """
+    out: list[AttackPath] = []
+    for r in graph.public_resources():
+        if r.kind != "azure_storage_account":
+            continue
+        out.append(AttackPath(
+            pattern_id="cap_azure_storage_public_blob",
+            title=(
+                f"Azure storage account `{r.arn}` allows "
+                f"public blob access"
+            ),
+            severity="critical",
+            narrative=(
+                f"Azure storage account `{r.arn}` has "
+                f"`allowBlobPublicAccess=true` AND at least one "
+                f"container is configured with public access. "
+                f"Anonymous callers can list / read blobs in the "
+                f"affected containers — the canonical Azure data-"
+                f"leak primitive (parallel to S3 public ACL). "
+                f"Common contents: backup files, log exports, "
+                f"build artifacts, terraform state."
+            ),
+            hops=[r.arn],
+            evidence_edges=[EDGE_EXPOSED_TO_INTERNET],
+            mitre_techniques=["T1530", "T1213"],
+            remediation=(
+                "1. Disable account-level public blob access: "
+                "`az storage account update --name <name> "
+                "--resource-group <rg> --allow-blob-public-access "
+                "false`.\n"
+                "2. Audit every container and set "
+                "`--public-access off` on any that don't need "
+                "anonymous reads (most don't).\n"
+                "3. For containers that legitimately need public "
+                "access (CDN-fronted static assets), use a CDN "
+                "with token-based auth instead of raw container "
+                "public access."
+            ),
+            confidence=0.95,
+        ))
+    return out
+
+
+def _pattern_azure_owner_role_user(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """Azure user / service principal with the `Owner` role
+    assigned at a wide scope (subscription or above). Azure RBAC
+    equivalent of attaching wildcard admin to an IAM user —
+    long-lived credential whose compromise is full-subscription
+    takeover.
+
+    Detection: identity kind contains `azure_` AND
+    `attributes['azure_roles']` contains 'Owner' AND
+    `attributes['azure_scope']` is subscription-level or
+    management-group-level (not narrowly resource-scoped).
+    """
+    out: list[AttackPath] = []
+    for ident in graph.nodes_by_type(CloudIdentity):
+        if not isinstance(ident, CloudIdentity):
+            continue
+        kind = (ident.kind or "").lower()
+        if not kind.startswith("azure_") and kind != "azure_user":
+            continue
+        roles = ident.attributes.get("azure_roles") or []
+        if not any(
+            str(r).lower() == "owner" for r in roles
+        ):
+            continue
+        scope = (ident.attributes.get("azure_scope") or "").lower()
+        # Wide scope = empty (assume worst case) OR subscription-
+        # only OR management-group-only. Resource-group or
+        # resource-specific scope is NARROW — those are fine.
+        # Management group check FIRST because that path also
+        # contains `/providers/Microsoft.Management/...`.
+        if not scope:
+            is_wide_scope = True
+        elif "/managementgroups/" in scope:
+            is_wide_scope = True
+        elif "/resourcegroups/" in scope or "/providers/" in scope:
+            # Anything below subscription is narrow (except
+            # managementGroups handled above).
+            is_wide_scope = False
+        elif "/subscriptions/" in scope:
+            # Pure subscription scope.
+            is_wide_scope = True
+        else:
+            is_wide_scope = False
+        if not is_wide_scope:
+            continue
+        out.append(AttackPath(
+            pattern_id="cap_azure_owner_role_user",
+            title=(
+                f"Azure identity `{ident.arn}` has Owner role "
+                f"at subscription scope"
+            ),
+            severity="critical",
+            narrative=(
+                f"`{ident.arn}` ({ident.kind}) has the **Owner** "
+                f"role assigned at subscription scope. Owner is "
+                f"the highest Azure RBAC role — full control "
+                f"over every resource in scope, plus the ability "
+                f"to delegate access to others. Compromise of "
+                f"this principal = full subscription takeover. "
+                f"Long-lived credentials (especially service "
+                f"principals with non-rotating secrets) are the "
+                f"primary risk."
+            ),
+            hops=[ident.arn],
+            mitre_techniques=["T1078.004", "T1098.003"],
+            remediation=(
+                "1. Replace Owner with the narrowest role that "
+                "fits the principal's actual job — Contributor + "
+                "User Access Administrator separately when both "
+                "are needed.\n"
+                "2. Scope role assignments at the resource-group "
+                "level instead of subscription level wherever "
+                "possible.\n"
+                "3. For service principals, rotate the client "
+                "secret quarterly + require Federated Credentials "
+                "(workload identity) where the workload supports "
+                "it."
+            ),
+            confidence=0.95,
+            metadata={
+                "identity_kind": ident.kind,
+                "scope": scope or "(unknown — assumed wide)",
+            },
+        ))
+    return out
+
+
+def _pattern_gcp_service_account_owner_role(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """GCP service account granted `roles/owner` at the project
+    level. The GCP equivalent of Azure Owner role / AWS wildcard
+    admin on a user — service accounts are long-lived
+    credentials AND grant unlimited project access.
+
+    Detection: identity kind contains `gcp_` AND
+    `attributes['gcp_roles']` contains `roles/owner` or
+    `roles/editor`.
+    """
+    out: list[AttackPath] = []
+    for ident in graph.nodes_by_type(CloudIdentity):
+        if not isinstance(ident, CloudIdentity):
+            continue
+        kind = (ident.kind or "").lower()
+        if not kind.startswith("gcp_"):
+            continue
+        roles = ident.attributes.get("gcp_roles") or []
+        has_owner = any(
+            str(r).lower() in ("roles/owner", "roles/editor")
+            for r in roles
+        )
+        if not has_owner:
+            continue
+        out.append(AttackPath(
+            pattern_id="cap_gcp_service_account_owner_role",
+            title=(
+                f"GCP service account `{ident.arn}` has "
+                f"roles/owner or roles/editor"
+            ),
+            severity="critical",
+            narrative=(
+                f"GCP service account `{ident.arn}` is granted "
+                f"`roles/owner` or `roles/editor` at the project "
+                f"level. Both roles grant unlimited project "
+                f"access. Service accounts attached to GCE VMs / "
+                f"Cloud Run / GKE workloads inherit this access; "
+                f"any compromise of those workloads = full "
+                f"project takeover. The GCP IAM model conflates "
+                f"resource owner with platform-level operator — "
+                f"basic roles should never be used in production."
+            ),
+            hops=[ident.arn],
+            mitre_techniques=["T1078.004"],
+            remediation=(
+                "1. Replace basic role (`roles/owner` / "
+                "`roles/editor`) with the predefined / custom "
+                "roles the workload actually needs. GCP's "
+                "predefined roles are surgical; basic roles "
+                "are deliberately broad.\n"
+                "2. For workload SAs, prefer **Workload Identity "
+                "Federation** over long-lived JSON keys — "
+                "ephemeral credentials drastically reduce blast "
+                "radius.\n"
+                "3. Audit `gcloud projects get-iam-policy` "
+                "regularly; alert on any basic-role binding."
+            ),
+            confidence=0.95,
+            metadata={"identity_kind": ident.kind, "roles": list(roles)},
+        ))
+    return out
+
+
 def _pattern_internet_resource_unencrypted(
     graph: CloudGraph,
 ) -> list[AttackPath]:
@@ -1018,6 +1359,17 @@ BUILTIN_PATTERNS: dict[str, PatternFn] = {
         _pattern_admin_attached_to_compute_with_internet,
     "cap_internet_resource_unencrypted":
         _pattern_internet_resource_unencrypted,
+    # v3 expansion — multi-cloud (GCP + Azure) patterns.
+    "cap_gcp_default_compute_sa_with_internet":
+        _pattern_gcp_default_compute_sa_with_internet,
+    "cap_gcp_public_bigquery_dataset":
+        _pattern_gcp_public_bigquery_dataset,
+    "cap_gcp_service_account_owner_role":
+        _pattern_gcp_service_account_owner_role,
+    "cap_azure_storage_public_blob":
+        _pattern_azure_storage_public_blob,
+    "cap_azure_owner_role_user":
+        _pattern_azure_owner_role_user,
 }
 
 
