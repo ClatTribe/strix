@@ -462,6 +462,14 @@ class Tracer:
         self.vulnerability_reports: list[dict[str, Any]] = []
         self.final_scan_result: str | None = None
 
+        # engine-wishlist §4 — accumulator for assets discovered
+        # during the scan (cloud-attack-paths discovery, future
+        # researcher recon). Dumped to `assets.discovered.jsonl`
+        # at run-end. Stored as raw dicts (the
+        # `DiscoveredAsset.to_dict()` shape) so the tracer doesn't
+        # import the dataclass.
+        self.discovered_assets: list[dict[str, Any]] = []
+
         # Phase + check tracking (roadmap §1).
         # `_open_phases` keyed by phase_id; entries are popped on complete_phase.
         # `_open_checks` keyed by check_id; entries are popped on complete_check.
@@ -3036,6 +3044,32 @@ class Tracer:
                     )
             except (OSError, TypeError):
                 logger.warning("Failed to write run_meta.json", exc_info=True)
+
+            # engine-wishlist §4 — emit `assets.discovered.jsonl`
+            # alongside `run_meta.json`. Modules that discover
+            # assets during a scan (cloud_attack_paths discovery,
+            # future recon agents) append to
+            # `tracer.discovered_assets` and we flush here. Skipped
+            # silently when the list is empty per the wishlist
+            # "engine runs that don't produce discoveries emit an
+            # empty file or omit it entirely" contract.
+            if self.discovered_assets:
+                try:
+                    assets_file = run_dir / "assets.discovered.jsonl"
+                    with assets_file.open("w", encoding="utf-8") as f:
+                        for asset_d in self.discovered_assets:
+                            f.write(
+                                json.dumps(
+                                    self._sanitize_data(asset_d),
+                                    ensure_ascii=False,
+                                )
+                            )
+                            f.write("\n")
+                except (OSError, TypeError):
+                    logger.warning(
+                        "Failed to write assets.discovered.jsonl",
+                        exc_info=True,
+                    )
 
             # Roadmap §16 PR #127 — cryptographically-signed audit trail.
             # Sign the chain's terminal hash (recorded via per-event
