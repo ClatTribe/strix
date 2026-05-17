@@ -788,6 +788,60 @@ RULE_ID_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
     "compose-environment-hardcoded-secret": [
         (FRAMEWORK_CIS_DOCKER, "4.10"),
     ],
+
+    # ---- CSPM live-scan AWS (CIS AWS Foundations) ----
+    # Distinct from `TF_AWS_*` IaC rules — these come from
+    # `strix/cspm/aws/checks/*.py` and reflect LIVE account state.
+    # Auditor evidence is stronger here: the resource was actually
+    # in that state at scan time, not "would be if applied".
+    "AWS_S3_PUBLIC_ACL": [
+        (FRAMEWORK_CIS_AWS, "2.1.5"),
+    ],
+    "AWS_S3_VERSIONING_DISABLED": [
+        (FRAMEWORK_CIS_AWS, "2.1.7"),
+    ],
+    "AWS_S3_NO_DEFAULT_ENCRYPTION": [
+        (FRAMEWORK_CIS_AWS, "2.1.1"),
+    ],
+    "AWS_SG_OPEN_INGRESS_ADMIN": [
+        (FRAMEWORK_CIS_AWS, "5.2"),
+    ],
+    "AWS_SG_OPEN_INGRESS_WORLD": [
+        (FRAMEWORK_CIS_AWS, "4.1"),
+    ],
+    "AWS_IAM_ROOT_ACCESS_KEY": [
+        (FRAMEWORK_CIS_AWS, "1.4"),
+    ],
+    "AWS_IAM_USER_NO_MFA": [
+        (FRAMEWORK_CIS_AWS, "1.5"),
+    ],
+    "AWS_IAM_PASSWORD_POLICY_WEAK": [
+        (FRAMEWORK_CIS_AWS, "1.8"),
+    ],
+    "AWS_IAM_PASSWORD_POLICY_MISSING": [
+        (FRAMEWORK_CIS_AWS, "1.8"),
+    ],
+    "AWS_IAM_POLICY_WILDCARD_ADMIN": [
+        (FRAMEWORK_CIS_AWS, "1.16"),
+    ],
+    "AWS_RDS_PUBLIC_ACCESS": [
+        (FRAMEWORK_CIS_AWS, "5.3"),
+    ],
+    "AWS_RDS_NO_ENCRYPTION": [
+        (FRAMEWORK_CIS_AWS, "2.3.1"),
+    ],
+    "AWS_EBS_ENCRYPTION_BY_DEFAULT_DISABLED": [
+        (FRAMEWORK_CIS_AWS, "2.2.1"),
+    ],
+    "AWS_CLOUDTRAIL_NOT_MULTI_REGION": [
+        (FRAMEWORK_CIS_AWS, "3.1"),
+    ],
+    "AWS_CLOUDTRAIL_LOG_VALIDATION_DISABLED": [
+        (FRAMEWORK_CIS_AWS, "3.2"),
+    ],
+    "AWS_VPC_FLOW_LOGS_DISABLED": [
+        (FRAMEWORK_CIS_AWS, "3.9"),
+    ],
 }
 
 
