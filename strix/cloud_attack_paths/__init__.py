@@ -69,6 +69,13 @@ from strix.cloud_attack_paths.graph import (
 )
 from strix.cloud_attack_paths.discovery import discover_aws_assets
 from strix.cloud_attack_paths.ingest import build_graph_from_cspm
+from strix.cloud_attack_paths.multi_account import (
+    AccountScanResult,
+    scan_multi_account,
+    summarise as summarise_multi_account,
+    union_assets,
+    union_findings,
+)
 from strix.cloud_attack_paths.live_probes import (
     PROBE_ERROR,
     PROBE_NOT_VERIFIED,
@@ -124,6 +131,12 @@ __all__ = [
     "score_path",
     "apply_reachability_to_paths",
     "compute_priority",
+    # Multi-account
+    "scan_multi_account",
+    "AccountScanResult",
+    "union_findings",
+    "union_assets",
+    "summarise_multi_account",
     # Live-probe API (opt-in PoC verification)
     "ProbeResult",
     "PROBE_VERIFIED",
