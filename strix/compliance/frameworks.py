@@ -1107,12 +1107,40 @@ _CIS_KUBERNETES_CONTROLS: dict[str, Control] = {
 # AWS Config Service / Security Hub and is out of scope.
 
 _CIS_AWS_CONTROLS: dict[str, Control] = {
+    "1.4": Control(
+        FRAMEWORK_CIS_AWS, "1.4",
+        "Ensure no 'root' user account access key exists",
+        "Root account access keys grant unlimited account "
+        "access. Delete them; use IAM users / roles for "
+        "programmatic access.",
+    ),
+    "1.5": Control(
+        FRAMEWORK_CIS_AWS, "1.5",
+        "Ensure MFA is enabled for the 'root' user account",
+        "Root login should require MFA. (We also enforce MFA "
+        "on IAM-user console access under the same rule key.)",
+    ),
+    "1.8": Control(
+        FRAMEWORK_CIS_AWS, "1.8",
+        "Ensure IAM password policy requires minimum length "
+        "of 14 or greater + symbol + number + upper + lower",
+        "Account-level password policy gates IAM user "
+        "passwords; CIS baseline is the minimum effective "
+        "configuration.",
+    ),
     "1.16": Control(
         FRAMEWORK_CIS_AWS, "1.16",
         "Ensure IAM policies that allow full \"*:*\" "
         "administrative privileges are not attached",
         "Wildcard `Action: *` + `Resource: *` is an IAM "
         "anti-pattern — replace with scoped permissions.",
+    ),
+    "2.1.1": Control(
+        FRAMEWORK_CIS_AWS, "2.1.1",
+        "Ensure all S3 buckets employ encryption-at-rest",
+        "Bucket-level default encryption ensures new objects "
+        "are encrypted at write time without per-PutObject "
+        "header configuration.",
     ),
     "2.1.5": Control(
         FRAMEWORK_CIS_AWS, "2.1.5",
@@ -1141,6 +1169,32 @@ _CIS_AWS_CONTROLS: dict[str, Control] = {
         "Unencrypted RDS storage exposes database files to "
         "snapshot leakage + backup-bucket compromise.",
     ),
+    "3.1": Control(
+        FRAMEWORK_CIS_AWS, "3.1",
+        "Ensure CloudTrail is enabled in all regions",
+        "A multi-region CloudTrail trail captures API "
+        "activity across the entire account; single-region "
+        "trails leave audit blind spots.",
+    ),
+    "3.2": Control(
+        FRAMEWORK_CIS_AWS, "3.2",
+        "Ensure CloudTrail log file validation is enabled",
+        "Signed digests let incident responders prove logs "
+        "haven't been tampered with after the fact.",
+    ),
+    "3.9": Control(
+        FRAMEWORK_CIS_AWS, "3.9",
+        "Ensure VPC flow logging is enabled in all VPCs",
+        "Without flow logs, network-level incident response "
+        "(lateral movement, exfil, scanning) is blind.",
+    ),
+    "4.1": Control(
+        FRAMEWORK_CIS_AWS, "4.1",
+        "Ensure no security groups allow ingress from "
+        "0.0.0.0/0 to broad port ranges",
+        "World-open ingress on any non-admin port still "
+        "widens attack surface and should be intentional.",
+    ),
     "5.2": Control(
         FRAMEWORK_CIS_AWS, "5.2",
         "Ensure no security groups allow ingress from "
@@ -1148,6 +1202,14 @@ _CIS_AWS_CONTROLS: dict[str, Control] = {
         "SSH (22) / RDP (3389) open to the world is the #1 "
         "AWS compromise vector — restrict to bastion / VPN "
         "CIDRs only.",
+    ),
+    "5.3": Control(
+        FRAMEWORK_CIS_AWS, "5.3",
+        "Ensure RDS / database instances are not publicly "
+        "accessible",
+        "DB endpoint resolves from the public internet — "
+        "only the SG stops access; one misconfig away from "
+        "exposed data.",
     ),
 }
 
