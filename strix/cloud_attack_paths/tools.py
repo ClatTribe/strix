@@ -597,6 +597,35 @@ def scan_cloud_attack_paths(
         cloud_assets=extra_cspm_assets or None,
     )
 
+    # engine-wishlist §4 — surface discovered cloud assets to the
+    # tracer so they land in `assets.discovered.jsonl` for the
+    # wrapper to consume. Each enumerator (AWS / Azure / GCP /
+    # multi-account fan-out) appended to `extra_cspm_assets`
+    # above; convert + push in one place. Best-effort: a tracer
+    # mis-state or import error never blocks the scan.
+    try:
+        from strix.telemetry.discovered_assets import (  # noqa: PLC0415
+            from_cloud_assets,
+        )
+        from strix.telemetry.tracer import (  # noqa: PLC0415
+            get_global_tracer,
+        )
+        if extra_cspm_assets:
+            tracer = get_global_tracer()
+            if tracer is not None:
+                converted = from_cloud_assets(
+                    extra_cspm_assets,
+                    discovered_by=f"cspm.{provider}",
+                )
+                tracer.discovered_assets.extend(
+                    c.to_dict() for c in converted
+                )
+    except Exception:  # noqa: BLE001 — tracer wiring must not break scan
+        logger.debug(
+            "scan_cloud_attack_paths: assets.discovered.jsonl "
+            "push failed", exc_info=True,
+        )
+
     target = f"cloud-attack-paths:{provider}"
     drafts: list[FindingDraft] = []
     evidence: list[str] = []
