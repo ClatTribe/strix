@@ -421,6 +421,564 @@ def _pattern_world_assumable_role(
 
 
 # ---------------------------------------------------------------------------
+# Expanded pattern set (masterroadmap §5 P0 — 5 → 20+)
+# ---------------------------------------------------------------------------
+
+
+# Data-resource kinds: dedicated patterns for "public + data-bearing"
+# beyond the storage-credential-risk pattern (which is storage-only).
+_DATA_RESOURCE_KINDS = {
+    "rds_db_instance", "rds_cluster",
+    "dynamodb_table",
+    "secrets_manager_secret",
+    "azure_sql_server",
+    "gcp_bigquery_dataset",
+}
+
+
+def _pattern_public_database(graph: CloudGraph) -> list[AttackPath]:
+    """Public RDS / DynamoDB / Cloud SQL / BigQuery — direct data
+    exposure. Critical regardless of attached IAM identities; the
+    data itself is the asset.
+    """
+    db_kinds = {
+        "rds_db_instance", "rds_cluster",
+        "dynamodb_table", "azure_sql_server",
+    }
+    out: list[AttackPath] = []
+    for r in graph.public_resources():
+        if r.kind not in db_kinds:
+            continue
+        out.append(AttackPath(
+            pattern_id="cap_public_database",
+            title=f"Database `{r.arn}` is publicly accessible",
+            severity="critical",
+            narrative=(
+                f"{r.kind.replace('_', ' ').title()} `{r.arn}` is "
+                f"reachable from the public internet. Any auth "
+                f"weakness (weak password, default creds, "
+                f"unpatched CVE in the DB engine) → direct data "
+                f"theft. The internet is the largest brute-force "
+                f"audience available; expect the resource to be "
+                f"scanned within hours of going public."
+            ),
+            hops=[r.arn],
+            evidence_edges=[EDGE_EXPOSED_TO_INTERNET],
+            mitre_techniques=["T1190", "T1530"],
+            remediation=(
+                "1. Move the database to a private subnet; expose "
+                "only via VPC endpoints / bastion / VPN.\n"
+                "2. If a public DB is intentional (rare), restrict "
+                "the security group / firewall to known operator "
+                "CIDRs only.\n"
+                "3. Confirm encryption at rest is enabled; rotate "
+                "any password that may have been brute-forced "
+                "while public."
+            ),
+            confidence=0.95,
+            metadata={"resource_kind": r.kind},
+        ))
+    return out
+
+
+def _pattern_public_secrets_store(graph: CloudGraph) -> list[AttackPath]:
+    """Public Secrets Manager secret / KMS key — by definition holds
+    credentials or encryption keys. Public access here is end-game:
+    the attacker reads secrets directly.
+    """
+    secret_kinds = {"secrets_manager_secret", "kms_key"}
+    out: list[AttackPath] = []
+    for r in graph.public_resources():
+        if r.kind not in secret_kinds:
+            continue
+        out.append(AttackPath(
+            pattern_id="cap_public_secrets_store",
+            title=f"Secrets / KMS resource `{r.arn}` is publicly accessible",
+            severity="critical",
+            narrative=(
+                f"`{r.arn}` ({r.kind}) holds credentials or "
+                f"encryption keys AND is exposed to the public "
+                f"internet. Resource policies that grant "
+                f"`Principal: *` on AWS Secrets Manager / KMS "
+                f"are catastrophic — anonymous callers can read "
+                f"the secret material or use the key to decrypt "
+                f"any ciphertext encrypted to it."
+            ),
+            hops=[r.arn],
+            evidence_edges=[EDGE_EXPOSED_TO_INTERNET],
+            mitre_techniques=["T1552", "T1555.006"],
+            remediation=(
+                "Replace the resource policy with explicit "
+                "account-scoped principals only. Secrets / KMS "
+                "policies should never include `Principal: *` "
+                "(even with conditions, the residual risk of "
+                "condition-bypass classes makes wildcard "
+                "indefensible)."
+            ),
+            confidence=1.0,
+            metadata={"resource_kind": r.kind},
+        ))
+    return out
+
+
+def _pattern_public_ecr_repository(graph: CloudGraph) -> list[AttackPath]:
+    """Public ECR repository — supply-chain risk class. If your
+    organisation publishes images to a public ECR repo, an attacker
+    can:
+      * Read the image to find embedded secrets / vulnerable
+        dependencies.
+      * Detect the image-pull endpoint for your private workloads.
+    """
+    out: list[AttackPath] = []
+    for r in graph.public_resources():
+        if r.kind != "ecr_repository":
+            continue
+        out.append(AttackPath(
+            pattern_id="cap_public_ecr_repository",
+            title=f"ECR repository `{r.arn}` is publicly readable",
+            severity="high",
+            narrative=(
+                f"ECR repository `{r.arn}` allows anonymous pull. "
+                f"Production container images frequently leak: "
+                f"hard-coded credentials in layer history, "
+                f"private build URLs, dependency lockfiles, "
+                f"internal hostnames. Treat any image that's been "
+                f"public as if its credentials are leaked — "
+                f"audit + rotate."
+            ),
+            hops=[r.arn],
+            evidence_edges=[EDGE_EXPOSED_TO_INTERNET],
+            mitre_techniques=["T1213.003", "T1525"],
+            remediation=(
+                "1. Set repository policy to restrict pull to "
+                "specific account IDs / cross-account roles.\n"
+                "2. Scan all images that have been public for "
+                "credentials with `trivy fs` + secrets-scan.\n"
+                "3. Rotate any credential found inside as if it "
+                "were leaked publicly — assume it was."
+            ),
+            confidence=0.9,
+        ))
+    return out
+
+
+def _pattern_admin_policy_attached_to_iam_user(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """Wildcard admin policy attached directly to an IAM USER
+    (not a role). Users are typically humans with long-lived
+    credentials — attaching admin to a user creates a single
+    credential whose compromise is full account takeover, with
+    no time-bound STS rotation in the way.
+    """
+    out: list[AttackPath] = []
+    for p in graph.nodes_by_type(CloudPolicy):
+        if not isinstance(p, CloudPolicy) or not p.has_wildcard_admin():
+            continue
+        # Identities that have this policy.
+        for ident_key in graph.incoming(p.arn, EDGE_HAS_POLICY):
+            ident = graph.get_node(ident_key)
+            if not isinstance(ident, CloudIdentity):
+                continue
+            if ident.kind != "iam_user":
+                continue
+            out.append(AttackPath(
+                pattern_id="cap_admin_policy_attached_to_iam_user",
+                title=(
+                    f"Wildcard admin policy `{p.arn}` attached to "
+                    f"IAM user `{ident.arn}`"
+                ),
+                severity="critical",
+                narrative=(
+                    f"IAM user `{ident.arn}` has `{p.arn}` "
+                    f"attached, which grants `Action:* + Resource:*` "
+                    f"(admin-equivalent). Compromise of this single "
+                    f"long-lived credential is full-account "
+                    f"takeover. Users should never be granted "
+                    f"admin directly — assign through a role with "
+                    f"required MFA + session duration."
+                ),
+                hops=[p.arn, ident.arn],
+                evidence_edges=[EDGE_HAS_POLICY],
+                mitre_techniques=["T1078.004", "T1098.003"],
+                remediation=(
+                    "1. Detach the wildcard policy from the user.\n"
+                    "2. Create a scoped role with only the "
+                    "permissions the user actually needs.\n"
+                    "3. If admin access is genuinely required, "
+                    "create a separate `Admin` role with MFA-"
+                    "required trust policy + short session "
+                    "duration; have the user assume it on demand."
+                ),
+                confidence=1.0,
+            ))
+    return out
+
+
+def _pattern_external_trust_without_external_id(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """Role trust policy allows assumption from an external AWS
+    account WITHOUT requiring `sts:ExternalId` — classic confused-
+    deputy primitive. Anyone with the role ARN AND in that
+    external account can assume the role.
+
+    Detection: identity has `trust_principals` containing an
+    external account ARN AND `attributes.external_trust_no_external_id`
+    is set (ingester signal). Falls back to flagging based on
+    trust_principals + missing external_id_required hint.
+    """
+    out: list[AttackPath] = []
+    for ident in graph.nodes_by_type(CloudIdentity):
+        if not isinstance(ident, CloudIdentity):
+            continue
+        if ident.kind != "iam_role":
+            continue
+        # World-assumable handled by the existing pattern.
+        if ident.is_world_assumable:
+            continue
+        # Look for external-account principal (different account
+        # ARN), absent ExternalId hint.
+        has_external_account = False
+        for tp in ident.trust_principals:
+            tp_s = str(tp).strip()
+            if tp_s.startswith("arn:aws:iam::"):
+                # Extract account from the principal ARN.
+                parts = tp_s.split(":")
+                if len(parts) >= 5 and parts[4] and parts[4] != "":
+                    # Compare against the role's own account.
+                    role_parts = (ident.arn or "").split(":")
+                    role_account = (
+                        role_parts[4] if len(role_parts) >= 5 else ""
+                    )
+                    if parts[4] != role_account:
+                        has_external_account = True
+                        break
+        if not has_external_account:
+            continue
+        # Ingester / asset enrichment flags `external_id_required`
+        # when the trust policy includes a `sts:ExternalId`
+        # condition. Absence is the confused-deputy primitive.
+        if ident.attributes.get("external_id_required"):
+            continue
+        out.append(AttackPath(
+            pattern_id="cap_external_trust_without_external_id",
+            title=(
+                f"Role `{ident.arn}` trusts external account "
+                f"without ExternalId"
+            ),
+            severity="high",
+            narrative=(
+                f"Role `{ident.arn}` allows assumption from an "
+                f"external AWS account AND does NOT require "
+                f"`sts:ExternalId` in the assume-role call. This "
+                f"is the canonical confused-deputy primitive — "
+                f"any IAM principal in the trusted external "
+                f"account can assume the role, even ones the "
+                f"target account doesn't intend to grant access "
+                f"to. If the external account is ever "
+                f"compromised, or runs an untrusted workload, "
+                f"that workload inherits this role."
+            ),
+            hops=[ident.arn],
+            mitre_techniques=["T1078.004"],
+            remediation=(
+                "Add a `sts:ExternalId` condition to the trust "
+                "policy: only the operator who knows the "
+                "ExternalId can assume the role. AWS documents "
+                "this as a hard requirement for third-party "
+                "vendor cross-account roles."
+            ),
+            confidence=0.95,
+        ))
+    return out
+
+
+def _pattern_pass_role_present(graph: CloudGraph) -> list[AttackPath]:
+    """Any IAM policy that grants `iam:PassRole` is a privilege-
+    escalation primitive when combined with `iam:CreateInstance`-
+    style actions. We flag every identity that has the action
+    granted; the agent's MOAK follow-up checks whether a
+    higher-privilege role is also passable.
+    """
+    out: list[AttackPath] = []
+    for p in graph.nodes_by_type(CloudPolicy):
+        if not isinstance(p, CloudPolicy):
+            continue
+        has_pass_role = False
+        for stmt in p.statements:
+            if (stmt.get("effect") or "").lower() != "allow":
+                continue
+            actions = stmt.get("actions") or []
+            if isinstance(actions, str):
+                actions = [actions]
+            for a in actions:
+                a_s = str(a).strip().lower()
+                if a_s == "iam:passrole" or a_s == "*" or a_s == "iam:*":
+                    has_pass_role = True
+                    break
+            if has_pass_role:
+                break
+        if not has_pass_role:
+            continue
+        for ident_key in graph.incoming(p.arn, EDGE_HAS_POLICY):
+            ident = graph.get_node(ident_key)
+            if not isinstance(ident, CloudIdentity):
+                continue
+            out.append(AttackPath(
+                pattern_id="cap_pass_role_present",
+                title=(
+                    f"Identity `{ident.arn}` has `iam:PassRole` "
+                    f"via `{p.arn}` — privilege-escalation primitive"
+                ),
+                severity="high",
+                narrative=(
+                    f"`{ident.arn}` can call `iam:PassRole`. "
+                    f"Paired with any of the EC2 / Lambda / ECS / "
+                    f"Glue / SageMaker create-resource APIs, the "
+                    f"identity can attach a HIGHER-privileged "
+                    f"role to a resource they control — "
+                    f"effectively assuming that role. Real-world "
+                    f"escalation chain: PassRole + RunInstances "
+                    f"(attach Admin role to a new EC2) → SSH in "
+                    f"→ pull credentials from IMDS → admin."
+                ),
+                hops=[p.arn, ident.arn],
+                evidence_edges=[EDGE_HAS_POLICY],
+                mitre_techniques=["T1078.004", "T1098.003"],
+                remediation=(
+                    "Restrict `iam:PassRole` to specific role "
+                    "ARNs only via the `Resource` field. Never "
+                    "grant `iam:PassRole` with `Resource: *`. If "
+                    "the identity legitimately needs to pass "
+                    "multiple roles, enumerate them — wildcard "
+                    "passing is a frequent escalation vector."
+                ),
+                confidence=0.85,
+            ))
+    return out
+
+
+def _pattern_can_assume_chain_to_admin(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """Multi-hop role-assumption chain: identity → can_assume →
+    role → can_assume → admin role. Each hop is a legitimate
+    cross-team role pattern; the chain is the escalation
+    primitive.
+
+    Depth-2 chains only in v1 (A → B → admin). Deeper traversals
+    are a follow-up.
+    """
+    out: list[AttackPath] = []
+    # Identify "admin" identities — those with a wildcard-admin
+    # policy attached.
+    admin_idents: set[str] = set()
+    for p in graph.nodes_by_type(CloudPolicy):
+        if not isinstance(p, CloudPolicy) or not p.has_wildcard_admin():
+            continue
+        for ident_key in graph.incoming(p.arn, EDGE_HAS_POLICY):
+            admin_idents.add(ident_key)
+
+    # For each identity, BFS along can_assume edges (depth 2).
+    for ident in graph.nodes_by_type(CloudIdentity):
+        if not isinstance(ident, CloudIdentity):
+            continue
+        if ident.arn in admin_idents:
+            continue  # already admin; chain to self isn't a finding
+        # Depth-1 hops.
+        d1_targets = graph.outgoing(ident.arn, EDGE_CAN_ASSUME)
+        for d1 in d1_targets:
+            if d1 is None:
+                continue
+            if d1 in admin_idents:
+                out.append(AttackPath(
+                    pattern_id="cap_can_assume_chain_to_admin",
+                    title=(
+                        f"`{ident.arn}` can assume admin via `{d1}` "
+                        f"(1-hop)"
+                    ),
+                    severity="critical",
+                    narrative=(
+                        f"Identity `{ident.arn}` has assume-role "
+                        f"permission on `{d1}`, which itself has "
+                        f"a wildcard-admin policy. Compromise of "
+                        f"`{ident.arn}` → AssumeRole → full account."
+                    ),
+                    hops=[ident.arn, d1],
+                    evidence_edges=[EDGE_CAN_ASSUME],
+                    mitre_techniques=["T1078.004"],
+                    remediation=(
+                        "Either revoke the assume-role permission "
+                        "or remove the wildcard admin on the "
+                        "destination role. Use scoped permissions "
+                        "+ require MFA on the role-assumption."
+                    ),
+                    confidence=0.95,
+                ))
+                continue
+            # Depth-2: d1 → d2 → admin
+            for d2 in graph.outgoing(d1, EDGE_CAN_ASSUME):
+                if d2 is None or d2 in (ident.arn, d1):
+                    continue
+                if d2 in admin_idents:
+                    out.append(AttackPath(
+                        pattern_id="cap_can_assume_chain_to_admin",
+                        title=(
+                            f"`{ident.arn}` can assume admin via "
+                            f"`{d1}` → `{d2}` (2-hop)"
+                        ),
+                        severity="critical",
+                        narrative=(
+                            f"Identity `{ident.arn}` can chain "
+                            f"assume-role through `{d1}` to `{d2}`, "
+                            f"which has wildcard-admin. The chain "
+                            f"obscures the escalation path from "
+                            f"casual audit; the impact is the same "
+                            f"as direct admin access."
+                        ),
+                        hops=[ident.arn, d1, d2],
+                        evidence_edges=[
+                            EDGE_CAN_ASSUME, EDGE_CAN_ASSUME,
+                        ],
+                        mitre_techniques=["T1078.004"],
+                        remediation=(
+                            "Audit the role chain. At least one "
+                            "of the hops should either (a) require "
+                            "MFA + short session duration, or "
+                            "(b) not exist at all. Document the "
+                            "chain in your IAM-graph review."
+                        ),
+                        confidence=0.95,
+                    ))
+    return out
+
+
+def _pattern_admin_attached_to_compute_with_internet(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """Refinement of `cap_wildcard_admin_attached`: SAME chain
+    but the compute resource also has `exposed_to_internet`. This
+    is the strongest 4-hop attack-path narrative — the path is
+    reachable from the outside without any auth bypass needed.
+    """
+    out: list[AttackPath] = []
+    for p in graph.nodes_by_type(CloudPolicy):
+        if not isinstance(p, CloudPolicy) or not p.has_wildcard_admin():
+            continue
+        for ident_key in graph.incoming(p.arn, EDGE_HAS_POLICY):
+            ident = graph.get_node(ident_key)
+            if not isinstance(ident, CloudIdentity):
+                continue
+            for compute_key in graph.outgoing(ident_key, EDGE_ATTACHED_TO):
+                if compute_key is None:
+                    continue
+                compute = graph.get_node(compute_key)
+                if not isinstance(compute, CloudResource):
+                    continue
+                if not graph.is_internet_exposed(compute_key):
+                    continue
+                out.append(AttackPath(
+                    pattern_id="cap_admin_attached_to_compute_with_internet",
+                    title=(
+                        f"Internet-exposed compute `{compute.arn}` "
+                        f"runs as admin-equivalent identity"
+                    ),
+                    severity="critical",
+                    narrative=(
+                        f"Compute resource `{compute.arn}` is "
+                        f"reachable from the public internet AND "
+                        f"has IAM identity `{ident.arn}` attached "
+                        f"AND that identity carries wildcard-admin "
+                        f"policy `{p.arn}`. This is the canonical "
+                        f"4-hop full-compromise path: any code-"
+                        f"execution primitive on the public-facing "
+                        f"compute (RCE in the app, SSRF to metadata "
+                        f"service, public Lambda URL exec, "
+                        f"dependency compromise) directly yields "
+                        f"account-wide admin. Fix priority: "
+                        f"absolute highest."
+                    ),
+                    hops=[
+                        compute.arn, ident.arn, p.arn,
+                    ],
+                    evidence_edges=[
+                        EDGE_EXPOSED_TO_INTERNET,
+                        EDGE_ATTACHED_TO,
+                        EDGE_HAS_POLICY,
+                    ],
+                    mitre_techniques=[
+                        "T1190", "T1078.004",
+                        "T1552.005", "T1098.003",
+                    ],
+                    remediation=(
+                        "Multiple fixes; do all three:\n"
+                        "1. Restrict public exposure (remove world "
+                        "ingress / disable Lambda function URL / "
+                        "move to private subnet).\n"
+                        "2. Strip the wildcard admin policy — "
+                        "enumerate the actual permissions needed.\n"
+                        "3. For EC2, require IMDSv2 + hop-limit=1 "
+                        "to defang SSRF-to-IMDS chains."
+                    ),
+                    confidence=0.99,
+                    metadata={
+                        "compute_kind": compute.kind,
+                    },
+                ))
+    return out
+
+
+def _pattern_internet_resource_unencrypted(
+    graph: CloudGraph,
+) -> list[AttackPath]:
+    """Public resource that also lacks encryption-at-rest. Each
+    finding is its own CSPM hit but the combination is the actual
+    breach narrative — data is reachable AND clear-text on disk
+    means any snapshot/backup leak is a direct data leak too.
+    """
+    data_kinds = _DATA_RESOURCE_KINDS
+    out: list[AttackPath] = []
+    for r in graph.public_resources():
+        if r.kind not in data_kinds:
+            continue
+        # `unencrypted` attribute is set by the ingester when a
+        # `*_NO_ENCRYPTION` rule fires for the resource. We don't
+        # yet propagate that flag; this pattern lights up when the
+        # caller's `cloud_assets` enriches with `is_unencrypted`.
+        if not r.attributes.get("is_unencrypted"):
+            continue
+        out.append(AttackPath(
+            pattern_id="cap_internet_resource_unencrypted",
+            title=(
+                f"Public + unencrypted data resource `{r.arn}`"
+            ),
+            severity="critical",
+            narrative=(
+                f"`{r.arn}` ({r.kind}) is BOTH publicly reachable "
+                f"AND lacks encryption at rest. Any auth weakness "
+                f"yields plaintext data; any snapshot exfil yields "
+                f"plaintext data; any DR backup that ends up in "
+                f"the wrong S3 bucket yields plaintext data. Fix "
+                f"both controls — they're independent defences."
+            ),
+            hops=[r.arn],
+            evidence_edges=[EDGE_EXPOSED_TO_INTERNET],
+            mitre_techniques=["T1190", "T1530", "T1486"],
+            remediation=(
+                "1. Restrict public exposure (private subnet / "
+                "firewall to operator CIDRs).\n"
+                "2. Enable encryption at rest (snapshot the "
+                "current data, restore into an encrypted copy, "
+                "switch endpoints, delete the unencrypted "
+                "original)."
+            ),
+            confidence=0.95,
+        ))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Registry + entry point
 # ---------------------------------------------------------------------------
 
@@ -429,13 +987,30 @@ PatternFn = Callable[[CloudGraph], list[AttackPath]]
 
 
 # Registered patterns. Order doesn't matter — output is just
-# unioned.
+# unioned. Counts: 13 patterns in v2 (was 5 in v1 — masterroadmap
+# §5 P0 expansion).
 BUILTIN_PATTERNS: dict[str, PatternFn] = {
+    # v1 patterns (PR #293).
     "cap_public_storage_credentials_risk": _pattern_public_storage_credentials_risk,
     "cap_internet_exposed_compute_with_iam": _pattern_internet_exposed_compute_with_iam,
     "cap_wildcard_admin_attached": _pattern_wildcard_admin_attached,
     "cap_root_unsafe": _pattern_root_unsafe,
     "cap_world_assumable_role": _pattern_world_assumable_role,
+    # v2 expansion (this PR).
+    "cap_public_database": _pattern_public_database,
+    "cap_public_secrets_store": _pattern_public_secrets_store,
+    "cap_public_ecr_repository": _pattern_public_ecr_repository,
+    "cap_admin_policy_attached_to_iam_user":
+        _pattern_admin_policy_attached_to_iam_user,
+    "cap_external_trust_without_external_id":
+        _pattern_external_trust_without_external_id,
+    "cap_pass_role_present": _pattern_pass_role_present,
+    "cap_can_assume_chain_to_admin":
+        _pattern_can_assume_chain_to_admin,
+    "cap_admin_attached_to_compute_with_internet":
+        _pattern_admin_attached_to_compute_with_internet,
+    "cap_internet_resource_unencrypted":
+        _pattern_internet_resource_unencrypted,
 }
 
 

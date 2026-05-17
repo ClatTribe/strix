@@ -36,6 +36,22 @@ from strix.cloud_attack_paths.graph import (
     EDGE_HAS_POLICY,
     EDGE_MAY_CONTAIN_CREDENTIALS,
 )
+
+
+# Encryption-disabled rule IDs — when these fire we mark the
+# resource `is_unencrypted=True` so the
+# `cap_internet_resource_unencrypted` pattern can light up.
+_ENCRYPTION_DISABLED_RULE_IDS = frozenset({
+    "AWS_RDS_NO_ENCRYPTION",
+    "AWS_EBS_ENCRYPTION_BY_DEFAULT_DISABLED",
+    "AWS_S3_NO_DEFAULT_ENCRYPTION",
+    "TF_AWS_RDS_NO_ENCRYPTION",
+    "TF_AWS_EBS_NO_ENCRYPTION",
+    "prowler:rds_instance_storage_encrypted",
+    "prowler:ec2_ebs_volume_encryption",
+    "prowler:ec2_ebs_default_encryption",
+    "prowler:s3_bucket_default_encryption",
+})
 from strix.cspm.aws import CspmFinding
 
 
@@ -210,6 +226,11 @@ def _apply_finding_signals(
             node.is_public = True
             graph.add_edge(node.arn, EDGE_EXPOSED_TO_INTERNET, None,
                            attributes={"rule_id": finding.rule_id})
+        if finding.rule_id in _ENCRYPTION_DISABLED_RULE_IDS:
+            # Mark `is_unencrypted=True` so the
+            # `cap_internet_resource_unencrypted` pattern can
+            # cross-reference with `is_public`.
+            node.attributes["is_unencrypted"] = True
         # Data-store-classified resources stay marked; rule-derived
         # signals (e.g. `bucket likely contains terraform state` —
         # not implemented yet but a hook) can flip is_data_store
@@ -324,12 +345,20 @@ def build_graph_from_cspm(
     # --- Phase 3: derived edges from parsed policy statements ---
     # When a policy lists resources, add `grants_access_to` edges
     # so attack-path queries can walk policy → granted resource.
+    # Also derive `can_assume` edges when a statement allows
+    # `sts:AssumeRole` against a specific role ARN — this enables
+    # multi-hop chain detection (`cap_can_assume_chain_to_admin`).
     for node in list(graph.nodes_by_type(CloudPolicy)):
         if not isinstance(node, CloudPolicy):
             continue
         for stmt in node.statements:
             if (stmt.get("effect") or "").lower() != "allow":
                 continue
+            actions = _as_iter(stmt.get("actions"))
+            grants_assume = any(
+                str(a).strip().lower() in ("sts:assumerole", "sts:*", "*")
+                for a in actions
+            )
             for res in _as_iter(stmt.get("resources")):
                 if not isinstance(res, str) or not res:
                     continue
@@ -338,6 +367,12 @@ def build_graph_from_cspm(
                     _ensure_node_for_arn(graph, res)
                 graph.add_edge(node.arn, EDGE_GRANTS_ACCESS_TO,
                                res if res != "*" else None)
+                # `can_assume` edge from each identity that holds
+                # this policy → the role resource. Skip wildcard
+                # resources (would over-fan).
+                if grants_assume and res != "*" and "role/" in res:
+                    for ident_key in graph.incoming(node.arn, EDGE_HAS_POLICY):
+                        graph.add_edge(ident_key, EDGE_CAN_ASSUME, res)
 
     return graph
 
