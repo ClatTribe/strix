@@ -1,0 +1,180 @@
+[
+  {
+    "metadata": {
+      "version": "1.1.0",
+      "product": {"name": "Prowler", "vendor_name": "Prowler"}
+    },
+    "finding_info": {
+      "uid": "prowler-aws-s3_bucket_public_access-123-us-east-1-mybucket",
+      "title": "Check S3 Bucket public access",
+      "desc": "Ensure S3 buckets are not publicly accessible."
+    },
+    "status_code": "FAIL",
+    "severity": "High",
+    "severity_id": 4,
+    "time": 1717000000,
+    "cloud": {
+      "provider": "AWS",
+      "account": {"uid": "123456789012", "name": "production"},
+      "region": "us-east-1"
+    },
+    "resources": [
+      {
+        "type": "AwsS3Bucket",
+        "uid": "arn:aws:s3:::mybucket-prod",
+        "name": "mybucket-prod"
+      }
+    ],
+    "remediation": {
+      "desc": "Block public access at the account and bucket level.",
+      "references": ["https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html"]
+    },
+    "risk_details": "Public S3 buckets leak data to the open internet.",
+    "unmapped": {
+      "check_id": "s3_bucket_public_access",
+      "service_name": "s3",
+      "status_extended": "S3 Bucket mybucket-prod has public access set to true",
+      "categories": ["data-protection"],
+      "compliance": {
+        "CIS-3.0": ["2.1.5"],
+        "SOC2": ["CC6.1", "CC6.6"],
+        "NIST-800-53-Revision-5": ["AC-3"],
+        "AWS-Foundational-Security-Best-Practices": ["S3.2"]
+      },
+      "related_url": "https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html"
+    },
+    "class_uid": 2004,
+    "class_name": "Detection Finding"
+  },
+  {
+    "metadata": {"product": {"name": "Prowler"}},
+    "finding_info": {
+      "uid": "prowler-aws-iam_root_mfa_enabled-456-global",
+      "title": "Ensure MFA is enabled for the root account"
+    },
+    "status_code": "FAIL",
+    "severity": "Critical",
+    "time": 1717000001,
+    "cloud": {
+      "provider": "AWS",
+      "account": {"uid": "123456789012"},
+      "region": "global"
+    },
+    "resources": [
+      {
+        "type": "AwsAccount",
+        "uid": "arn:aws:iam::123456789012:root",
+        "name": "root"
+      }
+    ],
+    "unmapped": {
+      "check_id": "iam_root_mfa_enabled",
+      "service_name": "iam",
+      "status_extended": "Root account does not have MFA enabled.",
+      "compliance": {
+        "CIS-3.0": ["1.5"],
+        "PCI-3.2.1": ["8.3.1"]
+      }
+    },
+    "class_name": "Detection Finding"
+  },
+  {
+    "metadata": {"product": {"name": "Prowler"}},
+    "finding_info": {
+      "uid": "prowler-aws-s3_bucket_versioning-789-mybucket",
+      "title": "S3 versioning enabled"
+    },
+    "status_code": "PASS",
+    "severity": "Informational",
+    "time": 1717000002,
+    "cloud": {
+      "provider": "AWS",
+      "account": {"uid": "123456789012"},
+      "region": "us-east-1"
+    },
+    "resources": [
+      {"type": "AwsS3Bucket", "uid": "arn:aws:s3:::good-bucket", "name": "good-bucket"}
+    ],
+    "unmapped": {
+      "check_id": "s3_bucket_object_versioning",
+      "service_name": "s3"
+    },
+    "class_name": "Detection Finding"
+  },
+  {
+    "metadata": {"product": {"name": "Prowler"}},
+    "finding_info": {
+      "uid": "prowler-azure-storage_blob_public_access_level_is_disabled",
+      "title": "Storage Blob public access disabled"
+    },
+    "status_code": "FAIL",
+    "severity": "Medium",
+    "time": 1717000003,
+    "cloud": {
+      "provider": "Azure",
+      "account": {"uid": "00000000-0000-0000-0000-000000000001", "name": "prod-sub"},
+      "region": "eastus"
+    },
+    "resources": [
+      {
+        "type": "AzureStorageAccount",
+        "uid": "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/prodstorage",
+        "name": "prodstorage"
+      }
+    ],
+    "unmapped": {
+      "check_id": "storage_blob_public_access_level_is_disabled",
+      "service_name": "storage",
+      "status_extended": "Storage account prodstorage allows blob public access.",
+      "compliance": {
+        "CIS-2.0": ["3.7"],
+        "ISO-27001-2013": ["A.8.3"]
+      }
+    },
+    "class_name": "Detection Finding"
+  },
+  {
+    "metadata": {"product": {"name": "Prowler"}},
+    "finding_info": {
+      "uid": "prowler-gcp-bigquery_dataset_public",
+      "title": "BigQuery dataset publicly accessible"
+    },
+    "status_code": "FAIL",
+    "severity": "High",
+    "time": 1717000004,
+    "cloud": {
+      "provider": "GCP",
+      "account": {"uid": "my-gcp-project", "name": "my-gcp-project"},
+      "region": "us-central1"
+    },
+    "resources": [
+      {
+        "type": "GcpBigQueryDataset",
+        "uid": "projects/my-gcp-project/datasets/leaky_dataset",
+        "name": "leaky_dataset"
+      }
+    ],
+    "unmapped": {
+      "check_id": "bigquery_dataset_public_access",
+      "service_name": "bigquery",
+      "status_extended": "Dataset leaky_dataset has allUsers binding.",
+      "compliance": {
+        "CIS-2.0": ["7.1"],
+        "GDPR": ["Art.32"]
+      }
+    },
+    "class_name": "Detection Finding"
+  },
+  {
+    "metadata": {"product": {"name": "Prowler"}},
+    "finding_info": {
+      "uid": "prowler-aws-cloudtrail-manual-check"
+    },
+    "status_code": "MANUAL",
+    "severity": "Informational",
+    "cloud": {"provider": "AWS", "account": {"uid": "123456789012"}, "region": "us-east-1"},
+    "resources": [],
+    "unmapped": {"check_id": "manual_thing", "service_name": "cloudtrail"},
+    "class_name": "Detection Finding"
+  }
+]

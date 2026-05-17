@@ -60,6 +60,8 @@ FRAMEWORK_CIS = "cis"
 FRAMEWORK_CIS_DOCKER = "cis_docker"
 FRAMEWORK_CIS_KUBERNETES = "cis_kubernetes"
 FRAMEWORK_CIS_AWS = "cis_aws"
+FRAMEWORK_CIS_AZURE = "cis_azure"
+FRAMEWORK_CIS_GCP = "cis_gcp"
 
 ALL_FRAMEWORKS = [
     FRAMEWORK_SOC2,
@@ -74,6 +76,8 @@ ALL_FRAMEWORKS = [
     FRAMEWORK_CIS_DOCKER,
     FRAMEWORK_CIS_KUBERNETES,
     FRAMEWORK_CIS_AWS,
+    FRAMEWORK_CIS_AZURE,
+    FRAMEWORK_CIS_GCP,
 ]
 
 
@@ -1215,6 +1219,166 @@ _CIS_AWS_CONTROLS: dict[str, Control] = {
 
 
 # ---------------------------------------------------------------------------
+# CIS Microsoft Azure Foundations Benchmark v2.x
+# ---------------------------------------------------------------------------
+
+# Seed catalog — covers the highest-leverage sections strix can
+# attest via Prowler (Identity, Storage, Database, Networking,
+# Logging). The Prowler scanner ships per-check mappings to
+# specific control IDs; this catalog provides the registry shell
+# the wrapper renders against. Auditors get the authoritative
+# control mapping straight from Prowler's output.
+
+_CIS_AZURE_CONTROLS: dict[str, Control] = {
+    "1.1.1": Control(
+        FRAMEWORK_CIS_AZURE, "1.1.1",
+        "Ensure that multi-factor authentication is enabled "
+        "for all privileged users",
+        "Privileged Entra ID accounts (Global Admin, etc.) must "
+        "have MFA. Without it, a single credential compromise "
+        "yields full-tenant access.",
+    ),
+    "1.1.2": Control(
+        FRAMEWORK_CIS_AZURE, "1.1.2",
+        "Ensure that multi-factor authentication is enabled "
+        "for all non-privileged users",
+        "Same rationale at user scope — MFA is the single "
+        "highest-impact control for cloud identity.",
+    ),
+    "3.1": Control(
+        FRAMEWORK_CIS_AZURE, "3.1",
+        "Ensure that 'Secure transfer required' is set to "
+        "'Enabled' on Storage Accounts",
+        "Disables HTTP access; forces TLS for blob / file / "
+        "queue / table data in transit.",
+    ),
+    "3.7": Control(
+        FRAMEWORK_CIS_AZURE, "3.7",
+        "Ensure that 'Public access level' is disallowed for "
+        "blob containers",
+        "Anonymous-read public containers leak data to the "
+        "open internet.",
+    ),
+    "4.1.1": Control(
+        FRAMEWORK_CIS_AZURE, "4.1.1",
+        "Ensure that 'Auditing' is set to 'On' for SQL servers",
+        "Audit logging captures access patterns — required for "
+        "SOC 2 + PCI evidence trails.",
+    ),
+    "4.1.3": Control(
+        FRAMEWORK_CIS_AZURE, "4.1.3",
+        "Ensure SQL server's Transparent Data Encryption (TDE) "
+        "is enabled",
+        "Encrypts database files at rest; protects against "
+        "snapshot / backup theft.",
+    ),
+    "5.1.1": Control(
+        FRAMEWORK_CIS_AZURE, "5.1.1",
+        "Ensure that a 'Diagnostic Setting' exists for "
+        "subscription activity logs",
+        "Without diagnostic settings, activity logs aren't "
+        "shipped anywhere — control-plane incident response is "
+        "blind.",
+    ),
+    "6.1": Control(
+        FRAMEWORK_CIS_AZURE, "6.1",
+        "Ensure that RDP / SSH access from the internet is "
+        "evaluated and restricted",
+        "NSG rules opening 22 / 3389 to `*` / Internet are the "
+        "Azure equivalent of CIS AWS 5.2 — top compromise "
+        "vector.",
+    ),
+    "7.1": Control(
+        FRAMEWORK_CIS_AZURE, "7.1",
+        "Ensure Virtual Machines are utilizing Managed Disks",
+        "Managed disks inherit encryption + redundancy; "
+        "unmanaged disks bypass these.",
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# CIS Google Cloud Platform Foundation Benchmark v2.x
+# ---------------------------------------------------------------------------
+
+# Same seed-catalog pattern as Azure. Sections covered: IAM,
+# Logging, Networking, VMs, Storage, Cloud SQL, BigQuery.
+
+_CIS_GCP_CONTROLS: dict[str, Control] = {
+    "1.4": Control(
+        FRAMEWORK_CIS_GCP, "1.4",
+        "Ensure that there are only GCP-managed service account "
+        "keys for each service account",
+        "User-managed SA keys are long-lived secrets — rotation "
+        "is manual and theft = persistent access. Prefer GCP-"
+        "managed (rotated automatically).",
+    ),
+    "1.5": Control(
+        FRAMEWORK_CIS_GCP, "1.5",
+        "Ensure that Service Account has no Admin privileges",
+        "Service Accounts with `*Admin` / `owner` roles violate "
+        "least privilege; they're typically attached to GCE VMs "
+        "and become escalation paths.",
+    ),
+    "2.1": Control(
+        FRAMEWORK_CIS_GCP, "2.1",
+        "Ensure that Cloud Audit Logging is configured properly "
+        "across all services and all users",
+        "Without admin + data-access logging across all "
+        "services, incident response loses the audit trail.",
+    ),
+    "2.2": Control(
+        FRAMEWORK_CIS_GCP, "2.2",
+        "Ensure that sinks are configured for all log entries",
+        "Logs only retained for the default 30 days unless "
+        "sunk to GCS / BigQuery / Pub/Sub. SOC 2 / HIPAA require "
+        "longer retention.",
+    ),
+    "3.6": Control(
+        FRAMEWORK_CIS_GCP, "3.6",
+        "Ensure that SSH access is restricted from the internet",
+        "Firewall rules opening 22 / 0.0.0.0/0 — GCP equivalent "
+        "of CIS AWS 5.2.",
+    ),
+    "3.7": Control(
+        FRAMEWORK_CIS_GCP, "3.7",
+        "Ensure that RDP access is restricted from the internet",
+        "Same as 3.6 for Windows / 3389.",
+    ),
+    "4.1": Control(
+        FRAMEWORK_CIS_GCP, "4.1",
+        "Ensure that instances are not configured to use the "
+        "default service account with full access to all Cloud "
+        "APIs",
+        "Compute Engine VMs running under the Compute Engine "
+        "default SA with `cloud-platform` scope can access every "
+        "Cloud API the project owner can — privilege explosion.",
+    ),
+    "5.1": Control(
+        FRAMEWORK_CIS_GCP, "5.1",
+        "Ensure that Cloud Storage bucket is not anonymously or "
+        "publicly accessible",
+        "`allUsers` / `allAuthenticatedUsers` bindings on buckets "
+        "= public data — GCP equivalent of CIS AWS 2.1.5.",
+    ),
+    "6.2.1": Control(
+        FRAMEWORK_CIS_GCP, "6.2.1",
+        "Ensure that a MySQL database instance does not allow "
+        "anyone to connect with administrative privileges",
+        "Cloud SQL public IP + 0.0.0.0/0 authorized networks = "
+        "world-open DB.",
+    ),
+    "7.1": Control(
+        FRAMEWORK_CIS_GCP, "7.1",
+        "Ensure that BigQuery datasets are not anonymously or "
+        "publicly accessible",
+        "`allUsers` / `allAuthenticatedUsers` on a dataset = "
+        "public query access — most common GCP data leak.",
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1232,6 +1396,8 @@ _FRAMEWORK_CATALOGS: dict[str, dict[str, Control]] = {
     FRAMEWORK_CIS_DOCKER: _CIS_DOCKER_CONTROLS,
     FRAMEWORK_CIS_KUBERNETES: _CIS_KUBERNETES_CONTROLS,
     FRAMEWORK_CIS_AWS: _CIS_AWS_CONTROLS,
+    FRAMEWORK_CIS_AZURE: _CIS_AZURE_CONTROLS,
+    FRAMEWORK_CIS_GCP: _CIS_GCP_CONTROLS,
 }
 
 
