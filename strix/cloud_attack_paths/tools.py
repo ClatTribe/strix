@@ -88,6 +88,8 @@ def _emit_attack_path(
             technical_analysis=(
                 f"Pattern ID: {path.pattern_id}\n"
                 f"Severity: {path.severity}\n"
+                f"Reachability score: "
+                f"{getattr(path, 'reachability_score', 0.0):.2f}\n"
                 f"Hops ({len(path.hops)}):\n"
                 + "\n".join(f"  {i+1}. {h}" for i, h in enumerate(path.hops))
                 + f"\nEvidence edges: {', '.join(path.evidence_edges) or '(none)'}\n"
@@ -290,6 +292,24 @@ def scan_cloud_attack_paths(
                if isinstance(live_probe, dict) else "")
         )
 
+    # Reachability bucket counts for the dashboard rollup.
+    reachability_buckets = {
+        "directly_exposed": 0,    # score 1.0
+        "1_hop_from_public": 0,   # 0.7
+        "2_hops_from_public": 0,  # 0.4
+        "deeper_or_isolated": 0,  # 0.1 or 0.0
+    }
+    for p in report.paths:
+        rs = getattr(p, "reachability_score", 0.0) or 0.0
+        if rs >= 1.0:
+            reachability_buckets["directly_exposed"] += 1
+        elif rs >= 0.7:
+            reachability_buckets["1_hop_from_public"] += 1
+        elif rs >= 0.4:
+            reachability_buckets["2_hops_from_public"] += 1
+        else:
+            reachability_buckets["deeper_or_isolated"] += 1
+
     tool_metadata: dict[str, Any] = {
         "engine": "cloud-attack-paths-v1",
         "provider": provider,
@@ -299,6 +319,7 @@ def scan_cloud_attack_paths(
         "attack_paths_total": len(report.paths),
         "critical_paths": len(report.critical_paths()),
         "findings_emitted_to_tracer": emitted,
+        "reachability_buckets": reachability_buckets,
         "cspm_metadata": cspm_meta,
         "cspm_errors": cspm_errors[:5],
     }

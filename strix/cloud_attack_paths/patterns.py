@@ -72,6 +72,12 @@ class AttackPath:
     mitre_techniques: list[str] = field(default_factory=list)
     remediation: str = ""
     confidence: float = 0.85
+    # Reachability score [0.0, 1.0] populated by
+    # `apply_reachability_to_paths` after pattern detection. 0.0
+    # is the no-reachability-computed default; the value is also
+    # mirrored on `metadata.reachability_score` for JSON-safe
+    # consumption by wrappers.
+    reachability_score: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -85,6 +91,7 @@ class AttackPath:
             "mitre_techniques": list(self.mitre_techniques),
             "remediation": self.remediation,
             "confidence": self.confidence,
+            "reachability_score": self.reachability_score,
             "metadata": dict(self.metadata),
         }
 
