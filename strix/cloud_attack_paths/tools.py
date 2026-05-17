@@ -158,6 +158,7 @@ def scan_cloud_attack_paths(
     enable_live_probes: bool | None = None,
     auto_discover_assets: bool = True,
     additional_role_arns: list[str] | None = None,
+    agentless_snapshot_ids: list[str] | None = None,
 ) -> SpecialistResult:
     """Run a CSPM scan, build the cloud graph, detect attack paths,
     emit each path to the tracer.
@@ -194,6 +195,12 @@ def scan_cloud_attack_paths(
             automatically. Per-role errors don't stop the rest
             — partial multi-account results are emitted. AWS-only;
             ignored for non-AWS providers.
+        agentless_snapshot_ids: when set, run an agentless VM
+            CVE scan (via `trivy vm ebs:<snapshot-id>`) on each
+            EBS snapshot ID. Per-snapshot CVE findings union
+            into the tracer output as `category=agentless_vm_cve`.
+            Wiz's biggest moat against agent-based competitors;
+            v1 wraps Trivy's EBS-snapshot scanner. AWS-only.
 
     Returns:
         `SpecialistResult` with one finding per detected attack
@@ -276,6 +283,30 @@ def scan_cloud_attack_paths(
             )
             cspm_errors.append({
                 "source": "multi_account",
+                "error": f"{type(e).__name__}: {e}",
+            })
+
+    # Agentless VM CVE scan (masterroadmap §5 P2). Wraps Trivy's
+    # EBS-snapshot mode; per-snapshot findings union into the
+    # CSPM findings list so they ride the same tracer + emit
+    # pipeline. AWS-only; non-AWS providers ignore the kwarg.
+    agentless_summary: dict[str, Any] | None = None
+    if agentless_snapshot_ids and provider == "aws":
+        try:
+            from strix.cloud_attack_paths.agentless_scan import (  # noqa: PLC0415
+                scan_snapshots, summarise as summarise_agentless,
+                union_findings as union_agentless_findings,
+            )
+            agentless_results = scan_snapshots(agentless_snapshot_ids)
+            findings.extend(union_agentless_findings(agentless_results))
+            agentless_summary = summarise_agentless(agentless_results)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "scan_cloud_attack_paths: agentless scan failed: %s",
+                e, exc_info=True,
+            )
+            cspm_errors.append({
+                "source": "agentless_vm_scan",
                 "error": f"{type(e).__name__}: {e}",
             })
 
@@ -371,6 +402,8 @@ def scan_cloud_attack_paths(
     }
     if multi_account_summary is not None:
         tool_metadata["multi_account_summary"] = multi_account_summary
+    if agentless_summary is not None:
+        tool_metadata["agentless_scan_summary"] = agentless_summary
     if any_probes_ran:
         tool_metadata["live_probes_summary"] = live_probes_summary
         tool_metadata["live_probes_enabled"] = True
