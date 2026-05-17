@@ -52,6 +52,9 @@ from strix.telemetry import posthog  # noqa: E402
 from strix.telemetry.tracer import get_global_tracer  # noqa: E402
 
 
+logger = logging.getLogger(__name__)
+
+
 logging.getLogger().setLevel(logging.ERROR)
 
 
@@ -754,6 +757,46 @@ Examples:
         ),
     )
 
+    # engine-wishlist.md §5 — skip-if-unchanged. Compute a per-target
+    # fingerprint (git HEAD / TLS cert + page hash / image digest);
+    # when an explicit prior-run-dir was supplied (or env equivalent
+    # finds a recent match in `strix_runs/`), compare digests and
+    # exit cleanly with `status: skipped_unchanged` before touching
+    # the sandbox or any LLM. Engine remains stateless — wrapper
+    # owns the "which prior run pairs with this target" mapping via
+    # --prior-run-dir.
+    parser.add_argument(
+        "--skip-if-unchanged",
+        action="store_true",
+        default=False,
+        help=(
+            "Compute a per-target fingerprint (git HEAD + lockfile "
+            "hashes for repos; TLS cert + landing-page body for HTTP "
+            "targets; image digest for container images) and exit "
+            "early with `run_meta.json.status = skipped_unchanged` "
+            "when the prior successful scan had the same fingerprint. "
+            "Pair with --prior-run-dir for wrapper-driven dispatch; "
+            "without --prior-run-dir, the engine searches strix_runs/ "
+            "for the most-recent prior run of the same target. "
+            "engine-wishlist.md §5."
+        ),
+    )
+    parser.add_argument(
+        "--prior-run-dir",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help=(
+            "Path to the prior successful scan's run directory. When "
+            "supplied with --skip-if-unchanged, the engine reads the "
+            "stored target fingerprint from <DIR>/run_meta.json and "
+            "compares it against the current target's fingerprint. "
+            "Wrappers should pass this explicitly to avoid the "
+            "engine's strix_runs/ filesystem scan. engine-wishlist.md "
+            "§5."
+        ),
+    )
+
     args = parser.parse_args()
 
     # --quiet forces --non-interactive (the TUI requires a tty).
@@ -1007,6 +1050,141 @@ def run_preflight_or_exit(args: argparse.Namespace) -> None:
     console.print(f"[green]✓ Preflight: {reachable_count}/{len(network_targets)} network target(s) reachable.[/green]")
 
 
+def _target_value_for_fingerprint(target_info: dict) -> tuple[str, str]:
+    """Pull `(target_type, value)` out of the targets_info entry
+    in the canonical string the wrapper / human-CLI used. Used by
+    the §5 skip-if-unchanged check + by tracer fingerprint stamp.
+    """
+    ttype = target_info.get("type", "")
+    details = target_info.get("details", {}) or {}
+    # The "original" value is what the user passed in — that's what
+    # the fingerprint compares targets across runs by. Fall through
+    # to the detail key for the rare case where original is missing.
+    value = (
+        target_info.get("original")
+        or details.get("target_url")
+        or details.get("target_repo")
+        or details.get("target_image")
+        or details.get("target_address")
+        or ""
+    )
+    return ttype, value
+
+
+def _maybe_skip_unchanged_and_exit(args: argparse.Namespace) -> bool:
+    """engine-wishlist §5 — short-circuit a scan whose target
+    fingerprint matches the prior successful run's fingerprint.
+
+    Runs BEFORE the docker pull, env validate, llm warmup, and
+    clone steps so a skipped scan exits in <5s with zero LLM
+    spend. Returns True when the caller should `return` from
+    `main()` immediately (skipped run dir already written).
+    """
+    enable = (
+        bool(getattr(args, "skip_if_unchanged", False))
+        or os.environ.get("STRIX_SKIP_IF_UNCHANGED") in ("1", "true", "yes")
+    )
+    if not enable:
+        return False
+
+    targets_info = getattr(args, "targets_info", []) or []
+    if len(targets_info) != 1:
+        # v1: single-target only. Batch-mode (§1) opens the door
+        # to multi-target dispatch; until then a fleet caller
+        # would invoke strix once per target anyway.
+        logger.info(
+            "skip-if-unchanged: %d targets in this invocation; v1 "
+            "supports single-target only — proceeding with scan",
+            len(targets_info),
+        )
+        return False
+
+    target_type, target_value = _target_value_for_fingerprint(targets_info[0])
+    if not target_value:
+        return False
+
+    explicit_prior = getattr(args, "prior_run_dir", None)
+    prior_dir_path = Path(explicit_prior) if explicit_prior else None
+
+    try:
+        from strix.telemetry.skip_unchanged import (  # noqa: PLC0415
+            decide,
+            emit_skipped_run,
+        )
+    except ImportError:
+        logger.debug("skip-if-unchanged: import failed", exc_info=True)
+        return False
+
+    decision = decide(
+        target_type=target_type,
+        target_value=target_value,
+        explicit_prior_run_dir=prior_dir_path,
+    )
+    if not decision.should_skip:
+        # Stash the freshly-computed fingerprint so the tracer can
+        # stamp it on the eventual run_meta.json without a second
+        # network round-trip on the no-skip path.
+        if decision.current_fingerprint is not None:
+            args._computed_target_fingerprint = (
+                decision.current_fingerprint.to_dict()
+            )
+        return False
+
+    # Skip: materialise a minimal run dir, write run_meta.json,
+    # exit clean.
+    if not getattr(args, "run_name", None):
+        args.run_name = generate_run_name(args.targets_info)
+    run_dir = Path("strix_runs") / args.run_name
+
+    extra: dict[str, Any] = {
+        "model_name": getattr(args, "model", None),
+        "scope_mode": getattr(args, "scope_mode", None),
+        "mode": "skip-if-unchanged",
+        "engine_version": "skip-v1",
+    }
+    extra = {k: v for k, v in extra.items() if v is not None}
+
+    emit_skipped_run(
+        run_dir=run_dir,
+        run_id=args.run_name,
+        run_name=args.run_name,
+        target_value=target_value,
+        target_type=target_type,
+        decision=decision,
+        extra_metadata=extra,
+    )
+
+    # Console hint for human CLI users; the wrapper consumes the
+    # run_meta.json directly and doesn't need this.
+    if not getattr(args, "quiet", False):
+        console = Console()
+        text = Text()
+        text.append("SKIPPED — target unchanged since prior scan", style="bold green")
+        text.append("\n\n", style="white")
+        text.append("target          ", style="dim")
+        text.append(f"{target_value}\n", style="white")
+        text.append("prior run id    ", style="dim")
+        text.append(
+            f"{decision.prior_run_dir.name}\n", style="white",
+        )
+        text.append("fingerprint     ", style="dim")
+        text.append(
+            f"{decision.current_fingerprint.digest[:16]}…\n",
+            style="white",
+        )
+        text.append("new run dir     ", style="dim")
+        text.append(f"{run_dir}\n", style="white")
+        panel = Panel(
+            text,
+            title="[bold white]STRIX",
+            title_align="left",
+            border_style="green",
+            padding=(1, 2),
+        )
+        console.print(panel)
+    return True
+
+
 def main() -> None:  # noqa: PLR0912, PLR0915
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -1015,6 +1193,13 @@ def main() -> None:  # noqa: PLR0912, PLR0915
 
     if args.config:
         apply_config_override(args.config)
+
+    # engine-wishlist §5 — skip-if-unchanged. Runs FIRST so a
+    # skipped scan never pays for docker pull / env validate /
+    # LLM warmup. See `_maybe_skip_unchanged_and_exit` for the
+    # decision tree.
+    if _maybe_skip_unchanged_and_exit(args):
+        return
 
     if args.preflight:
         run_preflight_or_exit(args)
@@ -1356,6 +1541,20 @@ def main() -> None:  # noqa: PLR0912, PLR0915
         interactive=not args.non_interactive,
         has_instructions=bool(args.instruction),
     )
+
+    # engine-wishlist §5 — stamp the per-target fingerprint into
+    # tracer.run_metadata so this run's eventual run_meta.json
+    # carries the value future --skip-if-unchanged invocations
+    # will compare against. Computed earlier in
+    # `_maybe_skip_unchanged_and_exit`; idempotent if already
+    # present.
+    computed_fp = getattr(args, "_computed_target_fingerprint", None)
+    if computed_fp is not None:
+        _t = get_global_tracer()
+        if _t is not None:
+            _t.run_metadata.setdefault(
+                "target_fingerprint", computed_fp,
+            )
 
     # Recall-lift PR-1 — pin the run's wall-clock start so the
     # --max-duration cap has a reference point. Idempotent;
