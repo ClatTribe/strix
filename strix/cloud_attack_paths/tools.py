@@ -170,6 +170,9 @@ def scan_cloud_attack_paths(
     azure_subscription_id: str | None = None,
     azure_services: list[str] | None = None,
     _azure_client_factory: Any | None = None,
+    gcp_project_id: str | None = None,
+    gcp_services: list[str] | None = None,
+    _gcp_client_factory: Any | None = None,
 ) -> SpecialistResult:
     """Run a CSPM scan, build the cloud graph, detect attack paths,
     emit each path to the tracer.
@@ -272,6 +275,18 @@ def scan_cloud_attack_paths(
             real Azure SDK. None → real implementation looked
             up lazily (and gated on whether the SDK is
             available).
+        gcp_project_id: when set AND `provider="gcp"`, run
+            read-only GCP asset discovery for the given project
+            to enrich the cloud-attack-path graph beyond
+            CSPM-flagged resources only. Discovers GCS buckets,
+            GCE instances, firewalls, service accounts +
+            project-level IAM bindings, Cloud Functions,
+            Cloud Run, Cloud SQL, Secret Manager secrets, and
+            Artifact Registry repos.
+        gcp_services: optional allow-list of GCP services to
+            discover. None = all of them.
+        _gcp_client_factory: DI hook for tests — bypasses the
+            real google-cloud-* SDK.
 
     Returns:
         `SpecialistResult` with one finding per detected attack
@@ -505,6 +520,46 @@ def scan_cloud_attack_paths(
                 "error": f"{type(e).__name__}: {e}",
             })
 
+    # GCP asset discovery (masterroadmap §5 v2 deepening).
+    # Parallel to AWS / Azure auto-discovery. Opt-in via
+    # `gcp_project_id`; tests inject the factory.
+    gcp_assets_count = 0  # always-bound for tool_metadata branch
+    if provider == "gcp" and gcp_project_id:
+        try:
+            from strix.cloud_attack_paths.gcp_discovery import (  # noqa: PLC0415
+                discover_gcp_assets,
+            )
+            g_factory = _gcp_client_factory
+            if g_factory is None:
+                try:
+                    from strix.cspm.gcp.client import (  # noqa: PLC0415
+                        make_default_gcp_client_factory,
+                    )
+                    g_factory = make_default_gcp_client_factory()
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(
+                        "scan_cloud_attack_paths: gcp SDK "
+                        "client unavailable, skipping discovery: "
+                        "%s", e,
+                    )
+                    g_factory = None
+            if g_factory is not None:
+                gcp_assets = discover_gcp_assets(
+                    g_factory, gcp_project_id,
+                    services=gcp_services,
+                )
+                extra_cspm_assets.extend(gcp_assets)
+                gcp_assets_count = len(gcp_assets)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "scan_cloud_attack_paths: gcp discovery "
+                "failed: %s", e, exc_info=True,
+            )
+            cspm_errors.append({
+                "source": "gcp_discovery",
+                "error": f"{type(e).__name__}: {e}",
+            })
+
     # CDR — CloudTrail rule engine (masterroadmap §5 P3). Pure-
     # data transformation over a caller-supplied event list. Findings
     # adapt to CspmFinding shape via `.to_cspm_finding()` so they
@@ -634,6 +689,8 @@ def scan_cloud_attack_paths(
         tool_metadata["auto_snapshot_summary"] = auto_snapshot_summary
     if azure_assets_count:
         tool_metadata["azure_assets_discovered"] = azure_assets_count
+    if gcp_assets_count:
+        tool_metadata["gcp_assets_discovered"] = gcp_assets_count
     if cdr_summary is not None:
         tool_metadata["cdr_summary"] = cdr_summary
     if any_probes_ran:

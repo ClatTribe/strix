@@ -88,6 +88,7 @@ from strix.cloud_attack_paths.cloudtrail_detection import (
 )
 from strix.cloud_attack_paths.azure_discovery import discover_azure_assets
 from strix.cloud_attack_paths.discovery import discover_aws_assets
+from strix.cloud_attack_paths.gcp_discovery import discover_gcp_assets
 from strix.cloud_attack_paths.ingest import build_graph_from_cspm
 from strix.cloud_attack_paths.multi_account import (
     AccountScanResult,
@@ -146,6 +147,7 @@ __all__ = [
     "build_graph_from_cspm",
     "discover_aws_assets",
     "discover_azure_assets",
+    "discover_gcp_assets",
     "find_attack_paths",
     "BUILTIN_PATTERNS",
     # Reachability scoring
