@@ -344,6 +344,251 @@ def scan_snapshots(
     return results
 
 
+# ---------------------------------------------------------------------------
+# Auto-snapshot lifecycle (closes v1 → v2 gap)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TransientSnapshot:
+    """Snapshot created by strix's lifecycle manager. Tracks the
+    resource identifiers needed to clean up after scanning."""
+    snapshot_id: str
+    volume_id: str
+    instance_id: str | None = None
+    region: str = "us-east-1"
+
+
+def discover_running_instances_and_volumes(
+    client_factory: Any, *, region: str,
+    max_instances: int = 50,
+) -> list[tuple[str, list[str]]]:
+    """Enumerate running EC2 instances in `region` and the EBS
+    volume IDs attached to each. Returns
+    `[(instance_id, [volume_id, ...]), ...]`.
+
+    Read-only. Per-instance errors are swallowed; partial
+    results are the contract.
+    """
+    out: list[tuple[str, list[str]]] = []
+    try:
+        ec2 = client_factory("ec2", region=region)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("auto_snapshot: ec2 client failed in %s: %s",
+                     region, e)
+        return out
+    try:
+        paginator = ec2.get_paginator("describe_instances")
+    except Exception:  # noqa: BLE001
+        return out
+    seen = 0
+    try:
+        for page in paginator.paginate(
+            Filters=[{"Name": "instance-state-name",
+                       "Values": ["running"]}],
+        ):
+            for res in (page.get("Reservations") or []):
+                for inst in (res.get("Instances") or []):
+                    inst_id = inst.get("InstanceId")
+                    if not inst_id:
+                        continue
+                    vol_ids: list[str] = []
+                    for bd in inst.get("BlockDeviceMappings") or []:
+                        ebs = bd.get("Ebs") or {}
+                        v = ebs.get("VolumeId")
+                        if v:
+                            vol_ids.append(v)
+                    if vol_ids:
+                        out.append((inst_id, vol_ids))
+                        seen += 1
+                        if seen >= max_instances:
+                            return out
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "auto_snapshot: DescribeInstances failed in %s: %s",
+            region, e,
+        )
+    return out
+
+
+def create_transient_snapshots(
+    client_factory: Any, instances: list[tuple[str, list[str]]],
+    *, region: str,
+) -> list[TransientSnapshot]:
+    """For each (instance_id, [volume_id, ...]) pair, snapshot
+    every volume and tag the snapshot so the cleanup pass can
+    find them. Tag key: `strix-transient=true`.
+
+    Per-volume errors are isolated. Returns the list of snapshots
+    that succeeded — the caller hands these to `scan_snapshots`
+    + then calls `delete_transient_snapshots` to clean up."""
+    out: list[TransientSnapshot] = []
+    try:
+        ec2 = client_factory("ec2", region=region)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("auto_snapshot: ec2 client failed in %s: %s",
+                     region, e)
+        return out
+    for inst_id, vol_ids in instances:
+        for vol_id in vol_ids:
+            try:
+                resp = ec2.create_snapshot(
+                    VolumeId=vol_id,
+                    Description=f"strix-transient-{inst_id}",
+                    TagSpecifications=[{
+                        "ResourceType": "snapshot",
+                        "Tags": [
+                            {"Key": "strix-transient", "Value": "true"},
+                            {"Key": "strix-source-instance",
+                             "Value": inst_id},
+                        ],
+                    }],
+                )
+                snap_id = resp.get("SnapshotId")
+                if snap_id:
+                    out.append(TransientSnapshot(
+                        snapshot_id=snap_id, volume_id=vol_id,
+                        instance_id=inst_id, region=region,
+                    ))
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "auto_snapshot: create_snapshot(%s) failed: %s",
+                    vol_id, e,
+                )
+    return out
+
+
+def delete_transient_snapshots(
+    client_factory: Any, snapshots: list[TransientSnapshot],
+) -> tuple[int, int]:
+    """Delete every transient snapshot. Returns
+    `(deleted_count, failed_count)`. Failures are logged but
+    don't raise — operator manual cleanup is the fallback path."""
+    deleted, failed = 0, 0
+    # Group by region for client efficiency.
+    by_region: dict[str, list[TransientSnapshot]] = {}
+    for s in snapshots:
+        by_region.setdefault(s.region, []).append(s)
+    for region, snaps in by_region.items():
+        try:
+            ec2 = client_factory("ec2", region=region)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "auto_snapshot: ec2 client failed for cleanup "
+                "in %s: %s — manual cleanup required for %d "
+                "snapshot(s)", region, e, len(snaps),
+            )
+            failed += len(snaps)
+            continue
+        for s in snaps:
+            try:
+                ec2.delete_snapshot(SnapshotId=s.snapshot_id)
+                deleted += 1
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "auto_snapshot: delete_snapshot(%s) failed: "
+                    "%s — manual cleanup required", s.snapshot_id, e,
+                )
+                failed += 1
+    return deleted, failed
+
+
+def auto_snapshot_and_scan(
+    client_factory: Any,
+    *,
+    regions: list[str] | None = None,
+    max_instances_per_region: int = 25,
+    cleanup_on_completion: bool = True,
+    timeout_seconds: int = _DEFAULT_TIMEOUT,
+    _subprocess_run=subprocess.run,
+) -> tuple[list[AgentlessScanResult], dict[str, Any]]:
+    """End-to-end: list running instances → snapshot each
+    attached volume → run `trivy vm` on each snapshot → delete
+    the snapshots.
+
+    Args:
+        client_factory: boto3 client factory (same shape as
+            `cspm.aws.client.make_default_client_factory()`).
+        regions: list of regions. None → us-east-1.
+        max_instances_per_region: hard cap to bound the cost.
+            Each snapshot is $0.05/GB plus per-block-API charges.
+        cleanup_on_completion: when False, snapshots remain in
+            the account for offline analysis. Default True —
+            strix is read-only-by-contract; transient snapshots
+            should be ephemeral.
+        timeout_seconds: per-snapshot scan timeout.
+
+    Returns:
+        `(scan_results, lifecycle_summary)`. `lifecycle_summary`
+        has `instances_discovered`, `snapshots_created`,
+        `snapshots_deleted`, `snapshots_failed`,
+        `manual_cleanup_required` (list of snapshot IDs that
+        weren't deleted, for operator follow-up).
+    """
+    region_list = list(regions) if regions else ["us-east-1"]
+    lifecycle: dict[str, Any] = {
+        "instances_discovered": 0,
+        "snapshots_created": 0,
+        "snapshots_deleted": 0,
+        "snapshots_failed": 0,
+        "manual_cleanup_required": [],
+        "per_region_errors": {},
+    }
+    all_snapshots: list[TransientSnapshot] = []
+    for region in region_list:
+        instances = discover_running_instances_and_volumes(
+            client_factory, region=region,
+            max_instances=max_instances_per_region,
+        )
+        lifecycle["instances_discovered"] += len(instances)
+        snaps = create_transient_snapshots(
+            client_factory, instances, region=region,
+        )
+        all_snapshots.extend(snaps)
+        lifecycle["snapshots_created"] += len(snaps)
+
+    if not all_snapshots:
+        return [], lifecycle
+
+    # Run the scan.
+    scan_results = scan_snapshots(
+        [s.snapshot_id for s in all_snapshots],
+        max_snapshots=len(all_snapshots),
+        timeout_seconds=timeout_seconds,
+        _subprocess_run=_subprocess_run,
+    )
+
+    # Cleanup.
+    if cleanup_on_completion:
+        deleted, failed = delete_transient_snapshots(
+            client_factory, all_snapshots,
+        )
+        lifecycle["snapshots_deleted"] = deleted
+        lifecycle["snapshots_failed"] = failed
+        if failed:
+            # Surface the un-deleted snapshot IDs so an operator
+            # can `aws ec2 delete-snapshot` them manually.
+            lifecycle["manual_cleanup_required"] = [
+                {"snapshot_id": s.snapshot_id, "region": s.region,
+                 "source_instance": s.instance_id}
+                for s in all_snapshots
+            ]
+    else:
+        lifecycle["manual_cleanup_required"] = [
+            {"snapshot_id": s.snapshot_id, "region": s.region,
+             "source_instance": s.instance_id}
+            for s in all_snapshots
+        ]
+
+    # Annotate scan results with source-instance attribution.
+    for r, snap in zip(scan_results, all_snapshots):
+        r.metadata.setdefault("source_instance", snap.instance_id)
+        r.metadata.setdefault("source_volume", snap.volume_id)
+        r.metadata.setdefault("source_region", snap.region)
+
+    return scan_results, lifecycle
+
+
 def summarise(results: list[AgentlessScanResult]) -> dict[str, Any]:
     """Aggregate counts + per-snapshot breakdown for
     tool_metadata."""
