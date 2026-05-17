@@ -74,6 +74,13 @@ from strix.cloud_attack_paths.agentless_scan import (
     scan_snapshots,
     summarise as summarise_agentless,
 )
+from strix.cloud_attack_paths.cloudtrail_detection import (
+    BUILTIN_RULES as CDR_BUILTIN_RULES,
+    CloudTrailFinding,
+    detect as detect_cloudtrail,
+    load_events_from_file as load_cloudtrail_events,
+    summarise as summarise_cdr,
+)
 from strix.cloud_attack_paths.discovery import discover_aws_assets
 from strix.cloud_attack_paths.ingest import build_graph_from_cspm
 from strix.cloud_attack_paths.multi_account import (
@@ -150,6 +157,12 @@ __all__ = [
     "AgentlessScanResult",
     "is_trivy_vm_available",
     "summarise_agentless",
+    # CDR (CloudTrail-based detection)
+    "detect_cloudtrail",
+    "load_cloudtrail_events",
+    "CloudTrailFinding",
+    "summarise_cdr",
+    "CDR_BUILTIN_RULES",
     # Live-probe API (opt-in PoC verification)
     "ProbeResult",
     "PROBE_VERIFIED",

@@ -159,6 +159,8 @@ def scan_cloud_attack_paths(
     auto_discover_assets: bool = True,
     additional_role_arns: list[str] | None = None,
     agentless_snapshot_ids: list[str] | None = None,
+    cloudtrail_events_path: str | None = None,
+    cloudtrail_events: list[dict[str, Any]] | None = None,
 ) -> SpecialistResult:
     """Run a CSPM scan, build the cloud graph, detect attack paths,
     emit each path to the tracer.
@@ -201,6 +203,14 @@ def scan_cloud_attack_paths(
             into the tracer output as `category=agentless_vm_cve`.
             Wiz's biggest moat against agent-based competitors;
             v1 wraps Trivy's EBS-snapshot scanner. AWS-only.
+        cloudtrail_events_path: file path to a CloudTrail event
+            export (JSON-lines OR `{"Records": [...]}` bundle).
+            When set, runs the CDR rule engine against the events
+            and emits per-rule findings as `category=cdr_detection`.
+        cloudtrail_events: alternative to `cloudtrail_events_path`
+            — pre-parsed event list. Useful when the caller is
+            ingesting from `cloudtrail:LookupEvents` API or
+            another live source.
 
     Returns:
         `SpecialistResult` with one finding per detected attack
@@ -310,6 +320,35 @@ def scan_cloud_attack_paths(
                 "error": f"{type(e).__name__}: {e}",
             })
 
+    # CDR — CloudTrail rule engine (masterroadmap §5 P3). Pure-
+    # data transformation over a caller-supplied event list. Findings
+    # adapt to CspmFinding shape via `.to_cspm_finding()` so they
+    # ride the existing tracer + compliance pipeline. AWS-only.
+    cdr_summary: dict[str, Any] | None = None
+    if provider == "aws" and (cloudtrail_events_path or cloudtrail_events):
+        try:
+            from strix.cloud_attack_paths.cloudtrail_detection import (  # noqa: PLC0415
+                detect, load_events_from_file,
+                summarise as summarise_cdr,
+            )
+            events_list: list[dict[str, Any]] = list(cloudtrail_events or [])
+            if cloudtrail_events_path:
+                events_list.extend(
+                    load_events_from_file(cloudtrail_events_path),
+                )
+            cdr_findings = detect(events_list)
+            findings.extend(f.to_cspm_finding() for f in cdr_findings)
+            cdr_summary = summarise_cdr(cdr_findings)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "scan_cloud_attack_paths: CDR rule engine failed: "
+                "%s", e, exc_info=True,
+            )
+            cspm_errors.append({
+                "source": "cdr",
+                "error": f"{type(e).__name__}: {e}",
+            })
+
     report = analyze_cloud_attack_paths(
         cspm_findings=findings, patterns=patterns,
         enable_live_probes=enable_live_probes,
@@ -404,6 +443,8 @@ def scan_cloud_attack_paths(
         tool_metadata["multi_account_summary"] = multi_account_summary
     if agentless_summary is not None:
         tool_metadata["agentless_scan_summary"] = agentless_summary
+    if cdr_summary is not None:
+        tool_metadata["cdr_summary"] = cdr_summary
     if any_probes_ran:
         tool_metadata["live_probes_summary"] = live_probes_summary
         tool_metadata["live_probes_enabled"] = True
