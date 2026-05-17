@@ -74,6 +74,24 @@ def _stub_scan_aws_account_with(*findings: CspmFinding):
     return _stub
 
 
+class _StubAwsReport:
+    """Mirror of `strix.cspm.aws.scanner.AwsCspmReport` — only the
+    fields `scan_cloud_account`'s boto3-fallback path reads."""
+
+    def __init__(self, findings):
+        self.findings = findings
+        self.errors = []
+        self.account_id = "123456789012"
+        self.regions_scanned = ["us-east-1"]
+
+    @property
+    def findings_by_service(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for f in self.findings:
+            out[f.service] = out.get(f.service, 0) + 1
+        return out
+
+
 def test_prefers_prowler_when_available(monkeypatch) -> None:
     monkeypatch.setattr(tools_module, "is_prowler_available", lambda: True)
     monkeypatch.setattr(tools_module, "run_prowler", _stub_run_prowler_ok)
@@ -292,10 +310,175 @@ def test_findings_sorted_critical_first(monkeypatch) -> None:
     monkeypatch.setattr(tools_module, "is_prowler_available", lambda: True)
     monkeypatch.setattr(tools_module, "run_prowler", _stub_run_prowler_ok)
 
-    result = scan_cloud_account(provider="aws")
+    result = scan_cloud_account(provider="aws", include_attack_paths=False)
     severities = [d["severity"] for d in result["findings"]]
     sev_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
     ranks = [sev_rank[s] for s in severities]
     assert ranks == sorted(ranks, reverse=True), (
         f"findings not severity-descending: {severities}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Attack-path piggyback (Option B wiring — webappsec gets toxic
+# combinations through the existing CSPM scan pipeline with NO
+# wrapper-side changes).
+# ---------------------------------------------------------------------------
+
+
+def _stub_findings_that_trigger_attack_paths():
+    """A finding set crafted to fire at least one attack-path
+    pattern: root-unsafe (cap_root_unsafe) + public storage with
+    credential-shaped name (cap_public_storage_credentials_risk)."""
+    return [
+        CspmFinding(
+            rule_id="AWS_IAM_ROOT_ACCESS_KEY",
+            severity="critical",
+            message="root account access keys exist",
+            service="iam", region=None,
+            resource_arn="arn:aws:iam::*:root",
+            cwe="CWE-269", category="misconfig",
+        ),
+        CspmFinding(
+            rule_id="AWS_S3_PUBLIC_ACL",
+            severity="critical",
+            message="public ACL on prod-tfstate",
+            service="s3", region=None,
+            resource_arn="arn:aws:s3:::prod-tfstate",
+            cwe="CWE-732", category="misconfig",
+        ),
+    ]
+
+
+def test_attack_paths_emitted_by_default(monkeypatch, _tracer_reset) -> None:
+    """The wrapper integration contract: scan_cloud_account ships
+    attack paths as additional tracer findings by default. webappsec
+    sees them in the same `vulnerabilities/*.md` round-trip as the
+    underlying CSPM findings."""
+    monkeypatch.setattr(tools_module, "is_prowler_available", lambda: False)
+    monkeypatch.setattr(
+        tools_module, "scan_aws_account",
+        lambda **_: _StubAwsReport(_stub_findings_that_trigger_attack_paths()),
+    )
+
+    tracer = _tracer_reset
+    result = scan_cloud_account(provider="aws")
+    assert result["status"] == "ok"
+
+    # Metadata exposes the attack-path summary.
+    assert "attack_paths_summary" in result["tool_metadata"]
+    summary = result["tool_metadata"]["attack_paths_summary"]
+    assert summary["total"] >= 1
+    assert result["tool_metadata"]["attack_paths_emitted_to_tracer"] >= 1
+
+    # Tracer reports carry the canonical `cloud_attack_path` category.
+    cap_reports = [
+        r for r in tracer.vulnerability_reports
+        if r.get("category") == "cloud_attack_path"
+    ]
+    assert cap_reports
+    # And the rule_id namespace matches the attack-path pattern IDs.
+    assert all(
+        (r.get("rule_id") or "").startswith("cap_") for r in cap_reports
+    )
+
+
+def test_attack_paths_opt_out_skips_emission(monkeypatch, _tracer_reset) -> None:
+    """`include_attack_paths=False` keeps the legacy behaviour —
+    callers wanting only CSPM findings (tests, minimal-noise scans)
+    can suppress the piggyback."""
+    monkeypatch.setattr(tools_module, "is_prowler_available", lambda: False)
+    monkeypatch.setattr(
+        tools_module, "scan_aws_account",
+        lambda **_: _StubAwsReport(_stub_findings_that_trigger_attack_paths()),
+    )
+
+    tracer = _tracer_reset
+    result = scan_cloud_account(
+        provider="aws", include_attack_paths=False,
+    )
+    assert result["status"] == "ok"
+    assert "attack_paths_summary" not in result["tool_metadata"]
+    # Zero `cloud_attack_path` findings on the tracer.
+    cap_reports = [
+        r for r in tracer.vulnerability_reports
+        if r.get("category") == "cloud_attack_path"
+    ]
+    assert cap_reports == []
+
+
+def test_attack_paths_pattern_allowlist_passes_through(
+    monkeypatch, _tracer_reset,
+) -> None:
+    """The pattern allow-list reaches `analyze_cloud_attack_paths`
+    intact — wrappers can narrow the analyzer (e.g. only root
+    unsafe + wildcard admin) for fast scans."""
+    monkeypatch.setattr(tools_module, "is_prowler_available", lambda: False)
+    monkeypatch.setattr(
+        tools_module, "scan_aws_account",
+        lambda **_: _StubAwsReport(_stub_findings_that_trigger_attack_paths()),
+    )
+
+    result = scan_cloud_account(
+        provider="aws",
+        attack_path_patterns=["cap_root_unsafe"],
+    )
+    summary = result["tool_metadata"]["attack_paths_summary"]
+    pattern_keys = [k for k in summary if k.startswith("pattern:")]
+    assert pattern_keys == ["pattern:cap_root_unsafe"]
+
+
+def test_attack_path_analysis_failure_does_not_block_cspm_emit(
+    monkeypatch, _tracer_reset,
+) -> None:
+    """If the analyzer raises (e.g. an upstream import broke), the
+    underlying CSPM findings MUST still emit to the tracer. Drift
+    in the optional piggyback can never mask the primary signal."""
+    monkeypatch.setattr(tools_module, "is_prowler_available", lambda: False)
+    monkeypatch.setattr(
+        tools_module, "scan_aws_account",
+        lambda **_: _StubAwsReport([
+            CspmFinding(
+                rule_id="AWS_S3_PUBLIC_ACL", severity="critical",
+                message="public", service="s3", region=None,
+                resource_arn="arn:aws:s3:::data",
+                cwe="CWE-732", category="misconfig",
+            ),
+        ]),
+    )
+    # Make the analyzer raise.
+    import strix.cloud_attack_paths.api as cap_api
+
+    def _boom(**_kwargs):
+        raise RuntimeError("synthetic")
+    monkeypatch.setattr(cap_api, "analyze_cloud_attack_paths", _boom)
+
+    tracer = _tracer_reset
+    result = scan_cloud_account(provider="aws")
+    assert result["status"] == "ok"
+    # CSPM emit happened.
+    cspm_reports = [
+        r for r in tracer.vulnerability_reports
+        if r.get("rule_id") == "AWS_S3_PUBLIC_ACL"
+    ]
+    assert len(cspm_reports) == 1
+    # Failure surfaced as a soft error in metadata.
+    errors = result["tool_metadata"]["errors"]
+    assert any(e.get("source") == "attack_paths" for e in errors)
+
+
+def test_no_findings_skips_attack_path_analysis(
+    monkeypatch, _tracer_reset,
+) -> None:
+    """When CSPM returns zero findings, attack-path analysis is
+    correctly skipped — no spurious empty `attack_paths_summary`,
+    no empty graph build."""
+    monkeypatch.setattr(tools_module, "is_prowler_available", lambda: False)
+    monkeypatch.setattr(
+        tools_module, "scan_aws_account",
+        lambda **_: _StubAwsReport([]),
+    )
+
+    result = scan_cloud_account(provider="aws")
+    assert result["status"] == "ok"
+    assert "attack_paths_summary" not in result["tool_metadata"]

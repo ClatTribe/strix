@@ -184,6 +184,8 @@ def scan_cloud_account(
     prefer_prowler: bool = True,
     prowler_compliance: list[str] | None = None,
     prowler_services: list[str] | None = None,
+    include_attack_paths: bool = True,
+    attack_path_patterns: list[str] | None = None,
 ) -> SpecialistResult:
     """Read-only CSPM scan of a cloud account.
 
@@ -205,6 +207,19 @@ def scan_cloud_account(
             framework subset for faster scans.
         prowler_services: optional Prowler `--service` filter
             (e.g. `["s3", "iam"]`).
+        include_attack_paths: when True (default), runs the graph-
+            based attack-path analyzer
+            (`strix.cloud_attack_paths.analyze_cloud_attack_paths`)
+            over the CSPM findings AFTER they're emitted and emits
+            each detected toxic combination as an additional tracer
+            finding with `category=cloud_attack_path`. Free
+            piggyback — no extra network calls, just CPU over the
+            already-collected findings. Set False in tests / minimal
+            scans where the agent only needs the underlying CSPM
+            output.
+        attack_path_patterns: optional allow-list of attack-path
+            pattern IDs to run (e.g. `["cap_root_unsafe"]`). None
+            runs every built-in pattern.
 
     Findings flow through the standard compliance enricher.
     Prowler-supplied per-finding compliance maps union with
@@ -310,6 +325,64 @@ def scan_cloud_account(
             f"{f.region or 'global'}/{f.resource_arn} ({f.severity})"
         )
 
+    # Attack-path analysis (PR #293 wiring — Option B / "smallest
+    # delta" from the wrapper integration audit). Runs over the
+    # already-collected findings; no extra network calls. Default-on
+    # so webappsec gets toxic-combination findings flowing through
+    # the existing tracer pipeline without any wrapper-side change —
+    # each path emits as `category=cloud_attack_path` and rides the
+    # same `vulnerabilities/*.md` round-trip the wrapper's worker
+    # already ingests.
+    attack_paths_summary: dict[str, int] | None = None
+    attack_paths_emitted = 0
+    if include_attack_paths and findings:
+        try:
+            # Lazy-import so we don't drag the cloud_attack_paths
+            # package into every CSPM specialist load (it's still
+            # standalone-callable via `scan_cloud_attack_paths`).
+            from strix.cloud_attack_paths.api import (  # noqa: PLC0415
+                analyze_cloud_attack_paths,
+            )
+            from strix.cloud_attack_paths.tools import (  # noqa: PLC0415
+                _emit_attack_path,
+            )
+
+            ap_report = analyze_cloud_attack_paths(
+                cspm_findings=findings,
+                patterns=attack_path_patterns,
+            )
+            attack_paths_summary = ap_report.summary
+            target_label = f"cspm:{provider}"
+            for path in ap_report.paths:
+                rid = _emit_attack_path(path=path, target=target_label)
+                if rid:
+                    attack_paths_emitted += 1
+                drafts.append(FindingDraft(
+                    title=f"[cloud-attack-path] {path.title}"[:480],
+                    severity=path.severity,
+                    cwe=None,
+                    endpoint=(path.hops[0] if path.hops else target_label),
+                    category="cloud_attack_path",
+                    verification_status="verified",
+                    confidence=path.confidence or 0.95,
+                    description=path.narrative[:480],
+                ))
+                evidence.append(
+                    f"cap:{path.pattern_id} sev={path.severity} "
+                    f"hops={len(path.hops)}"
+                )
+        except Exception as e:  # noqa: BLE001
+            # Attack-path analysis failure must NEVER block the CSPM
+            # findings emit — they're already on the tracer at this
+            # point. Surface as a soft error.
+            logger.warning(
+                "cspm: attack-path analysis failed: %s", e, exc_info=True,
+            )
+            errors.append({
+                "source": "attack_paths",
+                "error": f"{type(e).__name__}: {e}",
+            })
+
     tool_metadata.update({
         "engine": engine_used,
         "findings_total": len(findings),
@@ -322,6 +395,9 @@ def scan_cloud_account(
         ),
         "errors": errors[:10],
     })
+    if attack_paths_summary is not None:
+        tool_metadata["attack_paths_summary"] = attack_paths_summary
+        tool_metadata["attack_paths_emitted_to_tracer"] = attack_paths_emitted
 
     return SpecialistResult(
         status="ok",
@@ -333,6 +409,9 @@ def scan_cloud_account(
             "IaC alignment",
             "for cross-account scans, repeat with --role-arn against "
             "each account in the organization",
+            "review `cloud_attack_path` findings first — each chains "
+            "multiple CSPM hits into a single concrete attacker "
+            "scenario with concrete remediation",
         ],
         tool_metadata=tool_metadata,
     )
