@@ -67,6 +67,13 @@ from strix.cloud_attack_paths.graph import (
     EDGE_GRANTS_ACCESS_TO,
     EDGE_HAS_POLICY,
 )
+from strix.cloud_attack_paths.agentless_scan import (
+    AgentlessScanResult,
+    is_trivy_vm_available,
+    scan_snapshot,
+    scan_snapshots,
+    summarise as summarise_agentless,
+)
 from strix.cloud_attack_paths.discovery import discover_aws_assets
 from strix.cloud_attack_paths.ingest import build_graph_from_cspm
 from strix.cloud_attack_paths.multi_account import (
@@ -137,6 +144,12 @@ __all__ = [
     "union_findings",
     "union_assets",
     "summarise_multi_account",
+    # Agentless VM scanning
+    "scan_snapshot",
+    "scan_snapshots",
+    "AgentlessScanResult",
+    "is_trivy_vm_available",
+    "summarise_agentless",
     # Live-probe API (opt-in PoC verification)
     "ProbeResult",
     "PROBE_VERIFIED",
