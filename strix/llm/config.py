@@ -33,7 +33,17 @@ class LLMConfig:
 
         self.timeout = timeout or int(Config.get("llm_timeout") or "300")
 
-        self.scan_mode = scan_mode if scan_mode in ["quick", "standard", "deep"] else "deep"
+        # engine-wishlist §2 — `initial` is the fast first-pass
+        # profile for newly-discovered assets. Surface mapping +
+        # CVE / secret / IaC scans only; skips MOAK exploit
+        # verification, auth-bypass probing, business-logic
+        # reasoning, deep crawl. Targets 2-5 min per asset at
+        # ~10% of standard-mode cost.
+        self.scan_mode = (
+            scan_mode
+            if scan_mode in ["initial", "quick", "standard", "deep"]
+            else "deep"
+        )
         self.is_whitebox = is_whitebox
         self.interactive = interactive
         self.reasoning_effort = reasoning_effort
