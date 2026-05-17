@@ -26,6 +26,9 @@ from strix.compliance.frameworks import (
 def test_all_frameworks_registered() -> None:
     from strix.compliance.frameworks import (
         FRAMEWORK_CIS,
+        FRAMEWORK_CIS_AWS,
+        FRAMEWORK_CIS_DOCKER,
+        FRAMEWORK_CIS_KUBERNETES,
         FRAMEWORK_GDPR,
         FRAMEWORK_NIST_800_53,
         FRAMEWORK_OWASP_TOP10,
@@ -39,7 +42,10 @@ def test_all_frameworks_registered() -> None:
     assert FRAMEWORK_GDPR in ALL_FRAMEWORKS
     assert FRAMEWORK_NIST_800_53 in ALL_FRAMEWORKS
     assert FRAMEWORK_CIS in ALL_FRAMEWORKS
-    assert len(ALL_FRAMEWORKS) == 9
+    assert FRAMEWORK_CIS_DOCKER in ALL_FRAMEWORKS
+    assert FRAMEWORK_CIS_KUBERNETES in ALL_FRAMEWORKS
+    assert FRAMEWORK_CIS_AWS in ALL_FRAMEWORKS
+    assert len(ALL_FRAMEWORKS) == 12
 
 
 def test_hipaa_has_technical_safeguards() -> None:

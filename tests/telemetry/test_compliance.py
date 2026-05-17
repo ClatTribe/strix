@@ -342,3 +342,91 @@ def test_recent_pr_cwes_all_have_at_least_one_control(cwe) -> None:
         "soc2", "pci_dss", "iso27001", "owasp_asvs",
         "nist_800_53", "owasp_top10", "hipaa", "gdpr", "cis",
     ))
+
+
+# ---------------------------------------------------------------------------
+# CIS Benchmark mapping via rule_id (audit item §10)
+# ---------------------------------------------------------------------------
+
+
+def test_iac_finding_with_rule_id_gets_cis_kubernetes_control() -> None:
+    """K8S_PRIVILEGED_CONTAINER finding should surface CIS
+    Kubernetes 5.2.1 in the compliance overlay. Without rule_id
+    plumbing, the CWE-732 mapping alone wouldn't reach the
+    CIS catalogs at all."""
+    out = compliance.enrich_finding_with_compliance({
+        "cwe": "CWE-732",
+        "category": "misconfig",
+        "rule_id": "K8S_PRIVILEGED_CONTAINER",
+        "title": "Privileged container",
+    })
+    controls = out["compliance_controls"]
+    assert "5.2.1" in controls["cis_kubernetes"]
+    # Also fans out to CIS Docker 5.4 (privileged-container is
+    # cross-platform).
+    assert "5.4" in controls["cis_docker"]
+
+
+def test_iac_finding_with_tf_rule_id_gets_cis_aws_control() -> None:
+    out = compliance.enrich_finding_with_compliance({
+        "cwe": "CWE-732",
+        "rule_id": "TF_AWS_IAM_WILDCARD_POLICY",
+    })
+    controls = out["compliance_controls"]
+    assert "1.16" in controls["cis_aws"]
+
+
+def test_rule_id_in_metadata_is_picked_up() -> None:
+    """Some emit paths stash rule_id under `metadata.rule_id`
+    rather than top-level. The enricher should look both places."""
+    out = compliance.enrich_finding_with_compliance({
+        "metadata": {"rule_id": "K8S_RBAC_WILDCARD"},
+        "title": "wildcard",
+    })
+    controls = out["compliance_controls"]
+    assert "5.1.3" in controls["cis_kubernetes"]
+
+
+def test_rule_id_without_cwe_still_attaches_controls() -> None:
+    """A finding whose only signal is rule_id (no CWE, no category)
+    still gets a `compliance_controls` block — otherwise CIS
+    Benchmark evidence would be lost for rules that don't carry
+    a CWE."""
+    out = compliance.enrich_finding_with_compliance({
+        "rule_id": "dockerfile-env-hardcoded-secret",
+    })
+    assert "compliance_controls" in out
+    assert "4.10" in out["compliance_controls"]["cis_docker"]
+
+
+def test_container_image_signing_category_attaches_controls() -> None:
+    """No CWE, no rule_id — just `category=image_signing` (the
+    container_image scanner's emit shape for cosign findings)."""
+    out = compliance.enrich_finding_with_compliance({
+        "category": "image_signing",
+        "title": "unsigned image",
+    })
+    assert "compliance_controls" in out
+    assert "4.5" in out["compliance_controls"]["cis_docker"]
+
+
+def test_tracer_round_trip_carries_rule_id_to_compliance() -> None:
+    """End-to-end: a finding emitted via Tracer.add_vulnerability_report
+    with rule_id=... should have CIS controls on the resulting
+    report. Pins the wiring all the way from the iac/container
+    emit path through tracer through enrichment."""
+    tracer = Tracer("cis-test")
+    set_global_tracer(tracer)
+    rid = tracer.add_vulnerability_report(
+        title="K8s privileged container",
+        severity="critical",
+        cwe="CWE-732",
+        category="misconfig",
+        rule_id="K8S_PRIVILEGED_CONTAINER",
+    )
+    report = next(r for r in tracer.get_existing_vulnerabilities()
+                  if r["id"] == rid)
+    assert report["rule_id"] == "K8S_PRIVILEGED_CONTAINER"
+    controls = report["compliance_controls"]
+    assert "5.2.1" in controls["cis_kubernetes"]
+    assert "5.4" in controls["cis_docker"]

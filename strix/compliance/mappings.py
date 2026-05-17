@@ -41,6 +41,9 @@ from typing import Iterable
 
 from strix.compliance.frameworks import (
     FRAMEWORK_CIS,
+    FRAMEWORK_CIS_AWS,
+    FRAMEWORK_CIS_DOCKER,
+    FRAMEWORK_CIS_KUBERNETES,
     FRAMEWORK_GDPR,
     FRAMEWORK_HIPAA,
     FRAMEWORK_ISO27001,
@@ -618,20 +621,193 @@ CATEGORY_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
         (FRAMEWORK_OWASP_ASVS, "V14.2"),
         (FRAMEWORK_NIST_800_53, "CM-6"),
     ],
+    # container_image scan categories — distinct from `misconfig`
+    # (IaC) because the wrapper renders these as a separate panel.
+    "misconfiguration": [
+        (FRAMEWORK_SOC2, "CC6.1"),
+        (FRAMEWORK_SOC2, "CC8.1"),
+        (FRAMEWORK_ISO27001, "A.8.32"),
+        (FRAMEWORK_OWASP_ASVS, "V14.2"),
+        (FRAMEWORK_NIST_800_53, "CM-6"),
+    ],
+    "secrets": [
+        (FRAMEWORK_SOC2, "CC6.1"),
+        (FRAMEWORK_ISO27001, "A.8.5"),
+        (FRAMEWORK_ISO27001, "A.8.24"),
+        (FRAMEWORK_PCI_DSS, "8.2.1"),
+        (FRAMEWORK_OWASP_ASVS, "V2.10"),
+        (FRAMEWORK_HIPAA, "164.308(a)(5)(ii)(D)"),
+        (FRAMEWORK_OWASP_TOP10, "A07:2021"),
+        (FRAMEWORK_CIS_DOCKER, "4.10"),
+    ],
+    # Container image signing (cosign / Sigstore) — supply-chain
+    # integrity. Maps to CIS Docker 4.5 + SLSA-adjacent controls.
+    "image_signing": [
+        (FRAMEWORK_SOC2, "CC6.8"),
+        (FRAMEWORK_SOC2, "CC8.1"),
+        (FRAMEWORK_ISO27001, "A.5.21"),
+        (FRAMEWORK_NIST_800_53, "SI-7"),
+        (FRAMEWORK_OWASP_TOP10, "A08:2021"),
+        (FRAMEWORK_CIS_DOCKER, "4.5"),
+    ],
+    # Container CVE scan (Trivy / Grype) — vulnerable-component
+    # detection on the image layer rather than the lockfile.
+    "sca": [
+        (FRAMEWORK_SOC2, "CC6.8"),
+        (FRAMEWORK_ISO27001, "A.5.21"),
+        (FRAMEWORK_ISO27001, "A.8.7"),
+        (FRAMEWORK_PCI_DSS, "6.3.2"),
+        (FRAMEWORK_OWASP_ASVS, "V14.2.4"),
+        (FRAMEWORK_HIPAA, "164.308(a)(5)(ii)(B)"),
+        (FRAMEWORK_NIST_800_53, "SI-2"),
+        (FRAMEWORK_OWASP_TOP10, "A06:2021"),
+        (FRAMEWORK_CIS, "16.11"),
+    ],
+    # Hard-coded secret category — different label from
+    # `secrets`. SAST emits this on CWE-798 hits.
+    "hardcoded_secret": [
+        (FRAMEWORK_SOC2, "CC6.1"),
+        (FRAMEWORK_ISO27001, "A.8.5"),
+        (FRAMEWORK_PCI_DSS, "8.2.1"),
+        (FRAMEWORK_OWASP_ASVS, "V2.10"),
+        (FRAMEWORK_HIPAA, "164.308(a)(5)(ii)(D)"),
+        (FRAMEWORK_OWASP_TOP10, "A07:2021"),
+        (FRAMEWORK_CIS_DOCKER, "4.10"),
+    ],
+}
+
+
+# ---------------------------------------------------------------------------
+# IaC rule_id → controls (CIS Benchmark depth)
+# ---------------------------------------------------------------------------
+
+# CWE-only mapping is too coarse for CIS Benchmark evidence: an
+# auditor asking "does strix attest CIS Kubernetes 5.2.1?" needs
+# a direct rule-pointer, not a CWE that covers a dozen unrelated
+# controls. This map is the inverse — specific rule_id → the
+# narrow set of CIS controls that rule supplies evidence for.
+#
+# Why we keep this *alongside* (not replacing) CWE_TO_CONTROLS:
+# the SOC 2 / ISO / PCI / ASVS / HIPAA mappings stay CWE-driven
+# because those frameworks are CWE-class-shaped. CIS Benchmark is
+# rule-specific — it's the granular evidence layer.
+RULE_ID_TO_CONTROLS: dict[str, list[tuple[str, str]]] = {
+    # ---- Terraform / AWS (CIS AWS Foundations) ----
+    "TF_AWS_S3_PUBLIC_ACL": [
+        (FRAMEWORK_CIS_AWS, "2.1.5"),
+    ],
+    "TF_AWS_S3_NO_VERSIONING": [
+        (FRAMEWORK_CIS_AWS, "2.1.7"),
+    ],
+    "TF_AWS_EBS_NO_ENCRYPTION": [
+        (FRAMEWORK_CIS_AWS, "2.2.1"),
+    ],
+    "TF_AWS_RDS_NO_ENCRYPTION": [
+        (FRAMEWORK_CIS_AWS, "2.3.1"),
+    ],
+    "TF_AWS_IAM_WILDCARD_POLICY": [
+        (FRAMEWORK_CIS_AWS, "1.16"),
+    ],
+    "TF_AWS_SG_OPEN_INGRESS": [
+        (FRAMEWORK_CIS_AWS, "5.2"),
+    ],
+    "TF_HARDCODED_SECRET": [
+        (FRAMEWORK_CIS_DOCKER, "4.10"),
+    ],
+
+    # ---- Kubernetes (CIS Kubernetes Benchmark) ----
+    "K8S_PRIVILEGED_CONTAINER": [
+        (FRAMEWORK_CIS_KUBERNETES, "5.2.1"),
+        (FRAMEWORK_CIS_DOCKER, "5.4"),
+    ],
+    "K8S_HOST_NAMESPACE_SHARING": [
+        (FRAMEWORK_CIS_KUBERNETES, "5.2.2"),
+        (FRAMEWORK_CIS_KUBERNETES, "5.2.3"),
+        (FRAMEWORK_CIS_KUBERNETES, "5.2.4"),
+        (FRAMEWORK_CIS_DOCKER, "5.9"),
+    ],
+    "K8S_RUN_AS_ROOT": [
+        (FRAMEWORK_CIS_KUBERNETES, "5.2.6"),
+        (FRAMEWORK_CIS_DOCKER, "4.1"),
+    ],
+    "K8S_MISSING_RESOURCE_LIMITS": [
+        (FRAMEWORK_CIS_KUBERNETES, "5.7.3"),
+    ],
+    "K8S_ALLOW_PRIV_ESC": [
+        (FRAMEWORK_CIS_KUBERNETES, "5.2.5"),
+    ],
+    "K8S_RBAC_WILDCARD": [
+        (FRAMEWORK_CIS_KUBERNETES, "5.1.3"),
+    ],
+    "K8S_SERVICE_NODEPORT": [
+        (FRAMEWORK_CIS_KUBERNETES, "5.4.2"),
+    ],
+
+    # ---- Helm (subset — chart hygiene maps to CIS Docker 4.4 /
+    # supply-chain controls) ----
+    "HELM_CHART_DEP_UNPINNED": [
+        (FRAMEWORK_CIS_DOCKER, "4.4"),
+    ],
+    "HELM_VALUES_FLOATING_IMAGE_TAG": [
+        (FRAMEWORK_CIS_DOCKER, "4.4"),
+    ],
+    "HELM_VALUES_HARDCODED_SECRET": [
+        (FRAMEWORK_CIS_DOCKER, "4.10"),
+    ],
+
+    # ---- Docker / compose (CIS Docker Benchmark) ----
+    "dockerfile-user-root": [
+        (FRAMEWORK_CIS_DOCKER, "4.1"),
+    ],
+    "dockerfile-no-user-directive": [
+        (FRAMEWORK_CIS_DOCKER, "4.1"),
+    ],
+    "dockerfile-latest-tag": [
+        (FRAMEWORK_CIS_DOCKER, "4.4"),
+    ],
+    "dockerfile-add-from-url": [
+        (FRAMEWORK_CIS_DOCKER, "4.9"),
+    ],
+    "dockerfile-env-hardcoded-secret": [
+        (FRAMEWORK_CIS_DOCKER, "4.10"),
+    ],
+    "compose-privileged-container": [
+        (FRAMEWORK_CIS_DOCKER, "5.4"),
+        (FRAMEWORK_CIS_KUBERNETES, "5.2.1"),
+    ],
+    "compose-host-network-mode": [
+        (FRAMEWORK_CIS_DOCKER, "5.9"),
+        (FRAMEWORK_CIS_KUBERNETES, "5.2.4"),
+    ],
+    "compose-docker-socket-mount": [
+        (FRAMEWORK_CIS_DOCKER, "5.31"),
+    ],
+    "compose-db-port-exposed": [
+        (FRAMEWORK_CIS_DOCKER, "5.7"),
+    ],
+    "compose-environment-hardcoded-secret": [
+        (FRAMEWORK_CIS_DOCKER, "4.10"),
+    ],
 }
 
 
 def controls_for(
     cwe: str | None = None,
     category: str | None = None,
+    rule_id: str | None = None,
 ) -> list[tuple[str, str]]:
     """Return the union of (framework, control_id) tuples for
-    a finding with the given CWE / category.
+    a finding with the given CWE / category / rule_id.
 
-    Resolution: CWE first (more specific), then category. We
-    union when BOTH map to controls — a finding with both
-    `cwe=CWE-89` AND `category=sast` gets ALL of CWE-89's
-    controls + SAST's catch-all controls.
+    Resolution: CWE + category + rule_id are ALL unioned (no
+    precedence). A finding with `cwe=CWE-732` AND
+    `rule_id=K8S_PRIVILEGED_CONTAINER` gets ALL of CWE-732's
+    CWE-class controls PLUS the rule's specific CIS Kubernetes
+    5.2.1 + CIS Docker 5.4 evidence pointers.
+
+    `rule_id` is the lever that surfaces CIS Benchmark depth —
+    CWE-class mappings are too broad for "does this rule attest
+    CIS K8S 5.2.1?" auditor questions.
     """
     out: set[tuple[str, str]] = set()
     if cwe and isinstance(cwe, str):
@@ -642,18 +818,23 @@ def controls_for(
         cat_norm = category.strip().lower()
         if cat_norm in CATEGORY_TO_CONTROLS:
             out.update(CATEGORY_TO_CONTROLS[cat_norm])
+    if rule_id and isinstance(rule_id, str):
+        rid = rule_id.strip()
+        if rid in RULE_ID_TO_CONTROLS:
+            out.update(RULE_ID_TO_CONTROLS[rid])
     return sorted(out)
 
 
 def controls_for_by_framework(
     cwe: str | None = None,
     category: str | None = None,
+    rule_id: str | None = None,
 ) -> dict[str, list[str]]:
     """Same as `controls_for` but returns
     `{framework: [control_id, ...]}` shape — what the per-finding
     decorator emits as `compliance_controls` on each finding."""
     out: dict[str, list[str]] = {}
-    for fw, cid in controls_for(cwe=cwe, category=category):
+    for fw, cid in controls_for(cwe=cwe, category=category, rule_id=rule_id):
         out.setdefault(fw, []).append(cid)
     for fw in out:
         out[fw].sort()
@@ -664,14 +845,16 @@ def covered_controls(
     frameworks: Iterable[str] | None = None,
 ) -> set[tuple[str, str]]:
     """Return every (framework, control_id) tuple that some
-    CWE OR category in our corpus maps to. The complement
-    (against `all_controls()`) is the "untested" set — controls
-    in the framework catalog that no rule in our corpus would
-    surface."""
+    CWE / category / rule_id in our corpus maps to. The
+    complement (against `all_controls()`) is the "untested"
+    set — controls in the framework catalog that no rule in
+    our corpus would surface."""
     out: set[tuple[str, str]] = set()
     for v in CWE_TO_CONTROLS.values():
         out.update(v)
     for v in CATEGORY_TO_CONTROLS.values():
+        out.update(v)
+    for v in RULE_ID_TO_CONTROLS.values():
         out.update(v)
     if frameworks is not None:
         fws = {f.lower() for f in frameworks}
@@ -682,7 +865,7 @@ def covered_controls(
 def rules_for_control(framework: str, control_id: str) -> set[str]:
     """Inverse of `controls_for` — for a given (framework,
     control_id), return the set of rule-keys (CWE IDs +
-    category labels) in our corpus that map to it.
+    category labels + rule_ids) in our corpus that map to it.
 
     The set size is the "rule-corpus depth" for that control:
     how many distinct rules strix would surface against it. An
@@ -701,6 +884,9 @@ def rules_for_control(framework: str, control_id: str) -> set[str]:
     for category, controls in CATEGORY_TO_CONTROLS.items():
         if target in controls:
             out.add(f"category:{category}")
+    for rule_id, controls in RULE_ID_TO_CONTROLS.items():
+        if target in controls:
+            out.add(f"rule:{rule_id}")
     return out
 
 

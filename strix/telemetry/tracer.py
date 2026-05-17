@@ -965,6 +965,13 @@ class Tracer:
         # ancestry. Empty / None on root findings (those NOT
         # produced by `pivot_orchestrator.run_pivot_chain`).
         pivot_chain_ancestors: list[str] | None = None,
+        # Roadmap §16 — IaC / container rule ID that produced this
+        # finding (e.g. `K8S_PRIVILEGED_CONTAINER`,
+        # `dockerfile-user-root`). Compliance enrichment uses this
+        # to derive CIS Benchmark control mappings that CWE alone
+        # is too coarse to pin down. Optional — SAST / DAST findings
+        # without a rule_id stay CWE-driven.
+        rule_id: str | None = None,
     ) -> str:
         report_id = f"vuln-{len(self.vulnerability_reports) + 1:04d}"
 
@@ -1016,6 +1023,8 @@ class Tracer:
             report["cve"] = cve.strip()
         if cwe:
             report["cwe"] = cwe.strip()
+        if isinstance(rule_id, str) and rule_id.strip():
+            report["rule_id"] = rule_id.strip()
         if code_locations:
             report["code_locations"] = code_locations
 

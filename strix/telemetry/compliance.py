@@ -43,7 +43,9 @@ import re
 from typing import Any
 
 from strix.compliance.mappings import (
+    CATEGORY_TO_CONTROLS,
     CWE_TO_CONTROLS,
+    RULE_ID_TO_CONTROLS,
     controls_for_by_framework,
 )
 
@@ -107,13 +109,40 @@ def enrich_finding_with_compliance(report: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
 
     # ---- compliance_controls ----
-    # Read from the canonical CWE → control mapping in
-    # `strix.compliance.mappings`. We only attach a value when the
-    # CWE is known — emitting `{}` would mislead wrappers into
-    # thinking the finding has been classified.
+    # Read from the canonical CWE / category / rule_id mappings in
+    # `strix.compliance.mappings`. We attach a value when ANY of
+    # the three is recognised — emitting `{}` would mislead
+    # wrappers into thinking the finding has been classified.
+    #
+    # `rule_id` is what surfaces CIS Benchmark depth: an IaC
+    # finding with `rule_id=K8S_PRIVILEGED_CONTAINER` evidences
+    # CIS Kubernetes 5.2.1 + CIS Docker 5.4 even though its CWE
+    # (CWE-732) wouldn't pinpoint either. The wrapper reads rule_id
+    # from the report top-level OR from `metadata.rule_id` (IaC
+    # findings stash it there) so the compliance overlay works
+    # regardless of which emit path produced the finding.
     cwe = (report.get("cwe") or "").strip().upper()
-    if cwe and cwe in CWE_TO_CONTROLS:
-        out["compliance_controls"] = controls_for_by_framework(cwe=cwe)
+    category = (report.get("category") or "").strip().lower()
+    rule_id = report.get("rule_id")
+    if not isinstance(rule_id, str) or not rule_id.strip():
+        meta = report.get("metadata")
+        if isinstance(meta, dict):
+            rid_meta = meta.get("rule_id")
+            if isinstance(rid_meta, str) and rid_meta.strip():
+                rule_id = rid_meta.strip()
+    if isinstance(rule_id, str):
+        rule_id = rule_id.strip() or None
+
+    if (
+        (cwe and cwe in CWE_TO_CONTROLS)
+        or (category and category in CATEGORY_TO_CONTROLS)
+        or (rule_id and rule_id in RULE_ID_TO_CONTROLS)
+    ):
+        out["compliance_controls"] = controls_for_by_framework(
+            cwe=cwe or None,
+            category=category or None,
+            rule_id=rule_id,
+        )
 
     # ---- data_classification ----
     # Build a search string from category, title, description.

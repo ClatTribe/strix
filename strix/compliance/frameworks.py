@@ -22,9 +22,24 @@ Frameworks shipped in v1:
     the verifiable subset.
 
 Out of v1 (deferred):
-  * HIPAA Security Rule, GDPR Art. 32, EU AI Act, CIS
-    Benchmarks. All add complexity (HIPAA needs legal review;
-    CIS is infrastructure-class).
+  * EU AI Act.
+
+CIS Benchmark coverage (added per audit item §10):
+  * `cis` — CIS Controls v8 (operational; AppSec-adjacent slice).
+  * `cis_docker` — CIS Docker Benchmark v1.6.0 (host + image).
+  * `cis_kubernetes` — CIS Kubernetes Benchmark v1.8.0 (Pod
+    security + RBAC + Service).
+  * `cis_aws` — CIS AWS Foundations Benchmark v3.0 (IAM + S3 +
+    RDS + EBS + Security Groups). Auditors using cloud accounts
+    consume this; our Terraform rule corpus is the evidence
+    source.
+
+These catalogs only carry controls whose evidence can be
+produced (or refuted) by a rule in the IaC / container_image /
+SCA corpus. Sections that need cluster-runtime telemetry
+(`kubectl get configmap` introspection, kube-bench audit) are
+deliberately omitted — strix can't attest them and listing them
+would mislead an auditor into thinking we did.
 """
 
 from __future__ import annotations
@@ -42,6 +57,9 @@ FRAMEWORK_OWASP_TOP10 = "owasp_top10"
 FRAMEWORK_GDPR = "gdpr"
 FRAMEWORK_NIST_800_53 = "nist_800_53"
 FRAMEWORK_CIS = "cis"
+FRAMEWORK_CIS_DOCKER = "cis_docker"
+FRAMEWORK_CIS_KUBERNETES = "cis_kubernetes"
+FRAMEWORK_CIS_AWS = "cis_aws"
 
 ALL_FRAMEWORKS = [
     FRAMEWORK_SOC2,
@@ -53,6 +71,9 @@ ALL_FRAMEWORKS = [
     FRAMEWORK_GDPR,
     FRAMEWORK_NIST_800_53,
     FRAMEWORK_CIS,
+    FRAMEWORK_CIS_DOCKER,
+    FRAMEWORK_CIS_KUBERNETES,
+    FRAMEWORK_CIS_AWS,
 ]
 
 
@@ -918,6 +939,220 @@ _CIS_CONTROLS: dict[str, Control] = {
 
 
 # ---------------------------------------------------------------------------
+# CIS Docker Benchmark v1.6.0
+# ---------------------------------------------------------------------------
+
+# Image / container-runtime hardening from CIS Docker Benchmark.
+# Section 4 = "Container Images and Build File", section 5 =
+# "Container Runtime". We only enumerate the AppSec-testable
+# subset — sections covering host-OS config (1.x, 2.x, 3.x) need
+# `kube-bench`-style live introspection that strix doesn't run.
+
+_CIS_DOCKER_CONTROLS: dict[str, Control] = {
+    "4.1": Control(
+        FRAMEWORK_CIS_DOCKER, "4.1",
+        "Ensure a user for the container has been created",
+        "Image should drop privileges via USER directive; "
+        "containers without one default to root.",
+    ),
+    "4.4": Control(
+        FRAMEWORK_CIS_DOCKER, "4.4",
+        "Ensure images are scanned and rebuilt to include "
+        "security patches",
+        "Avoid floating tags (`latest`); pin to digests or "
+        "immutable versions so the running image is the one "
+        "you scanned.",
+    ),
+    "4.5": Control(
+        FRAMEWORK_CIS_DOCKER, "4.5",
+        "Ensure Content trust for Docker is enabled",
+        "Verify image signatures (cosign / Notary) before "
+        "running. Unsigned-image deployment defeats the "
+        "supply-chain integrity story.",
+    ),
+    "4.9": Control(
+        FRAMEWORK_CIS_DOCKER, "4.9",
+        "Ensure that COPY is used instead of ADD in Dockerfiles",
+        "ADD silently unpacks tarballs and fetches URLs — "
+        "broader attack surface than COPY.",
+    ),
+    "4.10": Control(
+        FRAMEWORK_CIS_DOCKER, "4.10",
+        "Ensure secrets are not stored in Dockerfiles",
+        "ENV / ARG-baked credentials leak into image layers + "
+        "registry. Use build-time secret mounts / runtime env "
+        "instead.",
+    ),
+    "5.4": Control(
+        FRAMEWORK_CIS_DOCKER, "5.4",
+        "Ensure that privileged containers are not used",
+        "`--privileged` / `privileged: true` gives the "
+        "container near-host capabilities — defeats the "
+        "isolation boundary.",
+    ),
+    "5.7": Control(
+        FRAMEWORK_CIS_DOCKER, "5.7",
+        "Ensure privileged ports are not mapped within "
+        "containers",
+        "Avoid mapping container ports <1024 to host without "
+        "explicit need; binds expose internal services.",
+    ),
+    "5.9": Control(
+        FRAMEWORK_CIS_DOCKER, "5.9",
+        "Ensure the host's network namespace is not shared",
+        "`--net=host` / `network_mode: host` exposes the "
+        "host's full network stack to the container.",
+    ),
+    "5.31": Control(
+        FRAMEWORK_CIS_DOCKER, "5.31",
+        "Ensure that the Docker socket is not mounted inside "
+        "any containers",
+        "Mounting `/var/run/docker.sock` lets the container "
+        "control the Docker daemon — container escape pattern.",
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# CIS Kubernetes Benchmark v1.8.0
+# ---------------------------------------------------------------------------
+
+# Section 5 = "Policies" — Pod Security + RBAC + Network. This
+# is the slice strix can verify from YAML manifests. Sections
+# 1-4 cover control-plane + worker-node configuration that
+# requires live-cluster audit (kube-bench territory).
+
+_CIS_KUBERNETES_CONTROLS: dict[str, Control] = {
+    "5.1.3": Control(
+        FRAMEWORK_CIS_KUBERNETES, "5.1.3",
+        "Minimize wildcard use in Roles and ClusterRoles",
+        "`*` in apiGroups / resources / verbs grants the "
+        "subject blanket access — defeats RBAC's purpose.",
+    ),
+    "5.1.5": Control(
+        FRAMEWORK_CIS_KUBERNETES, "5.1.5",
+        "Ensure that default service accounts are not "
+        "actively used",
+        "Pods should run under a dedicated SA with the "
+        "minimum permissions needed; defaults usually have "
+        "too many.",
+    ),
+    "5.2.1": Control(
+        FRAMEWORK_CIS_KUBERNETES, "5.2.1",
+        "Minimize the admission of privileged containers",
+        "Pod Security Standard `restricted` baseline — "
+        "`securityContext.privileged=true` defeats the "
+        "container isolation boundary.",
+    ),
+    "5.2.2": Control(
+        FRAMEWORK_CIS_KUBERNETES, "5.2.2",
+        "Minimize the admission of containers wishing to "
+        "share the host process ID namespace",
+        "`hostPID=true` lets the container see + signal "
+        "every host process — defeats process isolation.",
+    ),
+    "5.2.3": Control(
+        FRAMEWORK_CIS_KUBERNETES, "5.2.3",
+        "Minimize the admission of containers wishing to "
+        "share the host IPC namespace",
+        "`hostIPC=true` lets the container access host IPC "
+        "primitives (shared memory, semaphores).",
+    ),
+    "5.2.4": Control(
+        FRAMEWORK_CIS_KUBERNETES, "5.2.4",
+        "Minimize the admission of containers wishing to "
+        "share the host network namespace",
+        "`hostNetwork=true` binds containers directly to the "
+        "host's network stack — bypasses Pod NetworkPolicy.",
+    ),
+    "5.2.5": Control(
+        FRAMEWORK_CIS_KUBERNETES, "5.2.5",
+        "Minimize the admission of containers with "
+        "allowPrivilegeEscalation",
+        "`allowPrivilegeEscalation=true` lets a process gain "
+        "more capabilities than its parent — defeats no_new_privs.",
+    ),
+    "5.2.6": Control(
+        FRAMEWORK_CIS_KUBERNETES, "5.2.6",
+        "Minimize the admission of root containers",
+        "`runAsUser=0` or unspecified runAsUser+runAsNonRoot "
+        "leaves root as the in-container uid.",
+    ),
+    "5.4.2": Control(
+        FRAMEWORK_CIS_KUBERNETES, "5.4.2",
+        "Consider external authentication / use of LoadBalancer "
+        "over NodePort",
+        "NodePort exposes a service on every node — "
+        "operationally easier but a wider attack surface than "
+        "ClusterIP+LoadBalancer.",
+    ),
+    "5.7.3": Control(
+        FRAMEWORK_CIS_KUBERNETES, "5.7.3",
+        "Apply SecurityContext to your Pods and Containers",
+        "Resource limits + securityContext fields enforce "
+        "least privilege at admission time (`limits.cpu/memory`, "
+        "capabilities, seccomp profile).",
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# CIS AWS Foundations Benchmark v3.0
+# ---------------------------------------------------------------------------
+
+# AWS-account-level config. Our Terraform rule corpus checks
+# the *intent* of these controls at the IaC layer — declarative
+# state that becomes account state at apply-time. Runtime-only
+# attestation (CloudTrail log groups, GuardDuty status) needs
+# AWS Config Service / Security Hub and is out of scope.
+
+_CIS_AWS_CONTROLS: dict[str, Control] = {
+    "1.16": Control(
+        FRAMEWORK_CIS_AWS, "1.16",
+        "Ensure IAM policies that allow full \"*:*\" "
+        "administrative privileges are not attached",
+        "Wildcard `Action: *` + `Resource: *` is an IAM "
+        "anti-pattern — replace with scoped permissions.",
+    ),
+    "2.1.5": Control(
+        FRAMEWORK_CIS_AWS, "2.1.5",
+        "Ensure that S3 Buckets are configured with "
+        "'Block public access'",
+        "`acl=public-read` / public-bucket policies expose "
+        "data to the open internet.",
+    ),
+    "2.1.7": Control(
+        FRAMEWORK_CIS_AWS, "2.1.7",
+        "Ensure MFA Delete is enabled on S3 buckets / "
+        "versioning enabled",
+        "Without versioning, accidental + malicious deletes "
+        "are irreversible.",
+    ),
+    "2.2.1": Control(
+        FRAMEWORK_CIS_AWS, "2.2.1",
+        "Ensure EBS volume encryption is enabled in all "
+        "regions",
+        "Unencrypted EBS exposes data-at-rest to snapshot "
+        "leakage + insider access.",
+    ),
+    "2.3.1": Control(
+        FRAMEWORK_CIS_AWS, "2.3.1",
+        "Ensure that encryption is enabled for RDS instances",
+        "Unencrypted RDS storage exposes database files to "
+        "snapshot leakage + backup-bucket compromise.",
+    ),
+    "5.2": Control(
+        FRAMEWORK_CIS_AWS, "5.2",
+        "Ensure no security groups allow ingress from "
+        "0.0.0.0/0 to remote server administration ports",
+        "SSH (22) / RDP (3389) open to the world is the #1 "
+        "AWS compromise vector — restrict to bastion / VPN "
+        "CIDRs only.",
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -932,6 +1167,9 @@ _FRAMEWORK_CATALOGS: dict[str, dict[str, Control]] = {
     FRAMEWORK_GDPR: _GDPR_CONTROLS,
     FRAMEWORK_NIST_800_53: _NIST_800_53_CONTROLS,
     FRAMEWORK_CIS: _CIS_CONTROLS,
+    FRAMEWORK_CIS_DOCKER: _CIS_DOCKER_CONTROLS,
+    FRAMEWORK_CIS_KUBERNETES: _CIS_KUBERNETES_CONTROLS,
+    FRAMEWORK_CIS_AWS: _CIS_AWS_CONTROLS,
 }
 
 

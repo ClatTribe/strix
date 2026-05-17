@@ -54,6 +54,7 @@ def _emit_finding(*, finding, repo_path: str) -> str | None:
             endpoint=endpoint,
             target=repo_path,
             category=finding.category or "misconfig",
+            rule_id=finding.rule_id,
             cve=None,
             cvss=None,
             verification_status="verified",
