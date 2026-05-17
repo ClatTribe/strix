@@ -159,6 +159,10 @@ def scan_cloud_attack_paths(
     auto_discover_assets: bool = True,
     additional_role_arns: list[str] | None = None,
     agentless_snapshot_ids: list[str] | None = None,
+    auto_snapshot_orchestration: bool = False,
+    auto_snapshot_regions: list[str] | None = None,
+    auto_snapshot_max_instances_per_region: int = 25,
+    auto_snapshot_cleanup: bool = True,
     cloudtrail_events_path: str | None = None,
     cloudtrail_events: list[dict[str, Any]] | None = None,
     enumerate_org_accounts: bool = False,
@@ -205,6 +209,30 @@ def scan_cloud_attack_paths(
             into the tracer output as `category=agentless_vm_cve`.
             Wiz's biggest moat against agent-based competitors;
             v1 wraps Trivy's EBS-snapshot scanner. AWS-only.
+        auto_snapshot_orchestration: when True, strix
+            auto-discovers running EC2 instances, snapshots
+            their attached volumes, runs Trivy on each transient
+            snapshot, then deletes them. Closes the agentless
+            v1→v2 gap: ops teams without an existing snapshot
+            pipeline get CVE inventory of every live instance
+            with no setup. Each snapshot is tagged
+            `strix-transient=true` for cleanup attribution. Per
+            `auto_snapshot_cleanup=False`, snapshots remain in
+            the account for offline analysis. AWS-only.
+        auto_snapshot_regions: regions to enumerate instances
+            in (default = `regions` kwarg, or `["us-east-1"]`).
+        auto_snapshot_max_instances_per_region: hard cap (per
+            region) to bound the EBS Direct API cost. Default
+            25; each scan reads tens-of-MB to GB depending on
+            volume size.
+        auto_snapshot_cleanup: when True (default), delete the
+            transient snapshots after scanning. When False,
+            snapshots remain in the account — useful for offline
+            re-analysis at the cost of $0.05/GB-month storage.
+            Either way, `tool_metadata.auto_snapshot_summary`
+            carries the `manual_cleanup_required` list of un-
+            deleted snapshot IDs so an operator can finish
+            cleanup if a delete failed.
         cloudtrail_events_path: file path to a CloudTrail event
             export (JSON-lines OR `{"Records": [...]}` bundle).
             When set, runs the CDR rule engine against the events
@@ -371,6 +399,52 @@ def scan_cloud_attack_paths(
                 "error": f"{type(e).__name__}: {e}",
             })
 
+    # Auto-snapshot orchestration (masterroadmap §5 P2 v2). Closes
+    # the v1→v2 gap of `agentless_snapshot_ids` (which required
+    # the operator to pre-snapshot every volume out-of-band). When
+    # enabled, strix lists running instances → snapshots their
+    # attached volumes → runs `trivy vm` → deletes the snapshots.
+    # AWS-only. Per-instance errors are isolated; any un-deleted
+    # snapshot surfaces in `manual_cleanup_required` for operator
+    # follow-up. Tag `strix-transient=true` on every snapshot.
+    auto_snapshot_summary: dict[str, Any] | None = None
+    if auto_snapshot_orchestration and provider == "aws":
+        try:
+            from strix.cloud_attack_paths.agentless_scan import (  # noqa: PLC0415
+                auto_snapshot_and_scan,
+                summarise as summarise_agentless2,
+                union_findings as union_agentless_findings2,
+            )
+            from strix.cspm.aws.client import (  # noqa: PLC0415
+                make_default_client_factory as _mk_factory,
+            )
+            auto_factory = _mk_factory(
+                profile_name=profile_name, role_arn=role_arn,
+            )
+            auto_results, auto_lifecycle = auto_snapshot_and_scan(
+                auto_factory,
+                regions=auto_snapshot_regions or regions,
+                max_instances_per_region=(
+                    auto_snapshot_max_instances_per_region
+                ),
+                cleanup_on_completion=auto_snapshot_cleanup,
+            )
+            findings.extend(union_agentless_findings2(auto_results))
+            scan_summary = summarise_agentless2(auto_results)
+            auto_snapshot_summary = {
+                "lifecycle": auto_lifecycle,
+                "scan": scan_summary,
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "scan_cloud_attack_paths: auto-snapshot "
+                "orchestration failed: %s", e, exc_info=True,
+            )
+            cspm_errors.append({
+                "source": "auto_snapshot_orchestration",
+                "error": f"{type(e).__name__}: {e}",
+            })
+
     # CDR — CloudTrail rule engine (masterroadmap §5 P3). Pure-
     # data transformation over a caller-supplied event list. Findings
     # adapt to CspmFinding shape via `.to_cspm_finding()` so they
@@ -496,6 +570,8 @@ def scan_cloud_attack_paths(
         tool_metadata["org_enumerated_accounts"] = len(org_enumerated_arns)
     if agentless_summary is not None:
         tool_metadata["agentless_scan_summary"] = agentless_summary
+    if auto_snapshot_summary is not None:
+        tool_metadata["auto_snapshot_summary"] = auto_snapshot_summary
     if cdr_summary is not None:
         tool_metadata["cdr_summary"] = cdr_summary
     if any_probes_ran:

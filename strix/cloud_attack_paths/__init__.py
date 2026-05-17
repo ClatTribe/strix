@@ -69,6 +69,11 @@ from strix.cloud_attack_paths.graph import (
 )
 from strix.cloud_attack_paths.agentless_scan import (
     AgentlessScanResult,
+    TransientSnapshot,
+    auto_snapshot_and_scan,
+    create_transient_snapshots,
+    delete_transient_snapshots,
+    discover_running_instances_and_volumes,
     is_trivy_vm_available,
     scan_snapshot,
     scan_snapshots,
@@ -159,6 +164,11 @@ __all__ = [
     "AgentlessScanResult",
     "is_trivy_vm_available",
     "summarise_agentless",
+    "TransientSnapshot",
+    "auto_snapshot_and_scan",
+    "create_transient_snapshots",
+    "delete_transient_snapshots",
+    "discover_running_instances_and_volumes",
     # CDR (CloudTrail-based detection)
     "detect_cloudtrail",
     "load_cloudtrail_events",
