@@ -67,6 +67,7 @@ from strix.cloud_attack_paths.graph import (
     EDGE_GRANTS_ACCESS_TO,
     EDGE_HAS_POLICY,
 )
+from strix.cloud_attack_paths.discovery import discover_aws_assets
 from strix.cloud_attack_paths.ingest import build_graph_from_cspm
 from strix.cloud_attack_paths.live_probes import (
     PROBE_ERROR,
@@ -109,6 +110,7 @@ __all__ = [
     "EDGE_HAS_POLICY",
     # Lower-level entry points
     "build_graph_from_cspm",
+    "discover_aws_assets",
     "find_attack_paths",
     "BUILTIN_PATTERNS",
     # Live-probe API (opt-in PoC verification)
