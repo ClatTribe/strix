@@ -373,14 +373,33 @@ Examples:
         "-m",
         "--scan-mode",
         type=str,
-        choices=["quick", "standard", "deep"],
+        choices=["initial", "quick", "standard", "deep"],
         default="deep",
         help=(
             "Scan mode: "
+            "'initial' for fast first-pass on newly-discovered "
+            "assets (surface mapping + CVE / secret / IaC scans "
+            "only; ~10% of standard-mode cost; engine-wishlist §2), "
             "'quick' for fast CI/CD checks, "
             "'standard' for routine testing, "
             "'deep' for thorough security reviews (default). "
             "Default: deep."
+        ),
+    )
+
+    # engine-wishlist §2 — alias for `--scan-mode initial`. Lets
+    # the wrapper send the literal flag from the doc
+    # (`--profile initial`) without us renaming the existing
+    # `--scan-mode` vocabulary. Also reads `STRIX_SCAN_PROFILE`.
+    parser.add_argument(
+        "--profile",
+        type=str,
+        default=None,
+        choices=["initial", "quick", "standard", "deep"],
+        help=(
+            "Alias for --scan-mode; takes precedence when both "
+            "are set. Honours STRIX_SCAN_PROFILE env var when "
+            "neither flag is set. engine-wishlist.md §2."
         ),
     )
 
@@ -798,6 +817,21 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    # engine-wishlist §2 — resolve --profile / STRIX_SCAN_PROFILE
+    # into args.scan_mode. Precedence: --profile > --scan-mode >
+    # STRIX_SCAN_PROFILE env > default.
+    _profile = (
+        getattr(args, "profile", None)
+        or (
+            os.environ.get("STRIX_SCAN_PROFILE")
+            if args.scan_mode == "deep"
+            and not getattr(args, "profile", None)
+            else None
+        )
+    )
+    if _profile in ("initial", "quick", "standard", "deep"):
+        args.scan_mode = _profile
 
     # --quiet forces --non-interactive (the TUI requires a tty).
     if args.quiet:

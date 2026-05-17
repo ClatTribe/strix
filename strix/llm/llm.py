@@ -95,6 +95,10 @@ class LLM:
             self._reasoning_effort = reasoning
         elif config.reasoning_effort:
             self._reasoning_effort = config.reasoning_effort
+        elif config.scan_mode == "initial":
+            # engine-wishlist §2 — recon-only first-pass; minimal
+            # reasoning since we're not doing exploit verification.
+            self._reasoning_effort = "low"
         elif config.scan_mode == "quick":
             self._reasoning_effort = "medium"
         else:
