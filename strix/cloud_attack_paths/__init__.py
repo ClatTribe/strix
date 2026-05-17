@@ -68,6 +68,17 @@ from strix.cloud_attack_paths.graph import (
     EDGE_HAS_POLICY,
 )
 from strix.cloud_attack_paths.ingest import build_graph_from_cspm
+from strix.cloud_attack_paths.live_probes import (
+    PROBE_ERROR,
+    PROBE_NOT_VERIFIED,
+    PROBE_SKIPPED,
+    PROBE_VERIFIED,
+    ProbeResult,
+    is_live_probes_enabled,
+    list_registered_probes,
+    register_probe,
+    run_probe,
+)
 from strix.cloud_attack_paths.patterns import (
     AttackPath,
     BUILTIN_PATTERNS,
@@ -100,4 +111,14 @@ __all__ = [
     "build_graph_from_cspm",
     "find_attack_paths",
     "BUILTIN_PATTERNS",
+    # Live-probe API (opt-in PoC verification)
+    "ProbeResult",
+    "PROBE_VERIFIED",
+    "PROBE_NOT_VERIFIED",
+    "PROBE_ERROR",
+    "PROBE_SKIPPED",
+    "register_probe",
+    "run_probe",
+    "list_registered_probes",
+    "is_live_probes_enabled",
 ]

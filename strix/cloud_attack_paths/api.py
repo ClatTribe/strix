@@ -92,6 +92,7 @@ def analyze_cloud_attack_paths(
     patterns: list[str] | None = None,
     custom_patterns: dict[str, PatternFn] | None = None,
     include_graph: bool = False,
+    enable_live_probes: bool | None = None,
 ) -> AttackPathReport:
     """Build a cloud graph + detect attack paths + return a report.
 
@@ -117,6 +118,16 @@ def analyze_cloud_attack_paths(
             full `CloudGraph` object. Default False — most wrappers
             only need the path list + summary. Pass True for
             visualisation use cases (graph-render dashboards).
+        enable_live_probes: when True, attempts to externally verify
+            each detected path via the registered probe (anonymous
+            S3 HEAD, TCP reachability check, etc.). Verified paths
+            get `confidence=0.99+`, prepended "VERIFIED LIVE"
+            narrative, and probe evidence in `metadata.live_probe`.
+            Defaults to None (defer to `STRIX_CLOUD_LIVE_PROBES`
+            env var; OFF by default). See
+            `strix.cloud_attack_paths.live_probes` for the safety
+            contract — probes can trigger SOC alerts + AWS
+            billing, so opt-in is explicit.
 
     Returns:
         `AttackPathReport` with sorted `paths` (critical-first),
@@ -146,6 +157,22 @@ def analyze_cloud_attack_paths(
     paths = find_attack_paths(
         graph, patterns=patterns, custom_patterns=custom_patterns,
     )
+
+    # Live-probe verification (opt-in). When enabled, each path
+    # whose pattern has a registered probe gets externally probed;
+    # the AttackPath is upgraded in-place with proof / non-proof
+    # evidence. Failures (probe error / no probe registered) leave
+    # the path unchanged — pattern-derived signal is still good.
+    from strix.cloud_attack_paths.live_probes import (
+        is_live_probes_enabled,
+        run_probe,
+        upgrade_path_with_probe,
+    )
+    if is_live_probes_enabled(explicit=enable_live_probes):
+        for p in paths:
+            probe_result = run_probe(p)
+            if probe_result is not None:
+                upgrade_path_with_probe(p, probe_result)
 
     return AttackPathReport(
         paths=paths,

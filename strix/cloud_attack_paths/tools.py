@@ -36,9 +36,19 @@ logger = logging.getLogger(__name__)
 _PATH_CONFIDENCE = 0.95
 
 
-def _emit_attack_path(*, path: AttackPath, target: str) -> str | None:
+def _emit_attack_path(
+    *, path: AttackPath, target: str,
+    live_verified: bool = False,
+) -> str | None:
     """Emit one attack path to the tracer with classification +
-    MITRE metadata."""
+    MITRE metadata.
+
+    `live_verified=True` upgrades the tracer's `verification_status`
+    to `"exploited"` — the engine-canonical signal for "we did
+    more than pattern-match; an external probe confirmed the
+    primitive fires." Mirrors the contract used elsewhere for
+    MOAK-verified-live findings.
+    """
     try:
         from strix.telemetry.tracer import get_global_tracer
 
@@ -60,7 +70,9 @@ def _emit_attack_path(*, path: AttackPath, target: str) -> str | None:
             target=target,
             category="cloud_attack_path",
             rule_id=path.pattern_id,
-            verification_status="verified",
+            verification_status=(
+                "exploited" if live_verified else "verified"
+            ),
             confidence=path.confidence or _PATH_CONFIDENCE,
             description=description,
             impact=(
@@ -141,6 +153,7 @@ def scan_cloud_attack_paths(
     regions: list[str] | None = None,
     prefer_prowler: bool = True,
     patterns: list[str] | None = None,
+    enable_live_probes: bool | None = None,
 ) -> SpecialistResult:
     """Run a CSPM scan, build the cloud graph, detect attack paths,
     emit each path to the tracer.
@@ -153,11 +166,20 @@ def scan_cloud_attack_paths(
             500+ checks); falls back to built-in boto3 for AWS.
         patterns: optional allow-list of pattern IDs. None = all
             built-in patterns.
+        enable_live_probes: when True, opts into external
+            verification probes (anonymous S3 HEAD, TCP
+            reachability, etc.). OFF by default — probes can
+            trigger SOC alerts + minor billing. See
+            `strix.cloud_attack_paths.live_probes` for the safety
+            contract. Engagement-level override via
+            `STRIX_CLOUD_LIVE_PROBES=1` env.
 
     Returns:
         `SpecialistResult` with one finding per detected attack
         path. `tool_metadata.attack_paths_summary` carries the
         per-pattern + per-severity counts the wrapper renders.
+        When live probes ran, `tool_metadata.live_probes_summary`
+        also carries the verified / not-verified / error counts.
     """
     if provider not in ("aws", "azure", "gcp", "kubernetes"):
         return SpecialistResult(
@@ -182,6 +204,7 @@ def scan_cloud_attack_paths(
 
     report = analyze_cloud_attack_paths(
         cspm_findings=findings, patterns=patterns,
+        enable_live_probes=enable_live_probes,
     )
 
     target = f"cloud-attack-paths:{provider}"
@@ -189,8 +212,34 @@ def scan_cloud_attack_paths(
     evidence: list[str] = []
     emitted = 0
 
+    # Aggregate live-probe outcomes for the metadata summary.
+    live_probes_summary = {
+        "verified": 0, "not_verified": 0, "error": 0, "skipped": 0,
+    }
+    any_probes_ran = False
+
     for p in report.paths:
-        rid = _emit_attack_path(path=p, target=target)
+        live_probe = (p.metadata or {}).get("live_probe")
+        is_live_verified = (
+            isinstance(live_probe, dict)
+            and live_probe.get("status") == "verified"
+        )
+        if isinstance(live_probe, dict):
+            any_probes_ran = True
+            status = live_probe.get("status", "")
+            if status in live_probes_summary:
+                live_probes_summary[status] += 1
+        # Verified-live paths carry confidence ≥0.99 (the upgrade
+        # in `live_probes.upgrade_path_with_probe`); the draft +
+        # tracer report inherit that. The tracer's
+        # `verification_status="exploited"` carries the distinction
+        # the FindingDraft schema's Literal doesn't yet permit —
+        # wrappers read the tracer report for the auditor-grade
+        # signal.
+        rid = _emit_attack_path(
+            path=p, target=target,
+            live_verified=is_live_verified,
+        )
         if rid:
             emitted += 1
         drafts.append(FindingDraft(
@@ -205,7 +254,25 @@ def scan_cloud_attack_paths(
         ))
         evidence.append(
             f"cap:{p.pattern_id} sev={p.severity} hops={len(p.hops)}"
+            + (f" probe={live_probe.get('status')}"
+               if isinstance(live_probe, dict) else "")
         )
+
+    tool_metadata: dict[str, Any] = {
+        "engine": "cloud-attack-paths-v1",
+        "provider": provider,
+        "cspm_engine": cspm_engine,
+        "cspm_findings_consumed": report.findings_consumed,
+        "attack_paths_summary": report.summary,
+        "attack_paths_total": len(report.paths),
+        "critical_paths": len(report.critical_paths()),
+        "findings_emitted_to_tracer": emitted,
+        "cspm_metadata": cspm_meta,
+        "cspm_errors": cspm_errors[:5],
+    }
+    if any_probes_ran:
+        tool_metadata["live_probes_summary"] = live_probes_summary
+        tool_metadata["live_probes_enabled"] = True
 
     return SpecialistResult(
         status="ok",
@@ -220,16 +287,5 @@ def scan_cloud_attack_paths(
             "where attack paths share a hop, fixing the shared hop "
             "clears multiple paths at once",
         ],
-        tool_metadata={
-            "engine": "cloud-attack-paths-v1",
-            "provider": provider,
-            "cspm_engine": cspm_engine,
-            "cspm_findings_consumed": report.findings_consumed,
-            "attack_paths_summary": report.summary,
-            "attack_paths_total": len(report.paths),
-            "critical_paths": len(report.critical_paths()),
-            "findings_emitted_to_tracer": emitted,
-            "cspm_metadata": cspm_meta,
-            "cspm_errors": cspm_errors[:5],
-        },
+        tool_metadata=tool_metadata,
     )
