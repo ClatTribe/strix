@@ -17,7 +17,7 @@ Companion to:
 Today's engine assumes a **single human starts a single scan against a single
 target**. The wrapper now ships continuous monitoring across 8 target types for
 organisations onboarding tens-to-hundreds of assets at a time (PR #128 wrapper-
-side asset discovery). Seven engine changes would close the gap between
+side asset discovery). Eight engine changes would close the gap between
 "the engine works" and "the engine scales economically to enterprise org sizes."
 
 **Recommended landing order** (by leverage ÷ effort):
@@ -32,8 +32,12 @@ side asset discovery). Seven engine changes would close the gap between
 6. **§7 shared Researcher cache** — pairs naturally with §1.
 7. **§6 project-scoped finding correlation** — mostly handled wrapper-side
    today; only worth filing once cross-scan dedup misses real overlaps.
+8. **§8 `kg_delta.jsonl` emission** — biggest single differentiation moat;
+   unlocks cross-target attack-path reasoning at the wrapper. Lands after §4
+   / §6 because it consumes the same project_id / asset-arn vocabulary they
+   establish.
 
-**None of the seven are breaking-shape changes** if shipped additively. Existing
+**None of the eight are breaking-shape changes** if shipped additively. Existing
 single-target CLI usage keeps working.
 
 ---
@@ -335,6 +339,116 @@ per-target as today.
 
 ---
 
+## 8. Knowledge-graph deltas emitted as a first-class artefact
+
+### Problem
+The engine already builds a rich cross-resource graph internally — the
+`cloud_attack_paths` module's `CloudGraph` (`CloudResource`, `CloudIdentity`,
+`CloudPolicy` nodes; `can_assume`, `attached_to`, `exposed_to_internet`,
+`grants_access_to`, `has_policy` edges). The multi-cloud discovery work in
+PRs #297 / #310 / #311 populates this graph for AWS / Azure / GCP
+respectively. Multi-account fan-out (PR #299) already unions cross-account
+edges into one graph spanning an AWS Organisation.
+
+**None of this graph crosses the engine → wrapper boundary as structured
+data.** The wrapper sees:
+
+- per-finding `code_locations` (PR #32)
+- per-finding rule-id + CWE + severity
+- per-scan `findings.jsonl` (after §5)
+- per-scan `assets.discovered.jsonl` (after §4)
+- per-scan `compliance_evidence.json`
+
+What it doesn't see: the **edges** between assets. So §6 (project-id
+finding correlation) and §4 (asset enumeration) get the wrapper to:
+
+> *"Same `lodash@4.17.20` CVE found in 50 repos — collapse to one root finding
+> with 50 affected services."*  (finding-level cross-target reasoning)
+
+But not to:
+
+> *"This repo's CI pushes to that ECR repo. That image runs in this ECS
+> service. That service's IAM role can assume admin in this other AWS
+> account. That account holds this public S3 bucket."* (path-level cross-
+> target reasoning across an org's whole stack)
+
+The second story is the **single biggest moat** of the engine — it's what
+Wiz commercialises at the enterprise tier, and it's what makes the "AI
+security engineer for your whole stack" pitch real instead of demoware.
+Today we have all the data; we just throw it away at the engine boundary.
+
+### Ask
+The engine emits a `kg_delta.jsonl` artefact alongside `events.jsonl` /
+`findings.jsonl` / `assets.discovered.jsonl`. One JSON object per line, two
+op-types:
+
+```jsonl
+{"op": "add_node", "kind": "CloudResource", "id": "arn:aws:s3:::payments-bucket", "attrs": {"is_public": true, "tags": ["prod"], "region": "us-east-1"}, "scan_id": "...", "source": "cspm.aws.s3"}
+{"op": "add_node", "kind": "CloudIdentity", "id": "arn:aws:iam::1234:role/ecs-task-payments", "attrs": {"trust_principals": ["ecs.amazonaws.com"]}, "scan_id": "...", "source": "discovery.aws.iam"}
+{"op": "add_edge", "type": "can_assume", "src": "arn:aws:iam::5678:user/deployer", "dst": "arn:aws:iam::1234:role/ecs-task-payments", "evidence": "trust_policy.json:7", "scan_id": "..."}
+{"op": "add_edge", "type": "grants_access_to", "src": "arn:aws:iam::1234:role/ecs-task-payments", "dst": "arn:aws:s3:::payments-bucket", "evidence": "policy_arn:...", "scan_id": "..."}
+```
+
+Node-kind vocabulary mirrors the engine's existing internal graph:
+`CloudResource`, `CloudIdentity`, `CloudPolicy`, plus the cross-target-
+type additions `Repository`, `ContainerImage`, `Endpoint`, `Service`
+(when the wrapper passes `STRIX_PROJECT_ID` per §6).
+
+Edge-type vocabulary mirrors the existing edge constants:
+`can_assume`, `attached_to`, `exposed_to_internet`, `grants_access_to`,
+`has_policy`, plus new cross-target-type edges the wrapper can stamp
+post-hoc: `deploys_to`, `pulls_from`, `runs_in`, `ingests_from`.
+
+The engine never builds the cross-target graph itself. The wrapper's
+knowledge-graph store (`lib/kg/`) consumes deltas across all scans in
+a project, unions them, and serves the cross-target path queries
+(`PATH FROM Repository TO PublicResource WHERE …`) to the UI.
+
+### Why now
+- **The data already exists.** PRs #297 / #299 / #310 / #311 already
+  enumerate it; we're just discarding it at the artefact boundary.
+- **§4 establishes the asset-id vocabulary.** Once `assets.discovered.jsonl`
+  is shipping ARNs / canonical-ids for every discovered asset, the
+  `kg_delta.jsonl` edges reference the same ids natively — wrapper joins
+  are trivial.
+- **§6 establishes the project_id vocabulary.** Same project_id stamped on
+  every delta means the wrapper's KG store can scope graph union to one
+  project naturally.
+- **No new engine internals needed.** The graph already exists in
+  `CloudGraph`; this ask is purely about emitting it.
+
+### Wrapper workaround
+None that gets you path-level reasoning. The wrapper can build a shallow
+graph by joining `assets.discovered.jsonl` (nodes) and `findings.jsonl`
+(edges-as-findings), but that misses 90% of the edges — most attack-path
+edges (`can_assume`, `grants_access_to`) are graph-internal state the
+engine never surfaces as findings.
+
+Could we re-derive the graph wrapper-side by re-walking AWS / GCP / Azure
+IAM? Yes — and it would be the PR #31/#32 mistake at maximum scale.
+Engine already does this; wrapper should consume.
+
+### Scope hygiene
+Strictly emission of graph deltas. The engine does not:
+
+- Persist the cross-scan graph (wrapper's KG store does).
+- Do cross-scan graph union (wrapper does, scoped by project_id).
+- Answer path queries (wrapper does, against its union store).
+- Compute reachability or attack-path scoring across the union
+  (wrapper does — the engine's per-scan reachability scoring in
+  `reachability.py` stays per-scan).
+
+The single-scan attack-path detection (`patterns.py` matching against
+`CloudGraph`) stays engine-side and unchanged. §8 is purely about making
+the same graph state consumable by the wrapper for cross-scan reasoning.
+
+### Compatibility
+Additive new artefact. Scans that don't build a graph (e.g. single-repo
+SAST) emit an empty file or omit it entirely. Identical structural-data
+discipline as §4.
+
+---
+
 ## Cross-references (what we already consume vs. what we still need)
 
 | Engine emission                     | Wrapper consumes today | Asks above                    |
@@ -345,6 +459,7 @@ per-target as today.
 | `compliance_evidence.json`          | Yes (per-scan ingest)  | —                             |
 | `assets.discovered.jsonl`           | **N/A — needs §4**     | §4                            |
 | `run_meta.json` fingerprint         | **N/A — needs §5**     | §5                            |
+| `kg_delta.jsonl`                    | **N/A — needs §8**     | §8                            |
 
 The pattern from PR #31/#32 holds: **wrapper-side regex parsing of engine
 output is a maintenance treadmill against a constantly-evolving format. If the
@@ -353,6 +468,11 @@ doesn't emit it yet, the right answer is upstream emission, not wrapper
 re-derivation.** That's why §4 (`assets.discovered.jsonl`) is ranked second
 in landing order despite §5 being smaller — §4 has a structural-data
 analogue every other asset discoverer can reuse.
+
+The same principle drives §8: the engine already builds the cross-resource
+graph internally; without emission, the wrapper either does without (loses
+the path-level cross-target story) or re-walks every cloud SDK to rebuild
+what the engine already has (PR #31/#32 mistake at maximum scale).
 
 ---
 
@@ -371,6 +491,10 @@ on:
 - **Compliance framework mapping.** Cross-framework `control_mappings` are
   wrapper-side static data. Engine emits per-control verdicts; wrapper does
   the cross-framework rollup.
+- **Cross-scan graph union and path queries.** §8 has the engine emit per-
+  scan graph deltas; the wrapper's KG store unions them across the project
+  and serves path queries to the UI. Engine never persists or queries the
+  union itself — `cloud_attack_paths.patterns` matching stays per-scan.
 
 This division of responsibility is the same one stated in
 [Architecture.md §1.1](https://github.com/ClatTribe/webappsec/blob/main/Architecture.md):
