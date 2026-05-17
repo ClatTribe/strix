@@ -133,16 +133,37 @@ def enrich_finding_with_compliance(report: dict[str, Any]) -> dict[str, Any]:
     if isinstance(rule_id, str):
         rule_id = rule_id.strip() or None
 
+    derived: dict[str, list[str]] = {}
     if (
         (cwe and cwe in CWE_TO_CONTROLS)
         or (category and category in CATEGORY_TO_CONTROLS)
         or (rule_id and rule_id in RULE_ID_TO_CONTROLS)
     ):
-        out["compliance_controls"] = controls_for_by_framework(
+        derived = controls_for_by_framework(
             cwe=cwe or None,
             category=category or None,
             rule_id=rule_id,
         )
+
+    # Some emit paths (Prowler wrapper, third-party normalisers) attach
+    # `compliance_controls` directly because the upstream tool knows
+    # per-finding control mappings authoritatively. We must NOT clobber
+    # those — union with the derived set so both sources contribute and
+    # downstream wrappers see the full coverage.
+    existing = report.get("compliance_controls")
+    if isinstance(existing, dict):
+        merged: dict[str, list[str]] = {}
+        for fw, ctrls in existing.items():
+            if isinstance(ctrls, list):
+                merged[fw] = sorted({str(c) for c in ctrls if c})
+        for fw, ctrls in derived.items():
+            merged[fw] = sorted(
+                set(merged.get(fw, [])) | set(ctrls)
+            )
+        if merged:
+            out["compliance_controls"] = merged
+    elif derived:
+        out["compliance_controls"] = derived
 
     # ---- data_classification ----
     # Build a search string from category, title, description.

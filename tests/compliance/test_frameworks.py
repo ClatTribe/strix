@@ -45,7 +45,13 @@ def test_all_frameworks_registered() -> None:
     assert FRAMEWORK_CIS_DOCKER in ALL_FRAMEWORKS
     assert FRAMEWORK_CIS_KUBERNETES in ALL_FRAMEWORKS
     assert FRAMEWORK_CIS_AWS in ALL_FRAMEWORKS
-    assert len(ALL_FRAMEWORKS) == 12
+    from strix.compliance.frameworks import (
+        FRAMEWORK_CIS_AZURE,
+        FRAMEWORK_CIS_GCP,
+    )
+    assert FRAMEWORK_CIS_AZURE in ALL_FRAMEWORKS
+    assert FRAMEWORK_CIS_GCP in ALL_FRAMEWORKS
+    assert len(ALL_FRAMEWORKS) == 14
 
 
 def test_hipaa_has_technical_safeguards() -> None:
