@@ -154,6 +154,7 @@ def scan_cloud_attack_paths(
     prefer_prowler: bool = True,
     patterns: list[str] | None = None,
     enable_live_probes: bool | None = None,
+    auto_discover_assets: bool = True,
 ) -> SpecialistResult:
     """Run a CSPM scan, build the cloud graph, detect attack paths,
     emit each path to the tracer.
@@ -173,6 +174,14 @@ def scan_cloud_attack_paths(
             `strix.cloud_attack_paths.live_probes` for the safety
             contract. Engagement-level override via
             `STRIX_CLOUD_LIVE_PROBES=1` env.
+        auto_discover_assets: when True (default) AND the CSPM
+            scan used the AWS boto3 path, enumerate additional
+            assets via read-only `Describe* / List* / Get*` APIs
+            to enrich the cloud-attack-path graph beyond just
+            CSPM-flagged resources. Same boto3 client factory is
+            reused, so no extra auth setup needed. Skipped when
+            Prowler ran (Prowler does its own enumeration) or
+            when scanning non-AWS providers.
 
     Returns:
         `SpecialistResult` with one finding per detected attack
@@ -202,9 +211,32 @@ def scan_cloud_attack_paths(
             ),
         )
 
+    # Build a client factory for asset discovery when applicable.
+    # Discovery only fires when we're on AWS AND auto_discover_assets
+    # is on. Prowler-runs skip discovery (Prowler enumerates already);
+    # cspm_engine reports which path actually ran.
+    discover_factory = None
+    if (
+        auto_discover_assets
+        and provider == "aws"
+        and cspm_engine in ("boto3", "boto3-fallback")
+    ):
+        try:
+            from strix.cspm.aws.client import make_default_client_factory  # noqa: PLC0415
+            discover_factory = make_default_client_factory(
+                profile_name=profile_name, role_arn=role_arn,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "scan_cloud_attack_paths: could not build discovery "
+                "factory: %s", e, exc_info=True,
+            )
+
     report = analyze_cloud_attack_paths(
         cspm_findings=findings, patterns=patterns,
         enable_live_probes=enable_live_probes,
+        discover_client_factory=discover_factory,
+        discover_regions=regions,
     )
 
     target = f"cloud-attack-paths:{provider}"

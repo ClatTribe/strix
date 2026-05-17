@@ -93,6 +93,9 @@ def analyze_cloud_attack_paths(
     custom_patterns: dict[str, PatternFn] | None = None,
     include_graph: bool = False,
     enable_live_probes: bool | None = None,
+    discover_client_factory: Any | None = None,
+    discover_regions: list[str] | None = None,
+    discover_services: list[str] | None = None,
 ) -> AttackPathReport:
     """Build a cloud graph + detect attack paths + return a report.
 
@@ -128,6 +131,20 @@ def analyze_cloud_attack_paths(
             `strix.cloud_attack_paths.live_probes` for the safety
             contract — probes can trigger SOC alerts + AWS
             billing, so opt-in is explicit.
+        discover_client_factory: when set, boto3 client factory
+            used to enumerate AWS assets (S3 buckets, IAM
+            principals + policies, EC2 instances, RDS DBs, Lambdas
+            + function URLs, ECR repos, secrets) via the read-only
+            `Describe* / List* / Get*` API surface. The discovered
+            assets are merged with caller-supplied `cloud_assets`
+            and CSPM findings to build the richest possible graph.
+            Same factory shape as
+            `strix.cspm.aws.client.make_default_client_factory`.
+        discover_regions: regions to enumerate per-region services
+            in. None → `["us-east-1"]`.
+        discover_services: optional allow-list (`s3` / `iam` /
+            `ec2` / `rds` / `lambda` / `ecr` / `secretsmanager`).
+            None = all.
 
     Returns:
         `AttackPathReport` with sorted `paths` (critical-first),
@@ -150,6 +167,27 @@ def analyze_cloud_attack_paths(
     """
     findings_list = list(cspm_findings or [])
     assets_list = list(cloud_assets or [])
+
+    # Auto-discovery enriches the caller's asset list with read-only
+    # boto3 enumeration. Per-service errors don't stop discovery —
+    # partial assets are still useful for partial patterns.
+    if discover_client_factory is not None:
+        try:
+            from strix.cloud_attack_paths.discovery import (  # noqa: PLC0415
+                discover_aws_assets,
+            )
+            discovered = discover_aws_assets(
+                discover_client_factory,
+                regions=discover_regions,
+                services=discover_services,
+            )
+            assets_list.extend(discovered)
+        except Exception as e:  # noqa: BLE001
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "analyze_cloud_attack_paths: discovery failed: %s", e,
+                exc_info=True,
+            )
 
     graph = build_graph_from_cspm(
         findings_list, assets=assets_list,
