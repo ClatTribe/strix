@@ -157,6 +157,7 @@ def scan_cloud_attack_paths(
     patterns: list[str] | None = None,
     enable_live_probes: bool | None = None,
     auto_discover_assets: bool = True,
+    additional_role_arns: list[str] | None = None,
 ) -> SpecialistResult:
     """Run a CSPM scan, build the cloud graph, detect attack paths,
     emit each path to the tracer.
@@ -184,6 +185,15 @@ def scan_cloud_attack_paths(
             reused, so no extra auth setup needed. Skipped when
             Prowler ran (Prowler does its own enumeration) or
             when scanning non-AWS providers.
+        additional_role_arns: when set, fan out the scan across
+            additional AWS accounts via assume-role. Each ARN is
+            scanned independently (CSPM + asset discovery); the
+            findings + assets are unioned into the graph so
+            cross-account attack-path chains (e.g. user in
+            account A can assume admin in account B) materialise
+            automatically. Per-role errors don't stop the rest
+            — partial multi-account results are emitted. AWS-only;
+            ignored for non-AWS providers.
 
     Returns:
         `SpecialistResult` with one finding per detected attack
@@ -234,11 +244,47 @@ def scan_cloud_attack_paths(
                 "factory: %s", e, exc_info=True,
             )
 
+    # Multi-account fan-out (AWS only). Each additional role_arn
+    # gets its own CSPM scan + asset discovery; findings + assets
+    # are unioned into the graph so cross-account attack-path
+    # chains materialise via the existing can_assume edge
+    # derivation. Per-role errors don't stop the rest of the
+    # fan-out.
+    multi_account_summary: dict[str, Any] | None = None
+    extra_cspm_assets: list[dict[str, Any]] = []
+    if (
+        additional_role_arns
+        and provider == "aws"
+    ):
+        try:
+            from strix.cloud_attack_paths.multi_account import (  # noqa: PLC0415
+                scan_multi_account, summarise,
+                union_assets, union_findings,
+            )
+            multi_results = scan_multi_account(
+                additional_role_arns,
+                profile_name=profile_name,
+                regions=regions,
+            )
+            findings.extend(union_findings(multi_results))
+            extra_cspm_assets.extend(union_assets(multi_results))
+            multi_account_summary = summarise(multi_results)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "scan_cloud_attack_paths: multi-account fan-out "
+                "failed: %s", e, exc_info=True,
+            )
+            cspm_errors.append({
+                "source": "multi_account",
+                "error": f"{type(e).__name__}: {e}",
+            })
+
     report = analyze_cloud_attack_paths(
         cspm_findings=findings, patterns=patterns,
         enable_live_probes=enable_live_probes,
         discover_client_factory=discover_factory,
         discover_regions=regions,
+        cloud_assets=extra_cspm_assets or None,
     )
 
     target = f"cloud-attack-paths:{provider}"
@@ -323,6 +369,8 @@ def scan_cloud_attack_paths(
         "cspm_metadata": cspm_meta,
         "cspm_errors": cspm_errors[:5],
     }
+    if multi_account_summary is not None:
+        tool_metadata["multi_account_summary"] = multi_account_summary
     if any_probes_ran:
         tool_metadata["live_probes_summary"] = live_probes_summary
         tool_metadata["live_probes_enabled"] = True
