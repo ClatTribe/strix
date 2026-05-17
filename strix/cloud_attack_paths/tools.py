@@ -167,6 +167,9 @@ def scan_cloud_attack_paths(
     cloudtrail_events: list[dict[str, Any]] | None = None,
     enumerate_org_accounts: bool = False,
     org_role_name: str = "OrganizationAccountAccessRole",
+    azure_subscription_id: str | None = None,
+    azure_services: list[str] | None = None,
+    _azure_client_factory: Any | None = None,
 ) -> SpecialistResult:
     """Run a CSPM scan, build the cloud graph, detect attack paths,
     emit each path to the tracer.
@@ -254,6 +257,21 @@ def scan_cloud_attack_paths(
             org. Default `OrganizationAccountAccessRole` is
             the AWS-default created automatically when accounts
             are added to an organization.
+        azure_subscription_id: when set AND `provider="azure"`,
+            run read-only Azure asset discovery for the given
+            subscription to enrich the cloud-attack-path graph
+            beyond CSPM-flagged resources only. Mirrors the AWS
+            `auto_discover_assets` enrichment. Discovers storage
+            accounts, VMs, NSGs, public IPs, RBAC role
+            assignments + definitions, key vaults, App Services
+            + Function Apps, and ACR registries.
+        azure_services: optional allow-list of Azure services
+            to discover (e.g. `["storage", "compute"]`). None
+            = all of them.
+        _azure_client_factory: DI hook for tests — bypasses the
+            real Azure SDK. None → real implementation looked
+            up lazily (and gated on whether the SDK is
+            available).
 
     Returns:
         `SpecialistResult` with one finding per detected attack
@@ -445,6 +463,48 @@ def scan_cloud_attack_paths(
                 "error": f"{type(e).__name__}: {e}",
             })
 
+    # Azure asset discovery (masterroadmap §5 v2 deepening).
+    # Parallel to AWS auto_discover_assets, but Azure SDK-based.
+    # Opt-in via `azure_subscription_id`; tests inject the factory.
+    azure_assets_count = 0  # always-bound for tool_metadata branch
+    if provider == "azure" and azure_subscription_id:
+        try:
+            from strix.cloud_attack_paths.azure_discovery import (  # noqa: PLC0415
+                discover_azure_assets,
+            )
+            az_factory = _azure_client_factory
+            if az_factory is None:
+                # Real impl is gated on whether the Azure SDK is
+                # installed. Don't crash discovery if it isn't.
+                try:
+                    from strix.cspm.azure.client import (  # noqa: PLC0415
+                        make_default_azure_client_factory,
+                    )
+                    az_factory = make_default_azure_client_factory()
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(
+                        "scan_cloud_attack_paths: azure SDK "
+                        "client unavailable, skipping discovery: %s",
+                        e,
+                    )
+                    az_factory = None
+            if az_factory is not None:
+                az_assets = discover_azure_assets(
+                    az_factory, azure_subscription_id,
+                    services=azure_services,
+                )
+                extra_cspm_assets.extend(az_assets)
+                azure_assets_count = len(az_assets)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "scan_cloud_attack_paths: azure discovery "
+                "failed: %s", e, exc_info=True,
+            )
+            cspm_errors.append({
+                "source": "azure_discovery",
+                "error": f"{type(e).__name__}: {e}",
+            })
+
     # CDR — CloudTrail rule engine (masterroadmap §5 P3). Pure-
     # data transformation over a caller-supplied event list. Findings
     # adapt to CspmFinding shape via `.to_cspm_finding()` so they
@@ -572,6 +632,8 @@ def scan_cloud_attack_paths(
         tool_metadata["agentless_scan_summary"] = agentless_summary
     if auto_snapshot_summary is not None:
         tool_metadata["auto_snapshot_summary"] = auto_snapshot_summary
+    if azure_assets_count:
+        tool_metadata["azure_assets_discovered"] = azure_assets_count
     if cdr_summary is not None:
         tool_metadata["cdr_summary"] = cdr_summary
     if any_probes_ran:
