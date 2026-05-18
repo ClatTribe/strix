@@ -315,6 +315,7 @@ def create_vulnerability_report(  # noqa: PLR0912, PLR0913
         tracer = get_global_tracer()
         if tracer:
             from strix.llm.dedupe import check_duplicate
+            from strix.llm.fp_filter import evaluate as fp_evaluate
 
             existing_reports = tracer.get_existing_vulnerabilities()
 
@@ -328,7 +329,42 @@ def create_vulnerability_report(  # noqa: PLR0912, PLR0913
                 "poc_script_code": poc_script_code,
                 "endpoint": endpoint,
                 "method": method,
+                "cwe": cwe,
             }
+
+            # Phase v2 step 1 — deterministic FP pre-filter. Runs
+            # BEFORE the LLM dedupe call to short-circuit
+            # structurally noisy emissions at zero LLM cost. DROP
+            # verdicts reject; DOWNGRADE verdicts adjust severity
+            # but the finding still lands in the report.
+            #
+            # See docs/proposals/2026-05-19-scan-mode-cost-
+            # optimization.md (workflow phase 6).
+            scope_targets = (
+                (tracer.scan_config or {}).get("targets")
+                if getattr(tracer, "scan_config", None) else None
+            )
+            fp_result = fp_evaluate(
+                candidate,
+                severity=severity,
+                scope_targets=scope_targets,
+                existing_findings=existing_reports,
+            )
+            if fp_result.verdict == "DROP":
+                return {
+                    "success": False,
+                    "message": (
+                        f"Finding rejected by FP pre-filter "
+                        f"[{fp_result.rule}]: {fp_result.reason}. "
+                        "Fix the structural issue (e.g. add a real "
+                        "PoC, confirm scope, dedupe against prior "
+                        "findings) and re-emit."
+                    ),
+                    "rejected_by": fp_result.rule,
+                    "reason": fp_result.reason,
+                }
+            if fp_result.verdict == "DOWNGRADE" and fp_result.new_severity:
+                severity = fp_result.new_severity
 
             dedupe_result = check_duplicate(candidate, existing_reports)
 
