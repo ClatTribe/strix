@@ -1,0 +1,31 @@
+# VAmPI — Vulnerable API
+#
+# Source: https://github.com/erev0s/VAmPI
+#
+# Single-container Flask API targeted at OWASP API Top 10. Lighter
+# than crAPI (one container vs seven) so it's the right benchmark
+# for fast iteration during development. crAPI is the comprehensive
+# benchmark; VAmPI is the smoke test.
+#
+# Pin: `erev0s/vampi:0.4.3`. Container exposes Flask on 5000.
+# The benchmark binds it to 5001 host-side to avoid collisions
+# with juiceshop (3001) and other fixtures.
+
+services:
+  vampi:
+    image: erev0s/vampi:0.4.3
+    pull_policy: always
+    container_name: bench-vampi
+    ports:
+      - "5001:5000"
+    environment:
+      vulnerable: "1"   # 1=vulnerable mode (default); 0=mitigated
+      tokentimetolive: "60"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "python3 -c \"import urllib.request as u; u.urlopen('http://localhost:5000/').status\""
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped

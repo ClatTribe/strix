@@ -2,6 +2,36 @@
 
 We use security benchmarks to track Strix's capabilities and improvements over time. We plan to add more benchmarks, both existing ones and our own, to help the community evaluate and compare security agents.
 
+## Quick start
+
+```bash
+# Pre-req: export STRIX_LLM + LLM_API_KEY; Docker daemon running.
+./benchmarks/run_all.sh --dry-run             # see what would run
+./benchmarks/run_all.sh --suite per_target    # full agentic suite
+./benchmarks/run_all.sh --suite public        # direct-tool suite
+./benchmarks/run_all.sh --fixture vampi       # one fixture
+./benchmarks/run_all.sh --scan-mode quick     # faster scan mode
+```
+
+Per-target results land in `benchmarks/per_target/baseline/`; direct-
+tool results in `benchmarks/public/fixtures/*/baseline/`.
+
+CI workflow: [`.github/workflows/benchmarks.yml`](../.github/workflows/benchmarks.yml)
+runs the suite manually via `workflow_dispatch` or on a weekly cron.
+
+## Fixture inventory
+
+| Suite | Fixture | Target type | Source | Status |
+|---|---|---|---|---|
+| `per_target` | [`web/juiceshop`](per_target/fixtures/web/juiceshop) | web_application | OWASP Juice Shop v17.2.0 | ✅ baselined |
+| `per_target` | [`api/vampi`](per_target/fixtures/api/vampi) | api | erev0s/VAmPI 0.4.3 | ✅ fixture; first run TBD |
+| `per_target` | [`api/crapi`](per_target/fixtures/api/crapi) | api | OWASP crAPI 0.7.0 | ✅ fixture; first run TBD |
+| `per_target` | [`code/flask-vuln`](per_target/fixtures/code/flask-vuln) | local_code | hand-built | ✅ baselined |
+| `per_target` | [`web+code/vibe-app`](per_target/fixtures/web+code/vibe-app) | web_application + repository | hand-built vibe-coded SaaS | ✅ baselined |
+| `public` | `sast/nodegoat` | local_code (direct-tool) | OWASP NodeGoat | ✅ baselined |
+| `public` | `sca/nodegoat` | repository (direct-tool) | OWASP NodeGoat | ✅ baselined |
+| `public` | `iac/dockerfile-bad-patterns` | local_code (direct-tool) | synthetic | ✅ baselined |
+
 
 ## Full Details
 

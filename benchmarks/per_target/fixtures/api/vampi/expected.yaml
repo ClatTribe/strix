@@ -1,0 +1,110 @@
+target_type: api
+target: http://host.docker.internal:5001
+description: |
+  VAmPI — Vulnerable API. Single-container Flask app targeting OWASP
+  API Top 10. Simpler than crAPI; faster turnaround for CI / smoke.
+
+  Vulnerable mode is on by default (`vulnerable=1` env var). The
+  mitigated counterpart (`vulnerable=0`) is the negative control —
+  useful for confirming the harness emits zero false positives
+  against properly-defended code.
+
+  Pin: `erev0s/vampi:0.4.3`. Re-baseline on tag bump.
+
+  All endpoints documented at: https://github.com/erev0s/VAmPI
+  OpenAPI spec served at: http://host.docker.internal:5001/
+
+docker:
+  compose_file: docker-compose.yml
+  wait_url: http://127.0.0.1:5001/
+  wait_timeout_seconds: 60
+
+expected_findings:
+  # API1:2023 — BOLA
+  - id: bola-user-by-username
+    category: idor
+    cwe: CWE-639
+    endpoint: /users/v1/{username}
+    severity: high
+    must_find: true
+    description: |
+      `/users/v1/<username>` endpoint returns user details (incl. email,
+      admin flag) for ANY username regardless of auth context. BOLA via
+      direct path parameter.
+
+  # API2:2023 — Broken Authentication
+  - id: jwt-none-alg
+    category: jwt
+    cwe: CWE-347
+    endpoint: /users/v1/login
+    severity: critical
+    must_find: true
+    description: |
+      Login issues JWTs and VAmPI's verifier accepts `alg=none` tokens.
+      Forge any user (incl. admin) without knowing the password.
+
+  - id: jwt-weak-secret
+    category: jwt
+    cwe: CWE-326
+    endpoint: /users/v1/login
+    severity: high
+    must_find: true
+    description: |
+      HMAC signing key is the static string "secret". Trivially
+      brute-forced; tokens forge-able offline once known.
+
+  # API3:2023 — Mass assignment
+  - id: mass-assignment-admin
+    category: mass_assignment
+    cwe: CWE-915
+    endpoint: /users/v1/register
+    severity: critical
+    must_find: true
+    description: |
+      Registration endpoint accepts `admin: true` field — never
+      intended to be client-settable. Promotes new user to admin
+      at signup.
+
+  # API4:2023 — Unrestricted Resource Consumption
+  - id: rate-limit-login
+    category: rate_limit
+    cwe: CWE-307
+    endpoint: /users/v1/login
+    severity: medium
+    must_find: true
+    description: |
+      Login endpoint has no rate-limit. Brute-force on common
+      usernames + dictionary passwords.
+
+  # API5:2023 — BFLA
+  - id: bfla-debug-endpoint
+    category: bfla
+    cwe: CWE-862
+    endpoint: /users/v1/_debug
+    severity: high
+    must_find: true
+    description: |
+      Debug endpoint reachable without admin role. Returns all
+      registered users incl. password hashes.
+
+  # SQLi (planted in books endpoint when vulnerable mode is on)
+  - id: sqli-books
+    category: sqli
+    cwe: CWE-89
+    endpoint: /books/v1/{title}
+    severity: critical
+    must_find: true
+    description: |
+      `/books/v1/<title>` is SQLi-vulnerable; classic `' OR 1=1--`
+      yields all rows.
+
+  # API discovery
+  - id: openapi-spec-exposed
+    category: api_inventory
+    cwe: CWE-200
+    endpoint: /
+    severity: low
+    must_find: true
+    description: |
+      OpenAPI spec served at root; reveals every endpoint + parameter.
+      Often desirable (it's documentation) but flag for inventory awareness.
