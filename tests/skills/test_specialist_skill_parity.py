@@ -313,3 +313,78 @@ def test_phase_2_cloud_skills_appear_in_menu() -> None:
     ]
     missing = [s for s in expected if s not in menu]
     assert not missing, f"cloud skills missing from menu: {missing}"
+
+
+def test_phase_3_framework_skills_present() -> None:
+    """Pin that the 8 Phase-3 framework skills landed."""
+    base = get_strix_resource_path("skills") / "frameworks"
+    expected = [
+        "django",
+        "flask",
+        "express",
+        "rails",
+        "spring_boot",
+        "vue_nuxt",
+        "svelte_sveltekit",
+        "cloudflare_workers",
+    ]
+    for skill in expected:
+        path: Path = base / f"{skill}.md"
+        assert path.exists(), f"missing framework skill: {path}"
+        content = path.read_text(encoding="utf-8")
+        assert content.startswith("---\n"), f"{skill}: missing frontmatter"
+        assert "\nname:" in content, f"{skill}: missing `name:` field"
+        assert "\ndescription:" in content, f"{skill}: missing `description:`"
+        assert "\ntriggers:" in content, f"{skill}: missing `triggers:`"
+
+
+def test_phase_3_technology_skills_present() -> None:
+    """Pin that the 7 Phase-3 technology skills landed."""
+    base = get_strix_resource_path("skills") / "technologies"
+    expected = [
+        "auth0",
+        "clerk",
+        "stripe",
+        "mongodb",
+        "postgres",
+        "langchain_llamaindex",
+        "openai_anthropic_sdk_exposure",
+    ]
+    for skill in expected:
+        path: Path = base / f"{skill}.md"
+        assert path.exists(), f"missing technology skill: {path}"
+        content = path.read_text(encoding="utf-8")
+        assert content.startswith("---\n"), f"{skill}: missing frontmatter"
+        assert "\nname:" in content, f"{skill}: missing `name:` field"
+        assert "\ndescription:" in content, f"{skill}: missing `description:`"
+        assert "\ntriggers:" in content, f"{skill}: missing `triggers:`"
+
+
+def test_phase_3_categories_grow() -> None:
+    """Frameworks: 3 → 11 (added 8). Technologies: 2 → 9 (added 7)."""
+    from strix.skills import get_available_skills
+
+    available = get_available_skills()
+    assert len(available["frameworks"]) >= 11, (
+        f"expected ≥11 frameworks; got {len(available['frameworks'])}: "
+        f"{available['frameworks']}"
+    )
+    assert len(available["technologies"]) >= 9, (
+        f"expected ≥9 technologies; got {len(available['technologies'])}: "
+        f"{available['technologies']}"
+    )
+
+
+def test_phase_3_skills_appear_in_menu() -> None:
+    """The Decepticon menu picks up the new Phase 3 skills."""
+    from strix.skills.menu import generate_skills_menu
+
+    menu = generate_skills_menu()
+    expected = [
+        "django", "flask", "express", "rails", "spring_boot",
+        "vue_nuxt", "svelte_sveltekit", "cloudflare_workers",
+        "auth0", "clerk", "stripe", "mongodb", "postgres",
+        "langchain_llamaindex", "openai_anthropic_sdk_exposure",
+    ]
+    missing = [s for s in expected if s not in menu]
+    assert not missing, f"Phase-3 skills missing from menu: {missing}"
