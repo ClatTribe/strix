@@ -47,6 +47,7 @@ def dispatch_specialist(
     target: str | None = None,
     max_iterations: int | None = None,
     max_cost_usd: float | None = None,
+    skills_override: list[str] | None = None,
 ) -> dict[str, Any]:
     """Spawn a bounded fresh-context specialist for one objective.
 
@@ -69,6 +70,12 @@ def dispatch_specialist(
         in the specialist's system prompt.
       max_iterations: override the profile default (default 50).
       max_cost_usd: override the profile default.
+      skills_override: Phase 1C — override the category's
+        auto-attached skills for this dispatch. Pass a list of
+        skill names (e.g. `['saml_xsw', 'oauth_oidc']`) to use a
+        custom bundle, or `[]` to suppress skill injection
+        entirely. When omitted (default), the profile's
+        recommended skills auto-attach.
 
     Returns:
       Dict with `status` (PASSED / BLOCKED / ITERATION_CAP_REACHED
@@ -79,7 +86,9 @@ def dispatch_specialist(
       1. Recon: dispatch_specialist('recon', 'enumerate endpoints', target=URL)
       2. Per-endpoint: dispatch_specialist('sqli', 'verify SQLi on /api/users')
       3. Coverage: dispatch_specialist('xss', 'verify reflected XSS on /search')
-      4. When done: finish_scan
+      4. Custom skill bundle: dispatch_specialist('generic', 'verify SAML XSW
+         on /saml/acs', skills_override=['saml_xsw'])
+      5. When done: finish_scan
     """
     return _orchestrator().dispatch_specialist(
         category=category,
@@ -87,6 +96,7 @@ def dispatch_specialist(
         target=target,
         max_iterations=max_iterations,
         max_cost_usd=max_cost_usd,
+        skills_override=skills_override,
     )
 
 

@@ -137,12 +137,21 @@ class SpecialistDispatchProfile:
         `get_max_iterations()` (env-configurable).
       max_cost_usd: per-spawn LLM cost cap. None → inherit from
         run-level `--max-cost`.
+      recommended_skills: Phase 1C — skill names from
+        `strix/skills/vulnerabilities/` (or other categories) that
+        the dispatched specialist should boot with. Loaded via
+        `strix.skills.load_skills` and injected into the
+        fresh-context system prompt. Empty list → no skill
+        injection (the specialist runs on its addendum + scope
+        only). The names are filename stems, not display names
+        (e.g. `sql_injection`, `saml_xsw`).
     """
     category: str
     system_prompt_addendum: str
     allowed_tool_subset: list[str] = field(default_factory=list)
     max_iterations: int | None = None
     max_cost_usd: float | None = None
+    recommended_skills: list[str] = field(default_factory=list)
 
 
 # Built-in profiles for the common specialist categories. The
@@ -171,6 +180,7 @@ _PROFILES: dict[str, SpecialistDispatchProfile] = {
             "cve_lookup",
         ],
         max_cost_usd=0.30,
+        recommended_skills=["sql_injection"],
     ),
     "xss": SpecialistDispatchProfile(
         category="xss",
@@ -191,6 +201,7 @@ _PROFILES: dict[str, SpecialistDispatchProfile] = {
             "create_vulnerability_report", "complete_objective",
         ],
         max_cost_usd=0.30,
+        recommended_skills=["xss"],
     ),
     "idor": SpecialistDispatchProfile(
         category="idor",
@@ -210,6 +221,7 @@ _PROFILES: dict[str, SpecialistDispatchProfile] = {
             "complete_objective",
         ],
         max_cost_usd=0.40,
+        recommended_skills=["idor", "broken_function_level_authorization"],
     ),
     "recon": SpecialistDispatchProfile(
         category="recon",
@@ -229,6 +241,10 @@ _PROFILES: dict[str, SpecialistDispatchProfile] = {
             "complete_objective",
         ],
         max_cost_usd=0.20,
+        recommended_skills=[
+            "asset_discovery_pipeline",
+            "subdomain_strategy",
+        ],
     ),
     "auth": SpecialistDispatchProfile(
         category="auth",
@@ -247,6 +263,7 @@ _PROFILES: dict[str, SpecialistDispatchProfile] = {
             "complete_objective", "create_vulnerability_report",
         ],
         max_cost_usd=0.25,
+        recommended_skills=["authentication_jwt", "oauth_oidc"],
     ),
     "generic": SpecialistDispatchProfile(
         category="generic",
@@ -430,19 +447,60 @@ def get_specialist_exit_signal() -> dict[str, Any] | None:
 def _build_system_prompt(
     *, profile: SpecialistDispatchProfile, scope_context: str | None,
     relevant_findings: list[dict[str, Any]] | None,
+    skills_override: list[str] | None = None,
 ) -> str:
     """Compose the specialist's system prompt — fresh, scope-
     bound, no inherited chat history.
 
-    Three slots:
+    Four slots:
       1. The category-specific addendum (probe playbook)
-      2. The orchestrator's scope (target URL, exclusions, opsec
+      2. Phase 1C — paired skill bodies (auto-attached via
+         `profile.recommended_skills`, or overridden by
+         `skills_override`). Each skill body sits in its own
+         labelled section so the bounded inner LLM can refer to
+         it by name.
+      3. The orchestrator's scope (target URL, exclusions, opsec
          level — minimal version of §7's scope.yml)
-      3. A digest of relevant prior findings from the run (so the
+      4. A digest of relevant prior findings from the run (so the
          specialist can chain off them without re-running prior
          specialists' work)
+
+    Args:
+      profile: the category's dispatch profile.
+      scope_context: target URL + exclusions string, or None.
+      relevant_findings: prior-finding digest, or None.
+      skills_override: when provided, replaces
+        `profile.recommended_skills` for this call. Used by
+        operators / tests who want to inject custom skill bundles
+        without registering a new profile. Pass `[]` to suppress
+        all skill injection.
     """
     parts = [profile.system_prompt_addendum]
+
+    # Phase 1C — auto-attach paired skill bodies. Best-effort: a
+    # missing skill name / unreadable file is logged and skipped;
+    # the specialist boots without it rather than failing dispatch.
+    skills_to_load = (
+        skills_override
+        if skills_override is not None
+        else profile.recommended_skills
+    )
+    if skills_to_load:
+        try:
+            from strix.skills import load_skills
+
+            bodies = load_skills(skills_to_load)
+            for name, body in bodies.items():
+                if not body or not body.strip():
+                    continue
+                parts.append(
+                    f"\n\n---\nSKILL: {name}\n---\n{body.strip()}"
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "skill auto-attach failed for category=%s skills=%s: %s",
+                profile.category, skills_to_load, e,
+            )
 
     if scope_context:
         parts.append(
@@ -542,6 +600,7 @@ def dispatch_specialist(
     target: str | None = None,
     max_iterations: int | None = None,
     max_cost_usd: float | None = None,
+    skills_override: list[str] | None = None,
     inner_call_fn: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Spawn a bounded multi-round specialist run with fresh
@@ -556,6 +615,12 @@ def dispatch_specialist(
       target: optional target URL — included in scope_context.
       max_iterations: override the profile / env default.
       max_cost_usd: override the profile / env default.
+      skills_override: Phase 1C — when provided, replaces the
+        profile's `recommended_skills` list for this call. Pass
+        `[]` to suppress skill auto-attach entirely; pass a
+        custom list to inject specific skill bundles (useful for
+        custom-stack engagements). When `None` (default), the
+        category's profile-defined skills auto-attach.
       inner_call_fn: TEST HOOK — when provided, the inner LLM
         loop calls this instead of real litellm. Each call gets
         the message history and the iteration index; should
@@ -604,6 +669,7 @@ def dispatch_specialist(
         profile=profile,
         scope_context=scope_context,
         relevant_findings=relevant_findings,
+        skills_override=skills_override,
     )
 
     # Clear any stale exit signal from a previous dispatch.

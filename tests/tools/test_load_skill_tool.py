@@ -84,7 +84,9 @@ def test_load_skill_invalid_skill_returns_error() -> None:
         instances.update(original_instances)
 
 
-def test_load_skill_rejects_more_than_five_skills() -> None:
+def test_load_skill_rejects_above_cap() -> None:
+    """Phase 1C — the per-agent skill cap is 20 by default (was 5).
+    21 names exceeds the cap and rejects with a cap-citing message."""
     instances = agents_graph_actions.__dict__["_agent_instances"]
     original_instances = dict(instances)
     try:
@@ -92,12 +94,37 @@ def test_load_skill_rejects_more_than_five_skills() -> None:
         instances.clear()
         instances[state.agent_id] = _DummyAgent()
 
-        result = load_skill_actions.load_skill(state, "a,b,c,d,e,f")
+        # 21 names exceeds the new default of 20
+        many = ",".join(f"skill_{i}" for i in range(21))
+        result = load_skill_actions.load_skill(state, many)
 
         assert result["success"] is False
-        assert result["error"] == (
-            "Cannot specify more than 5 skills for an agent (use comma-separated format)"
+        assert "20" in result["error"], (
+            f"error should cite the cap of 20; got: {result['error']!r}"
         )
+        assert "STRIX_SKILLS_MAX_PER_AGENT" in result["error"], (
+            f"error should mention env var; got: {result['error']!r}"
+        )
+    finally:
+        instances.clear()
+        instances.update(original_instances)
+
+
+def test_load_skill_cap_honours_env(monkeypatch) -> None:
+    """Lowering the cap via STRIX_SKILLS_MAX_PER_AGENT tightens
+    validation immediately."""
+    monkeypatch.setenv("STRIX_SKILLS_MAX_PER_AGENT", "3")
+    instances = agents_graph_actions.__dict__["_agent_instances"]
+    original_instances = dict(instances)
+    try:
+        state = _DummyAgentState("agent_test_load_skill_env_cap")
+        instances.clear()
+        instances[state.agent_id] = _DummyAgent()
+
+        # 4 exceeds cap=3
+        result = load_skill_actions.load_skill(state, "a,b,c,d")
+        assert result["success"] is False
+        assert "3" in result["error"]
     finally:
         instances.clear()
         instances.update(original_instances)
