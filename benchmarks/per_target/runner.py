@@ -241,15 +241,28 @@ def run_strix(
         `LeadAgent`'s scan_config and the per-target-type catalog
         filter unions across all of them.
     """
+    # Use the `<type>:<value>` prefix on every target so strix's
+    # per-target-type catalog filter sees the right type. The plain
+    # URL form defaults to `web_application` regardless of the
+    # fixture manifest's `target_type:` — breaks api/domain/ip_address
+    # benchmarks silently (they ran with the web_application catalog).
     if isinstance(targets, str):
         target_args = ["-t", targets]
         printable = targets
     else:
         target_args = []
         printable_parts: list[str] = []
-        for _tt, t in targets:
-            target_args += ["-t", t]
-            printable_parts.append(t)
+        for tt, t in targets:
+            # When the target already has a recognised <type>: prefix,
+            # leave it alone. Otherwise prepend the manifest's tt.
+            type_aware = (
+                t if any(t.startswith(f"{p}:") for p in (
+                    "api", "web_application", "repository", "local_code",
+                    "ip_address", "domain", "cloud_account", "container_image",
+                )) else (f"{tt}:{t}" if tt else t)
+            )
+            target_args += ["-t", type_aware]
+            printable_parts.append(type_aware)
         printable = " + ".join(printable_parts)
     cmd = ["strix", "-n", *target_args, "-m", scan_mode] + extra_args
     print(f"[runner] {' '.join(cmd)}")
