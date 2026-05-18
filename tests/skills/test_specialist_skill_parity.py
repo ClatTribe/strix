@@ -243,3 +243,73 @@ def test_phase_1b_skills_appear_in_menu() -> None:
     ]
     missing = [s for s in expected if s not in menu]
     assert not missing, f"reconnaissance skills missing from menu: {missing}"
+
+
+def test_phase_2_cloud_skills_present() -> None:
+    """Pin that the 13 Phase-2 cloud skills landed and are parseable."""
+    base = get_strix_resource_path("skills") / "cloud"
+    expected = [
+        "aws_iam_chains",
+        "aws_s3_attack_surface",
+        "aws_lambda_attack_surface",
+        "aws_rds_attack_surface",
+        "aws_secrets_manager",
+        "azure_rbac_chains",
+        "azure_blob_attack_surface",
+        "gcp_iam_chains",
+        "gcp_bigquery_attack_surface",
+        "gcp_cloud_run_attack_surface",
+        "cloudtrail_anomaly_patterns",
+        "cloud_attack_path_traversal",
+        "dspm_pii_classification",
+    ]
+    for skill in expected:
+        path: Path = base / f"{skill}.md"
+        assert path.exists(), f"missing cloud skill: {path}"
+        content = path.read_text(encoding="utf-8")
+        assert content.startswith("---\n"), f"{skill}: missing frontmatter"
+        assert "\nname:" in content, f"{skill}: missing `name:` field"
+        assert "\ndescription:" in content, (
+            f"{skill}: missing `description:` field"
+        )
+        assert "\ntriggers:" in content, (
+            f"{skill}: Phase-2 cloud skills must declare `triggers:`"
+        )
+
+
+def test_phase_2_cloud_category_grows() -> None:
+    """Pre-Phase-2 the cloud category had only kubernetes.md (1 skill).
+    Phase 2 adds 13 → ≥14 total."""
+    from strix.skills import get_available_skills
+
+    available = get_available_skills()
+    assert "cloud" in available, "cloud category missing"
+    assert len(available["cloud"]) >= 14, (
+        f"expected ≥14 cloud skills after Phase 2; got "
+        f"{len(available['cloud'])}: {available['cloud']}"
+    )
+
+
+def test_phase_2_cloud_skills_appear_in_menu() -> None:
+    """The Decepticon menu picks up the new cloud skills."""
+    from strix.skills.menu import generate_skills_menu
+
+    menu = generate_skills_menu()
+    assert "CLOUD" in menu, "CLOUD category header missing from menu"
+    expected = [
+        "aws_iam_chains",
+        "aws_s3_attack_surface",
+        "aws_lambda_attack_surface",
+        "aws_rds_attack_surface",
+        "aws_secrets_manager",
+        "azure_rbac_chains",
+        "azure_blob_attack_surface",
+        "gcp_iam_chains",
+        "gcp_bigquery_attack_surface",
+        "gcp_cloud_run_attack_surface",
+        "cloudtrail_anomaly_patterns",
+        "cloud_attack_path_traversal",
+        "dspm_pii_classification",
+    ]
+    missing = [s for s in expected if s not in menu]
+    assert not missing, f"cloud skills missing from menu: {missing}"
