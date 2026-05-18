@@ -489,7 +489,7 @@ def _build_system_prompt(
         try:
             from strix.skills import load_skills
 
-            bodies = load_skills(skills_to_load)
+            bodies = load_skills(skills_to_load, loaded_by="orchestrator")
             for name, body in bodies.items():
                 if not body or not body.strip():
                     continue

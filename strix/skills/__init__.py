@@ -174,7 +174,20 @@ def _get_all_categories() -> dict[str, list[str]]:
     return all_categories
 
 
-def load_skills(skill_names: list[str]) -> dict[str, str]:
+def load_skills(
+    skill_names: list[str],
+    *,
+    loaded_by: str = "unknown",
+) -> dict[str, str]:
+    """Load skill bodies for the given names. Returns a `{name: body}`
+    dict. Frontmatter is stripped from the returned body so it's safe
+    to embed in a system prompt directly.
+
+    Phase 5: each successful load emits a `skill.loaded` event via the
+    global tracer with `loaded_by` attribution (e.g. 'orchestrator',
+    'lead_manual', 'fingerprint_auto'). Failures swallowed; the
+    telemetry path never breaks skill loading.
+    """
     import logging
 
     logger = logging.getLogger(__name__)
@@ -207,6 +220,12 @@ def load_skills(skill_names: list[str]) -> dict[str, str]:
                 content = _FRONTMATTER_PATTERN.sub("", content).lstrip()
                 skill_content[var_name] = content
                 logger.info(f"Loaded skill: {skill_name} -> {var_name}")
+                _emit_skill_loaded(
+                    skill_name=var_name,
+                    skill_path=str(skill_path),
+                    body_size=len(content),
+                    loaded_by=loaded_by,
+                )
             else:
                 logger.warning(f"Skill not found: {skill_name}")
 
@@ -214,3 +233,88 @@ def load_skills(skill_names: list[str]) -> dict[str, str]:
             logger.warning(f"Failed to load skill {skill_name}: {e}")
 
     return skill_content
+
+
+def _emit_skill_loaded(
+    *,
+    skill_name: str,
+    skill_path: str,
+    body_size: int,
+    loaded_by: str,
+) -> None:
+    """Best-effort emission of a `skill.loaded` event. Phase 5 instruments
+    the skill-load path so the wrapper can render:
+      * which skills the agent actually loaded per run
+      * which loader fired (orchestrator binding vs lead manual vs
+        fingerprint auto-load)
+      * total skill-context token budget consumed
+
+    Failures swallowed — telemetry must NEVER break skill loading."""
+    try:
+        from strix.telemetry.tracer import get_global_tracer
+
+        tracer = get_global_tracer()
+        if tracer is None:
+            return
+        # Use the existing `emit_event` API if available; otherwise the
+        # `add_event` shape. Tolerant to both since the tracer's API
+        # has shifted across releases.
+        evt = {
+            "kind": "skill.loaded",
+            "skill_name": skill_name,
+            "skill_path": skill_path,
+            "body_size_chars": body_size,
+            "loaded_by": loaded_by,
+        }
+        # Try common emission APIs in order
+        if hasattr(tracer, "emit_event"):
+            tracer.emit_event(**evt)
+        elif hasattr(tracer, "add_event"):
+            tracer.add_event(evt)
+        elif hasattr(tracer, "_events") and isinstance(tracer._events, list):
+            tracer._events.append(evt)
+    except Exception:  # noqa: BLE001 — telemetry must not break callers
+        pass
+
+
+def get_skill_frontmatter(skill_name: str) -> dict | None:
+    """Read frontmatter for a skill by name. Returns parsed dict or None.
+    Used by the freshness inspector + by tests to verify metadata.
+
+    Phase 5 conventions: `last_updated` (ISO date), `version` (int)."""
+    import re
+
+    skills_dir = get_strix_resource_path("skills")
+    all_categories = _get_all_categories()
+
+    skill_path = None
+    if "/" in skill_name:
+        skill_path = f"{skill_name}.md"
+    else:
+        for category, skills in all_categories.items():
+            if skill_name in skills:
+                skill_path = f"{category}/{skill_name}.md"
+                break
+
+    if skill_path is None:
+        return None
+    full_path = skills_dir / skill_path
+    if not full_path.exists():
+        return None
+
+    try:
+        text = full_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, re.DOTALL)
+    if not m:
+        return None
+    block = m.group(1)
+    out: dict = {}
+    for line in block.split("\n"):
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        out[key.strip()] = value.strip()
+    return out

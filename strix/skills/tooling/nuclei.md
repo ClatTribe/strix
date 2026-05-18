@@ -1,6 +1,7 @@
 ---
 name: nuclei
 description: Exact Nuclei command structure, template selection, and bounded high-throughput execution controls.
+triggers: [nuclei, template, cve scan, exposure, default credential, community templates, nuclei-templates]
 ---
 
 # Nuclei CLI Playbook

@@ -1,6 +1,7 @@
 ---
 name: graphql
 description: GraphQL security testing covering introspection, resolver injection, batching attacks, and authorization bypass
+triggers: [graphql, gql, /graphql, introspection, schema query, batching, alias attack, apollo, hasura, fragment, mutation]
 ---
 
 # GraphQL

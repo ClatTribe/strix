@@ -1,6 +1,7 @@
 ---
 name: semgrep
 description: Exact Semgrep CLI structure, metrics-off scanning, scoped ruleset selection, and automation-safe output patterns.
+triggers: [semgrep, sast, static analysis, ruleset, r/security-audit, scan code, sarif, vibe_coded pack]
 ---
 
 # Semgrep CLI Playbook

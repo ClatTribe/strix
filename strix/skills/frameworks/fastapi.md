@@ -1,6 +1,7 @@
 ---
 name: fastapi
 description: Security testing playbook for FastAPI applications covering ASGI, dependency injection, and API vulnerabilities
+triggers: [fastapi, asgi, uvicorn, pydantic, depends, oauth2, /docs, /redoc, /openapi.json, sqlalchemy]
 ---
 
 # FastAPI
