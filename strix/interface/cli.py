@@ -86,6 +86,9 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
         "scope": getattr(args, "scope", None),
         # engine-wishlist §3 — surface metadata in run_meta.json.
         "target_metadata": getattr(args, "target_metadata", None) or {},
+        # engine-wishlist §6 — project_id flows to tracer for
+        # finding-row + discovered-assets-row stamping.
+        "project_id": getattr(args, "project_id", None),
     }
 
     llm_config = LLMConfig(

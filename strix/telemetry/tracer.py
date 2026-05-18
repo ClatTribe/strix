@@ -462,6 +462,16 @@ class Tracer:
         self.vulnerability_reports: list[dict[str, Any]] = []
         self.final_scan_result: str | None = None
 
+        # engine-wishlist §6 — `STRIX_PROJECT_ID` (or `--project-id`)
+        # stamped onto every emitted artefact (findings, discovered
+        # assets, run_meta) so the wrapper's cross-scan dedup ledger
+        # can group N targets in a project under one finding row
+        # instead of N. Engine doesn't dedup — wrapper does.
+        # `set_scan_config` overrides this when scan_config carries
+        # an explicit `project_id`.
+        _env_pid = os.environ.get("STRIX_PROJECT_ID", "").strip()
+        self._project_id: str | None = _env_pid or None
+
         # engine-wishlist §4 — accumulator for assets discovered
         # during the scan (cloud-attack-paths discovery, future
         # researcher recon). Dumped to `assets.discovered.jsonl`
@@ -1002,6 +1012,11 @@ class Tracer:
             "timestamp": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
             "verification_status": verification_status.strip().lower(),
         }
+        # engine-wishlist §6 — stamp project_id on every finding so
+        # the wrapper's cross-scan dedup ledger can group identical
+        # findings across N targets within one project.
+        if self._project_id:
+            report["project_id"] = self._project_id
         if category:
             report["category"] = category.strip().lower()
 
@@ -2943,6 +2958,14 @@ class Tracer:
         # what was passed.
         if config.get("target_metadata"):
             update_payload["target_metadata"] = config["target_metadata"]
+        # engine-wishlist §6 — explicit project_id in scan_config
+        # beats the env-derived value captured at tracer
+        # construction. Stamp into run_meta.json so the wrapper
+        # can verify the engine saw it.
+        if config.get("project_id"):
+            self._project_id = str(config["project_id"]).strip() or None
+        if self._project_id:
+            update_payload["project_id"] = self._project_id
         self.run_metadata.update(update_payload)
         self._set_association_properties(
             {
@@ -3062,9 +3085,17 @@ class Tracer:
                     assets_file = run_dir / "assets.discovered.jsonl"
                     with assets_file.open("w", encoding="utf-8") as f:
                         for asset_d in self.discovered_assets:
+                            # engine-wishlist §6 — stamp project_id
+                            # so the wrapper can scope its KG / dedup
+                            # ledger to one project across N targets.
+                            stamped = dict(asset_d)
+                            if self._project_id:
+                                stamped.setdefault(
+                                    "project_id", self._project_id,
+                                )
                             f.write(
                                 json.dumps(
-                                    self._sanitize_data(asset_d),
+                                    self._sanitize_data(stamped),
                                     ensure_ascii=False,
                                 )
                             )
