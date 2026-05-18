@@ -1,6 +1,7 @@
 ---
 name: subfinder
 description: Subfinder passive subdomain enumeration syntax, source controls, and pipeline-ready output patterns.
+triggers: [subfinder, subdomain enum, passive recon, securitytrails, virustotal, chaos, projectdiscovery]
 ---
 
 # Subfinder CLI Playbook

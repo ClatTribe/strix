@@ -1,6 +1,7 @@
 ---
 name: ffuf
 description: ffuf fuzzing syntax with matcher/filter strategy and non-interactive defaults.
+triggers: [ffuf, fuzz, directory brute, wordlist, content discovery, matcher, mc, fs, fw, parameter discovery]
 ---
 
 # ffuf CLI Playbook

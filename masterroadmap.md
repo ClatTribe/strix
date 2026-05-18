@@ -26,6 +26,12 @@ deals. Not a marketing brief.
   XSW**. Closes all §1 P0/P1 items.
 - **Decepticon uplift** (PRs #233–#244) — typed KG, 5-stage verification
   pipeline, OPPLAN, specialist orchestrator, patcher runtime.
+- **Skills System Audit arc** (PRs #323–#331) — 8-phase upgrade of
+  `strix/skills/`: 46 → 73 skills, every shipped specialist now has a
+  paired skill (parity test pins it), hard 5-cap → env-tunable default
+  20, `chains/` meta-skill category for cross-target reasoning,
+  KG-driven + discovered-asset-driven + target-type auto-load wired
+  into lead-agent boot, `skill.loaded` telemetry, `TEMPLATE.md`.
 
 ---
 

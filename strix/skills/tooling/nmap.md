@@ -1,6 +1,7 @@
 ---
 name: nmap
 description: Canonical Nmap CLI syntax, two-pass scanning workflow, and sandbox-safe bounded scan patterns.
+triggers: [nmap, port scan, service version, nse, script scan, -sV, -sC, -p-, host discovery, banner grab]
 ---
 
 # Nmap CLI Playbook

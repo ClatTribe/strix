@@ -1,6 +1,7 @@
 ---
 name: httpx
 description: ProjectDiscovery httpx probing syntax, exact probe flags, and automation-safe output patterns.
+triggers: [httpx, http probe, status code, tech detect, title, favicon, projectdiscovery, alive hosts]
 ---
 
 # httpx CLI Playbook
