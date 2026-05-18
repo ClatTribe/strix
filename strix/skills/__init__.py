@@ -277,6 +277,229 @@ def _emit_skill_loaded(
         pass
 
 
+# ---------------------------------------------------------------------------
+# Phase 6 — KG-driven + asset-driven auto-load mappings
+# ---------------------------------------------------------------------------
+#
+# Today's skill loaders:
+#   - Manual via `load_skill` tool (the lead calls it explicitly)
+#   - Fingerprint auto-load in `strix/tools/recon/fingerprint.py`
+#     (tech-stack detection → skill list)
+#   - Orchestrator auto-bind via SpecialistDispatchProfile (PR #325 / §1C)
+#
+# Phase 6 adds two more loaders:
+#   - KG-node-kind → skill: when a `CloudResource` of subtype `aws_lambda`
+#     enters the graph, the lead should already know `aws_lambda_attack_surface`
+#   - Discovered-asset → skill: `assets.discovered.jsonl` rows declare
+#     `type` (web_application / repository / cloud_account / etc.) and
+#     `canonical_id` from which we derive richer skill recommendations
+#
+# Both new loaders compose with the existing two via union (deduplicated).
+# Callers query `get_auto_load_skills(target_types=..., kg_node_kinds=...,
+# discovered_assets=...)` to get the full pre-attach list.
+
+
+# Maps KG node kind / subtype to skill names. When a node of this
+# kind appears in the project KG (after one or more scans), the
+# lead should boot with these skills pre-attached.
+#
+# Order matters within each list — higher-impact / broader skills
+# first, so they're chosen first when the cap is hit.
+KG_NODE_KIND_TO_SKILL: dict[str, list[str]] = {
+    # Generic node-kind defaults
+    "CloudResource": ["cloud_attack_path_traversal"],
+    "CloudIdentity": ["aws_iam_chains", "cloud_attack_path_traversal"],
+    "Surface": ["asset_discovery_pipeline"],
+    "Asset": ["asset_discovery_pipeline"],
+    "Vuln": ["cross_asset_chains", "attack_path_synthesis"],
+    "Credential": ["cross_asset_chains"],
+    "Secret": ["aws_secrets_manager", "cross_asset_chains"],
+    "Dependency": ["threat_intel_pivoting"],
+    "Role": ["aws_iam_chains", "azure_rbac_chains", "gcp_iam_chains"],
+}
+
+
+# Subtype refinements — when a node has an `attrs.service` or
+# `attrs.kind` that's more specific, override / extend the kind-level
+# mapping. Keys are concrete subtype strings observed in CloudGraph.
+KG_NODE_SUBTYPE_TO_SKILL: dict[str, list[str]] = {
+    # AWS resource subtypes
+    "aws_s3": ["aws_s3_attack_surface"],
+    "aws_lambda": ["aws_lambda_attack_surface"],
+    "aws_rds": ["aws_rds_attack_surface"],
+    "aws_dynamodb": ["aws_iam_chains"],
+    "aws_iam_user": ["aws_iam_chains"],
+    "aws_iam_role": ["aws_iam_chains"],
+    "aws_secretsmanager": ["aws_secrets_manager"],
+    "aws_ec2": ["aws_iam_chains"],
+    # Azure
+    "azure_storage": ["azure_blob_attack_surface"],
+    "azure_blob": ["azure_blob_attack_surface"],
+    "azure_function": ["azure_rbac_chains"],
+    "azure_vm": ["azure_rbac_chains"],
+    # GCP
+    "gcp_storage": ["aws_s3_attack_surface"],  # similar shape; keep for proximity
+    "gcp_bigquery": ["gcp_bigquery_attack_surface"],
+    "gcp_cloudrun": ["gcp_cloud_run_attack_surface"],
+    "gcp_cloudfunction": ["gcp_cloud_run_attack_surface"],
+    "gcp_iam_sa": ["gcp_iam_chains"],
+    # Container
+    "container_image": ["dspm_pii_classification"],
+    # GraphQL endpoint
+    "graphql_endpoint": ["graphql"],
+}
+
+
+# Maps discovered-asset types (`assets.discovered.jsonl`) to skills.
+# This fires at scan-setup time when the wrapper passes pre-discovered
+# inventory into the engine. Different from KG-node mapping because
+# discovered-assets are typed at the wrapper boundary, before any
+# scan-side graph nodes exist.
+DISCOVERED_ASSET_TYPE_TO_SKILL: dict[str, list[str]] = {
+    "web_application": ["asset_discovery_pipeline"],
+    "api": ["openapi_recon", "asset_discovery_pipeline"],
+    "domain": ["subdomain_strategy", "dns_hygiene_attacks"],
+    "ip_address": ["threat_intel_pivoting"],
+    "repository": ["asset_discovery_pipeline"],
+    "container_image": ["dspm_pii_classification"],
+    "cloud_account": [
+        "cloud_attack_path_traversal", "aws_iam_chains",
+        "azure_rbac_chains", "gcp_iam_chains",
+    ],
+}
+
+
+# Per-target-type baseline skills that should always be in scope
+# regardless of KG / discovered-asset state. These are the "if you
+# only know the target type, load these" defaults.
+TARGET_TYPE_TO_SKILL: dict[str, list[str]] = {
+    "web_application": [
+        "asset_discovery_pipeline",
+        "har_burp_ingestion",
+    ],
+    "api": ["openapi_recon", "asset_discovery_pipeline"],
+    "domain": [
+        "subdomain_strategy",
+        "dns_hygiene_attacks",
+        "threat_intel_pivoting",
+    ],
+    "ip_address": ["threat_intel_pivoting"],
+    "repository": ["asset_discovery_pipeline"],
+    "cloud_account": [
+        "cloud_attack_path_traversal",
+        "kev_diff_workflow",
+        "threat_intel_pivoting",
+    ],
+    "container_image": ["dspm_pii_classification"],
+}
+
+
+def get_skills_for_kg_node(
+    kind: str, attrs: dict | None = None,
+) -> list[str]:
+    """Return the skill names suggested for a KG node of this
+    kind/subtype. Used by the orchestrator to pre-attach skills
+    when the KG indicates a relevant resource is present."""
+    skills: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        if name and name not in seen:
+            seen.add(name)
+            skills.append(name)
+
+    # Kind-level defaults
+    for s in KG_NODE_KIND_TO_SKILL.get(kind, []):
+        _add(s)
+
+    # Subtype refinement (when attrs supplies it)
+    if attrs:
+        subtype = (
+            attrs.get("service")
+            or attrs.get("kind")
+            or attrs.get("subtype")
+            or ""
+        )
+        for s in KG_NODE_SUBTYPE_TO_SKILL.get(subtype, []):
+            _add(s)
+
+    # Cross-check: skills must exist in the catalog. Silently drop
+    # references to deleted skills; the parity test catches them.
+    available = get_all_skill_names()
+    return [s for s in skills if s in available]
+
+
+def get_skills_for_discovered_asset(
+    asset_type: str,
+) -> list[str]:
+    """Return the skill names for a discovered-asset type. Used at
+    scan setup when `assets.discovered.jsonl` is consumed."""
+    available = get_all_skill_names()
+    return [
+        s for s in DISCOVERED_ASSET_TYPE_TO_SKILL.get(asset_type, [])
+        if s in available
+    ]
+
+
+def get_skills_for_target_type(target_type: str) -> list[str]:
+    """Baseline skills for a target type — fires before any KG state
+    is established. Combines with KG-node + discovered-asset
+    mappings at lead boot."""
+    available = get_all_skill_names()
+    return [
+        s for s in TARGET_TYPE_TO_SKILL.get(target_type, [])
+        if s in available
+    ]
+
+
+def get_auto_load_skills(
+    *,
+    target_types: list[str] | None = None,
+    kg_node_kinds: list[tuple[str, dict | None]] | None = None,
+    discovered_asset_types: list[str] | None = None,
+    max_skills: int | None = None,
+) -> list[str]:
+    """Union the three Phase 6 auto-load sources into a deduplicated
+    skill list ordered by leverage.
+
+    Args:
+      target_types: e.g. ['web_application', 'cloud_account']
+      kg_node_kinds: list of (kind, attrs_dict) for nodes already
+        in the project KG. attrs may be None.
+      discovered_asset_types: e.g. ['web_application', 'cloud_account']
+        — from assets.discovered.jsonl
+      max_skills: optional cap. Defaults to `get_max_skills_per_agent()`.
+
+    The function:
+      1. Walks discovered-asset types (richest signal)
+      2. Adds target-type baselines
+      3. Adds KG-node-kind refinements
+      4. Dedups + caps
+
+    Returns the skill name list ready to pass to `load_skills(...)`.
+    """
+    cap = max_skills if max_skills is not None else get_max_skills_per_agent()
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add_all(names: list[str]) -> None:
+        for n in names:
+            if n not in seen and len(out) < cap:
+                seen.add(n)
+                out.append(n)
+
+    # Order: discovered-assets (operator-curated, richest) > target_types
+    # > KG-node (refinement after the run starts gathering nodes)
+    for at in (discovered_asset_types or []):
+        _add_all(get_skills_for_discovered_asset(at))
+    for tt in (target_types or []):
+        _add_all(get_skills_for_target_type(tt))
+    for kind, attrs in (kg_node_kinds or []):
+        _add_all(get_skills_for_kg_node(kind, attrs))
+
+    return out
+
+
 def get_skill_frontmatter(skill_name: str) -> dict | None:
     """Read frontmatter for a skill by name. Returns parsed dict or None.
     Used by the freshness inspector + by tests to verify metadata.
