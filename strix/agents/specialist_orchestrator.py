@@ -113,6 +113,76 @@ def is_orchestrator_mode_enabled() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Scan-mode dispatch gate (phase 1 of cost-optimization proposal)
+# ---------------------------------------------------------------------------
+#
+# `--scan-mode quick|standard|deep` used to be a prompt-level nudge only —
+# it picked the skill body that landed in the system prompt and bumped
+# reasoning_effort. Every other phase (specialist dispatch, recon depth,
+# verification) was identical across modes, so a `quick` run cost the
+# same order of magnitude as `deep`. The dispatch loop is the single
+# largest cost multiplier (~60-70% of total spend on `standard`), so
+# capping N at the dispatch boundary is the highest-leverage knob.
+#
+# See docs/proposals/2026-05-19-scan-mode-cost-optimization.md.
+
+# Per-mode dispatch caps. `None` = unbounded; `0` = no dispatches allowed
+# at all (deterministic specialists only — the fresh-context loop is
+# skipped entirely).
+_SCAN_MODE_DISPATCH_CAP: dict[str, int | None] = {
+    "initial": 0,
+    "quick": 0,
+    "standard": 8,
+    "deep": None,
+}
+
+
+def get_scan_mode_dispatch_cap() -> int | None:
+    """Return the per-run dispatch_specialist cap derived from the
+    active scan mode. `STRIX_DISPATCH_CAP_OVERRIDE` short-circuits
+    the mode-derived value when the wrapper needs an explicit budget.
+
+    Returns:
+      int — the max number of dispatch_specialist calls that may
+        execute this run. After this many, further dispatches
+        short-circuit to DENIED_BY_SCAN_MODE.
+      None — unbounded (default for `deep`).
+    """
+    raw_override = (os.environ.get("STRIX_DISPATCH_CAP_OVERRIDE") or "").strip()
+    if raw_override:
+        try:
+            v = int(float(raw_override))
+            return max(0, v)
+        except (ValueError, TypeError):
+            pass
+    mode = (os.environ.get("STRIX_SCAN_MODE") or "").strip().lower()
+    if mode in _SCAN_MODE_DISPATCH_CAP:
+        return _SCAN_MODE_DISPATCH_CAP[mode]
+    # Unknown / unset mode — default to `deep` semantics (unbounded)
+    # so we never silently throttle a run that didn't opt in.
+    return None
+
+
+# Process-global dispatch counter. Reset between scans via
+# `reset_dispatch_counter()` (called from `reset_for_testing` and
+# at scan-config boot in cli.py / tui.py).
+_DISPATCH_COUNT: int = 0
+
+
+def reset_dispatch_counter() -> None:
+    """Reset the per-run dispatch_specialist counter to zero.
+    Called at scan boot and from tests."""
+    global _DISPATCH_COUNT
+    _DISPATCH_COUNT = 0
+
+
+def get_dispatch_count() -> int:
+    """Read the current dispatch counter — exposed for telemetry
+    and tests."""
+    return _DISPATCH_COUNT
+
+
+# ---------------------------------------------------------------------------
 # Per-category specialist profiles
 # ---------------------------------------------------------------------------
 
@@ -361,7 +431,11 @@ class SpecialistRunResult:
       category: the dispatched specialist category
       objective: the objective string the orchestrator passed in
       status: PASSED | BLOCKED | ITERATION_CAP_REACHED |
-        BUDGET_EXCEEDED | ERROR — the exit reason
+        BUDGET_EXCEEDED | DENIED_BY_SCAN_MODE | ERROR — the exit
+        reason. DENIED_BY_SCAN_MODE means the run-level dispatch
+        cap (derived from --scan-mode) was exhausted; the lead
+        should fall back to deterministic probes for this
+        objective rather than retrying dispatch.
       reason: optional human-readable explanation, especially for
         BLOCKED / ERROR
       iterations_used: how many inner-LLM rounds the specialist ran
@@ -408,6 +482,7 @@ _SPECIALIST_EXIT: dict[str, Any] | None = None
 def reset_for_testing() -> None:
     global _SPECIALIST_EXIT
     _SPECIALIST_EXIT = None
+    reset_dispatch_counter()
 
 
 def signal_specialist_complete(*, status: str, reason: str | None = None,
@@ -642,6 +717,35 @@ def dispatch_specialist(
             status="ERROR", reason="objective required",
         ).to_dict()
 
+    # Phase-1 scan-mode gate. Quick / initial modes set the cap to 0
+    # so the fresh-context loop is skipped entirely; standard caps at
+    # 8 dispatches per run; deep is unbounded. The cap is read from
+    # STRIX_SCAN_MODE (set at scan boot) — overridable via
+    # STRIX_DISPATCH_CAP_OVERRIDE for wrappers that need an explicit
+    # budget. Over-cap returns a no-op result rather than raising so
+    # the lead can read it and adapt (e.g. fall back to deterministic
+    # probes).
+    global _DISPATCH_COUNT
+    cap_dispatches = get_scan_mode_dispatch_cap()
+    if cap_dispatches is not None and _DISPATCH_COUNT >= cap_dispatches:
+        mode = (os.environ.get("STRIX_SCAN_MODE") or "").strip().lower() or "unset"
+        reason = (
+            f"scan_mode={mode} caps specialist dispatch at "
+            f"{cap_dispatches}; this would be #{_DISPATCH_COUNT + 1}"
+        )
+        logger.info(
+            "dispatch_specialist denied by scan_mode: category=%s mode=%s "
+            "cap=%d count=%d",
+            category, mode, cap_dispatches, _DISPATCH_COUNT,
+        )
+        return SpecialistRunResult(
+            category=category,
+            objective=objective,
+            status="DENIED_BY_SCAN_MODE",
+            reason=reason,
+        ).to_dict()
+    _DISPATCH_COUNT += 1
+
     profile = get_profile(category)
     cap = max_iterations or profile.max_iterations or get_max_iterations()
     cost_cap = max_cost_usd or profile.max_cost_usd
@@ -672,8 +776,13 @@ def dispatch_specialist(
         skills_override=skills_override,
     )
 
-    # Clear any stale exit signal from a previous dispatch.
-    reset_for_testing()
+    # Clear any stale exit signal from a previous dispatch. Note:
+    # we DON'T call `reset_for_testing()` here even though it does
+    # the same thing — it also zeroes the per-run dispatch counter,
+    # which the scan-mode gate (phase 1) depends on persisting
+    # across dispatches.
+    global _SPECIALIST_EXIT
+    _SPECIALIST_EXIT = None
 
     # Inner loop — bounded iterations. Each iteration is one
     # LLM call + tool execution + result back into history.

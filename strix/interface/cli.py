@@ -1,4 +1,5 @@
 import atexit
+import os
 import signal
 import sys
 import threading
@@ -70,6 +71,21 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
     console.print()
 
     scan_mode = getattr(args, "scan_mode", "deep")
+
+    # Phase-1 cost gate (docs/proposals/2026-05-19-scan-mode-cost-
+    # optimization.md): publish scan_mode on the process env so the
+    # specialist orchestrator's dispatch gate can read it without
+    # plumbing llm_config through every call site. Reset the
+    # per-run dispatch counter so a re-entrant CLI invocation
+    # doesn't inherit the previous run's count.
+    os.environ["STRIX_SCAN_MODE"] = scan_mode
+    try:
+        from strix.agents.specialist_orchestrator import (  # noqa: PLC0415
+            reset_dispatch_counter,
+        )
+        reset_dispatch_counter()
+    except Exception:  # noqa: BLE001
+        pass
 
     scan_config = {
         "scan_id": args.run_name,

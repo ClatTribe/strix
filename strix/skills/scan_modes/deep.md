@@ -7,6 +7,14 @@ description: Exhaustive security assessment with maximum coverage, depth, and vu
 
 Exhaustive security assessment. Maximum coverage, maximum depth. Finding what others miss is the goal.
 
+## Engine constraints
+
+- **`dispatch_specialist` is uncapped in deep mode.** Spend
+  dispatches freely on plausible exploit surfaces — depth and
+  chaining are the goal. The lead's `--max-cost` is still the
+  ultimate ceiling.
+- Reasoning effort is high.
+
 ## Approach
 
 Thorough understanding before exploitation. Test every parameter, every endpoint, every edge case. Chain findings for maximum impact.

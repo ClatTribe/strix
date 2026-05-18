@@ -7,6 +7,17 @@ description: Time-boxed rapid assessment targeting high-impact vulnerabilities
 
 Time-boxed assessment focused on high-impact vulnerabilities. Prioritize breadth over depth.
 
+## Engine constraints
+
+- **`dispatch_specialist` is disabled in quick mode** (cap = 0). The
+  fresh-context specialist loop is the largest cost driver, and quick
+  mode trades that depth for breadth + speed. Calls to
+  `dispatch_specialist` return `status=DENIED_BY_SCAN_MODE` —
+  treat this as "use the deterministic specialist tool directly"
+  (e.g. `scan_sqli`, `scan_xss`, `scan_idor`) rather than retrying.
+- Reasoning effort is medium.
+- Wall-clock target: under 10 minutes per asset.
+
 ## Approach
 
 Optimize for fast feedback on critical security issues. Skip exhaustive enumeration in favor of targeted testing on high-value attack surfaces.

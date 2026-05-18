@@ -7,6 +7,17 @@ description: Balanced security assessment with systematic methodology and full a
 
 Balanced security assessment with structured methodology. Thorough coverage without exhaustive depth.
 
+## Engine constraints
+
+- **`dispatch_specialist` is capped at 8 calls per run.** Choose
+  dispatches deliberately — each fresh-context loop is a ~$0.05-$0.15
+  spend. Spend the budget on the highest-signal surfaces (auth flows,
+  IDOR-prone endpoints, injection sinks). Over-cap calls return
+  `status=DENIED_BY_SCAN_MODE` — fall back to deterministic specialist
+  tools rather than retrying dispatch.
+- Reasoning effort is high.
+- Override the cap when warranted via `STRIX_DISPATCH_CAP_OVERRIDE=<n>`.
+
 ## Approach
 
 Systematic testing across the full attack surface. Understand the application before exploiting it.
