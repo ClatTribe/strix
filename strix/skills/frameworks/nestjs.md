@@ -1,6 +1,7 @@
 ---
 name: nestjs
 description: Security testing playbook for NestJS applications covering guards, pipes, decorators, module boundaries, and multi-transport auth
+triggers: [nestjs, nest, @nestjs, guard, pipe, decorator, module boundary, typeorm, microservice, multi-transport]
 ---
 
 # NestJS

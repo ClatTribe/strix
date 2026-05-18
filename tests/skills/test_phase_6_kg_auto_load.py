@@ -229,3 +229,52 @@ def test_auto_load_filters_missing_skill_references() -> None:
             assert s in available, (
                 f"get_skills_for_kg_node({kind!r}) returned missing skill {s!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 cleanup — boot-time integration into LeadAgent
+# ---------------------------------------------------------------------------
+
+
+def test_lead_agent_source_wires_auto_load() -> None:
+    """The LeadAgent boot path includes the Phase 6 auto-load wiring.
+
+    A full hermetic LeadAgent boot is hard to fixture without a real
+    LLM provider + sandbox; this test pins the contract at the source
+    level so the wiring can't silently drop out in future refactors.
+    """
+    from strix.utils.resource_paths import get_strix_resource_path
+
+    lead_src = (
+        get_strix_resource_path("agents")
+        / "lead_agent" / "lead_agent.py"
+    ).read_text(encoding="utf-8")
+
+    # The auto-load wiring imports + calls + add_skills handoff
+    assert "from strix.skills import get_auto_load_skills" in lead_src, (
+        "LeadAgent missing get_auto_load_skills import"
+    )
+    assert "self.llm.add_skills(auto)" in lead_src, (
+        "LeadAgent missing llm.add_skills handoff after auto-load"
+    )
+    # Reference to target_types_list (the post-Phase-7 gating)
+    assert "target_types=target_types_list" in lead_src, (
+        "LeadAgent does not pass target_types to auto-load"
+    )
+    # Phase 7: should skip the fallback-all-types case so unit-test
+    # instantiations don't inflate prompt with N-target-type baselines
+    assert "is_fallback_default" in lead_src, (
+        "LeadAgent auto-load missing the all-types-fallback gate"
+    )
+
+
+def test_auto_load_at_boot_produces_target_type_baseline() -> None:
+    """Smoke: with a web_application target type and no KG state, the
+    auto-load returns the web_application baseline skills the LeadAgent
+    boot integration relies on."""
+    from strix.skills import get_auto_load_skills
+
+    skills = get_auto_load_skills(target_types=["web_application"])
+    assert "asset_discovery_pipeline" in skills, (
+        f"expected asset_discovery_pipeline in web_application baseline; got {skills}"
+    )

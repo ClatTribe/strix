@@ -1,6 +1,7 @@
 ---
 name: source-aware-sast
 description: Practical source-aware SAST and AST playbook for semgrep, ast-grep, gitleaks, and trivy fs
+triggers: [sast, ast-grep, gitleaks, trivy fs, source code review, code map, taint, source-aware, whitebox]
 ---
 
 # Source-Aware SAST Playbook

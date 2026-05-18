@@ -664,6 +664,50 @@ class LeadAgent(StrixAgent):
         except Exception:  # noqa: BLE001
             logger.debug("LeadAgent: could not refresh self.llm.system_prompt")
 
+        # Skills System Audit §6 — KG-driven + discovered-asset auto-load.
+        # Compose target-type baselines + (when available) the
+        # discovered-asset inventory + initial KG state into a single
+        # skill pre-load list, then add to the LLM's active skills.
+        #
+        # IMPORTANT: only fires when target_types is an explicit
+        # operator-supplied set. The default-fallback "all target types"
+        # case (when no scan_config was provided, e.g. direct unit-
+        # test instantiation) is treated as no-signal and skipped — a
+        # 7-target-type baseline auto-load would inflate the system
+        # prompt by ~50-100K chars without operator intent.
+        #
+        # When a wrapper integrates kg_delta.jsonl unioning across
+        # project scans, the KG-node state will be non-empty and this
+        # call yields richer pre-loads automatically.
+        #
+        # Failures swallowed — the agent still boots, just without the
+        # auto-load shortcut. Existing fingerprint auto-load
+        # (strix/tools/recon/fingerprint.py) is unaffected.
+        try:
+            from strix.agents.lead_agent.tool_catalog import list_target_types
+            from strix.skills import get_auto_load_skills
+
+            target_types_list = list(target_types)
+            is_fallback_default = (
+                set(target_types_list) == set(list_target_types())
+                and not (config.get("scan_config") or {}).get("targets")
+            )
+            if not is_fallback_default:
+                auto = get_auto_load_skills(
+                    target_types=target_types_list,
+                    kg_node_kinds=None,         # populated when KG state exists
+                    discovered_asset_types=None,  # populated when wrapper provides
+                )
+                if auto:
+                    added = self.llm.add_skills(auto)
+                    if added:
+                        logger.info(
+                            "LeadAgent: auto-loaded %d skill(s) at boot: %s",
+                            len(added), added,
+                        )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("LeadAgent: auto-load skills failed: %s", e)
+
         # Roadmap §8.5 Phase 6 — watchdog state for the iteration
         # hook. Tracks turns since last progress; force-exits the
         # loop when too many idle turns pass. Default

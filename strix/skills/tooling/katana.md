@@ -1,6 +1,7 @@
 ---
 name: katana
 description: Katana crawler syntax, depth/js/known-files behavior, and stable concurrency controls.
+triggers: [katana, crawler, web crawl, js crawl, depth, headless, javascript endpoint, url extraction]
 ---
 
 # Katana CLI Playbook

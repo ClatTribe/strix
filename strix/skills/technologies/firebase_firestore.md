@@ -1,6 +1,7 @@
 ---
 name: firebase-firestore
 description: Firebase/Firestore security testing covering security rules, Cloud Functions, and client-side trust issues
+triggers: [firebase, firestore, firebase rules, cloud functions, firebase auth, firebase config, firestore.rules, .indexes.json]
 ---
 
 # Firebase / Firestore

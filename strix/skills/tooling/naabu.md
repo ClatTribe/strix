@@ -1,6 +1,7 @@
 ---
 name: naabu
 description: Naabu port-scanning syntax with host input, scan-type, verification, and rate controls.
+triggers: [naabu, port scan, syn scan, connect scan, top ports, rate limit, fast scan, port discovery]
 ---
 
 # Naabu CLI Playbook
