@@ -318,14 +318,19 @@ Examples:
         "-t",
         "--target",
         type=str,
-        required=True,
+        # engine-wishlist §1 — `-t` is required EXCEPT when
+        # `--target-list` is supplied (mutually exclusive). The
+        # argparse-level `required` is relaxed and we enforce
+        # post-parse so the error message can name both flags.
+        required=False,
         action="append",
         help="Target to test (URL, repository, local directory path, domain name, or IP address). "
         "Can be specified multiple times for multi-target scans. "
         "Wrappers can disambiguate URL-shaped targets with a "
         "`<type>:<value>` prefix, e.g. `api:https://api.example.com` "
         "or `container_image:nginx:1.25`. Allowed types: "
-        "web_application, api, repository, local_code, ip_address, container_image.",
+        "web_application, api, repository, local_code, ip_address, container_image. "
+        "Mutually exclusive with --target-list (engine-wishlist §1).",
     )
     parser.add_argument(
         "--instruction",
@@ -776,6 +781,65 @@ Examples:
         ),
     )
 
+    # engine-wishlist §1 — multi-target batch mode. The wrapper
+    # sends N targets in a single invocation to amortise per-scan
+    # setup costs. v1 ships the dispatch layer; shared sandbox +
+    # shared Researcher are deferred follow-ups. The single-
+    # target `-t` flag stays the canonical path; `--target-list`
+    # is purely additive.
+    parser.add_argument(
+        "--target-list",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a targets.jsonl file (one JSON object per "
+            "line with id / type / value + optional metadata / "
+            "scan_mode / scope_mode). Cannot be combined with "
+            "-t. engine-wishlist.md §1."
+        ),
+    )
+    parser.add_argument(
+        "--batch-cost-cap",
+        type=float,
+        default=None,
+        metavar="USD",
+        help=(
+            "Hard cumulative-cost cap (USD) across the batch. "
+            "When exceeded, the engine finishes the in-flight "
+            "target then exits with `status: cost_cap_reached`. "
+            "engine-wishlist.md §1."
+        ),
+    )
+    parser.add_argument(
+        "--batch-id",
+        type=str,
+        default=None,
+        metavar="STR",
+        help=(
+            "Stable batch identifier; auto-generated when "
+            "omitted. Surfaces in batch_meta.json + every "
+            "per-target run_meta.json. engine-wishlist.md §1."
+        ),
+    )
+
+    # engine-wishlist §7 — shared MOAK Researcher cache.
+    parser.add_argument(
+        "--shared-researcher-cache",
+        type=str,
+        default=None,
+        metavar="PATH_OR_RUN_ID",
+        help=(
+            "Path to a Researcher cache file (or a prior batch's "
+            "run_id; the engine resolves it under "
+            "`<workdir>/researcher_cache/`). When set + valid, "
+            "the engine skips re-running the Researcher phase "
+            "and consumes the cached output. engine-wishlist.md "
+            "§7. v1 ships the cache contract; engine-side "
+            "consumption hook is the follow-up."
+        ),
+    )
+
     # engine-wishlist §6 — project_id stamp. When the wrapper
     # supplies it, the engine writes `project_id` onto every
     # finding row + every `assets.discovered.jsonl` row + into
@@ -858,6 +922,45 @@ Examples:
 
     args = parser.parse_args()
 
+    # engine-wishlist §1 — validate --target-list at parse time so
+    # a malformed manifest fails BEFORE the docker pull / warmup
+    # / LLM init path. Either -t or --target-list MUST be set;
+    # mutually exclusive.
+    if not getattr(args, "target_list", None) and not getattr(
+        args, "target", None,
+    ):
+        parser.error(
+            "one of -t / --target-list is required (engine-wishlist §1)",
+        )
+    if getattr(args, "target_list", None):
+        if getattr(args, "target", None):
+            parser.error(
+                "--target-list cannot be combined with -t; pick one",
+            )
+        try:
+            from strix.interface.batch_mode import (  # noqa: PLC0415
+                BatchManifest,
+                load_target_list,
+            )
+            import uuid  # noqa: PLC0415
+            batch_targets = load_target_list(args.target_list)
+            args.batch_manifest = BatchManifest(
+                batch_id=(
+                    args.batch_id or f"batch-{uuid.uuid4().hex[:12]}"
+                ),
+                targets=batch_targets,
+                cost_cap_usd=args.batch_cost_cap,
+            )
+            logger.info(
+                "batch mode: loaded %d targets from %s (batch_id=%s)",
+                len(batch_targets), args.target_list,
+                args.batch_manifest.batch_id,
+            )
+        except (ValueError, ImportError) as e:
+            parser.error(f"--target-list: {e}")
+    else:
+        args.batch_manifest = None
+
     # engine-wishlist §6 — resolve --project-id / STRIX_PROJECT_ID
     # into args.project_id. Explicit flag wins.
     args.project_id = (
@@ -929,31 +1032,66 @@ Examples:
             parser.error(str(e))
 
     args.targets_info = []
-    for target in args.target:
-        try:
-            target_type, target_dict = infer_target_type(target)
-
-            # Resolve the canonical display form from the parsed
-            # `target_dict` so a `<type>:<value>` prefix on `--target`
-            # is stripped from the run banner / logs (wrapper-friendly).
-            if target_type == "local_code":
-                display_target = target_dict.get("target_path", target)
-            elif target_type in ("web_application", "api"):
-                display_target = target_dict.get("target_url", target)
-            elif target_type == "repository":
-                display_target = target_dict.get("target_repo", target)
-            elif target_type == "ip_address":
-                display_target = target_dict.get("target_ip", target)
-            elif target_type == "container_image":
-                display_target = target_dict.get("target_image", target)
+    # engine-wishlist §1 — when --target-list is supplied, the
+    # targets_info list is populated from the batch manifest
+    # instead of -t. Each manifest row already carries explicit
+    # type + value; we just need to project them into the same
+    # shape downstream code expects.
+    if args.batch_manifest is not None:
+        for bt in args.batch_manifest.targets:
+            details: dict[str, Any] = {}
+            if bt.type == "local_code":
+                details["target_path"] = bt.value
+            elif bt.type in ("web_application", "api"):
+                details["target_url"] = bt.value
+            elif bt.type == "repository":
+                details["target_repo"] = bt.value
+            elif bt.type == "ip_address":
+                details["target_ip"] = bt.value
+            elif bt.type == "container_image":
+                details["target_image"] = bt.value
             else:
-                display_target = target
+                # Permissive — unknown types pass through.
+                details["target_value"] = bt.value
+            args.targets_info.append({
+                "type": bt.type,
+                "details": details,
+                "original": bt.value,
+                # engine-wishlist §1 — `target_id` flows through
+                # tracer + events.jsonl for the wrapper to demux.
+                "target_id": bt.id,
+                # engine-wishlist §3 — per-target metadata from
+                # the batch manifest takes precedence over the
+                # global --target-metadata-file (which applies to
+                # single-target runs).
+                "metadata": dict(bt.metadata),
+            })
+    else:
+        for target in (args.target or []):
+            try:
+                target_type, target_dict = infer_target_type(target)
 
-            args.targets_info.append(
-                {"type": target_type, "details": target_dict, "original": display_target}
-            )
-        except ValueError:
-            parser.error(f"Invalid target '{target}'")
+                # Resolve the canonical display form from the parsed
+                # `target_dict` so a `<type>:<value>` prefix on `--target`
+                # is stripped from the run banner / logs (wrapper-friendly).
+                if target_type == "local_code":
+                    display_target = target_dict.get("target_path", target)
+                elif target_type in ("web_application", "api"):
+                    display_target = target_dict.get("target_url", target)
+                elif target_type == "repository":
+                    display_target = target_dict.get("target_repo", target)
+                elif target_type == "ip_address":
+                    display_target = target_dict.get("target_ip", target)
+                elif target_type == "container_image":
+                    display_target = target_dict.get("target_image", target)
+                else:
+                    display_target = target
+
+                args.targets_info.append(
+                    {"type": target_type, "details": target_dict, "original": display_target}
+                )
+            except ValueError:
+                parser.error(f"Invalid target '{target}'")
 
     assign_workspace_subdirs(args.targets_info)
     rewrite_localhost_targets(args.targets_info, HOST_GATEWAY_HOSTNAME)
