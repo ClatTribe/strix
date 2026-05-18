@@ -451,6 +451,28 @@ def domain_recon_pipeline(  # noqa: PLR0913
         enable_cloud_assets = False
         triage_subdomains = False
 
+    # v2 step 5 — recon cache lookup. Re-runs of the same domain
+    # with the same parameter shape replay the cached surface_map.
+    _cache_params = {
+        "enable_typosquats": enable_typosquats,
+        "enable_passive_dns": enable_passive_dns,
+        "enable_cloud_assets": enable_cloud_assets,
+        "subdomain_max": subdomain_max,
+        "triage_subdomains": triage_subdomains,
+        "dns_only": dns_only,
+    }
+    try:
+        from strix.agents.recon_cache import get as _recon_cache_get
+        _cached = _recon_cache_get(
+            pipeline="domain_recon_pipeline",
+            target_url=domain,
+            params=_cache_params,
+        )
+    except Exception:  # noqa: BLE001
+        _cached = None
+    if _cached is not None:
+        return _cached
+
     # Open the recon phase. We always close it in `finally` so a partial
     # failure still emits phase.completed.
     phase_id: str | None = None
@@ -562,13 +584,28 @@ def domain_recon_pipeline(  # noqa: PLR0913
         if path:
             surface_map["surface_map_path"] = str(path)
 
-        return {
+        result = {
             "success": True,
             "domain": domain,
             "phase_id": phase_id,
             "surface_map": surface_map,
             "next_steps": _format_next_steps(surface_map),
         }
+
+        # v2 step 5 — store in the recon cache. put() rejects
+        # results where success=False, so no manual check needed.
+        try:
+            from strix.agents.recon_cache import put as _recon_cache_put
+            _recon_cache_put(
+                pipeline="domain_recon_pipeline",
+                target_url=domain,
+                result=result,
+                params=_cache_params,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("recon_cache store failed", exc_info=True)
+
+        return result
     finally:
         if tracer is not None and phase_id is not None:
             try:
