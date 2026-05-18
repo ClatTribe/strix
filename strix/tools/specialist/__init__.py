@@ -45,6 +45,7 @@ from strix.tools.specialist import scan_api_grpc_reflection as _scan_api_grpc_re
 from strix.tools.specialist import scan_multi_role_auth as _scan_multi_role_auth  # noqa: F401  # Phase 3.1
 from strix.tools.specialist import scan_oauth as _scan_oauth  # noqa: F401  # Phase 2.11
 from strix.tools.specialist import scan_request_smuggling_active as _scan_request_smuggling_active  # noqa: F401  # Phase 2.10
+from strix.tools.specialist import scan_race_condition as _scan_race_condition  # noqa: F401  # masterroadmap §1 P2
 from strix.tools.specialist import scan_subdomain_takeover_active as _scan_subdomain_takeover_active  # noqa: F401  # Phase 2.9
 from strix.tools.specialist import scan_ldap_injection as _scan_ldap_injection  # noqa: F401  # Phase 2.8
 from strix.tools.specialist import scan_xpath_injection as _scan_xpath_injection  # noqa: F401  # Phase 2.7

@@ -66,12 +66,12 @@ the attack classes that hit modern frontends + edge infrastructure.
 
 | | Item | Effort | Priority | Why it matters |
 |---|---|---|---|---|
-| ⬜ | **HTTP request smuggling detector** (CL.TE / TE.TE / TE.CL / TE.0). Single specialist that walks the canonical desync probe matrix. | M | P0 | Highest-impact missing category for any org with a CDN / proxy / load balancer in front of their app. Burp's flagship feature. Single-PR scope. |
-| ⬜ | **Web cache poisoning + cache deception** detector. Probe unkeyed header reflection, path-confusion deception variants. | M | P0 | Increasingly common attack class; no real coverage today. |
-| ⬜ | **Server-side prototype pollution** detector. Probe `__proto__` / `constructor.prototype` injection points across JSON body / query / path params. | M | P1 | Newer class; Node ecosystem ubiquitous. Distinct from client-side prototype pollution. |
-| ⬜ | **OAuth / OIDC / SAML deep flow analyzer**. Inspect `redirect_uri` validation, state / PKCE, SAML signature wrapping, JWT `alg=none` + alg confusion, refresh-token rotation. | L | P0 | Common audit-failure point. Single attack class generates the most catastrophic real-world breaches. |
-| ⬜ | **WebSocket / SSE auth probe**. Test `Upgrade` auth, cross-site WebSocket hijacking, message validation. | M | P1 | Modern apps universally have these endpoints. |
-| ⬜ | **Race condition / TOCTOU** detector — repeat-fire requests with timing variance against state-changing endpoints (transfer / coupon-apply / checkout). | L | P2 | Business-logic attack class hardly anyone covers. Differentiator. |
+| ✅ | **HTTP request smuggling detector** (CL.TE / TE.TE / TE.CL / TE.0). Single specialist that walks the canonical desync probe matrix. Shipped: `scan_request_smuggling_active`. | M | P0 | Highest-impact missing category for any org with a CDN / proxy / load balancer in front of their app. Burp's flagship feature. |
+| ✅ | **Web cache poisoning + cache deception** detector. Shipped: `scan_cache_deception`. | M | P0 | Increasingly common attack class. |
+| ✅ | **Server-side prototype pollution** detector. Shipped: `scan_prototype_pollution`. | M | P1 | Node ecosystem ubiquitous. |
+| 🚧 | **OAuth / OIDC / SAML deep flow analyzer**. OAuth + OIDC shipped (`scan_oauth`). JWT alg-confusion shipped (`tools/jwt_audit`). **Still open**: SAML signature wrapping (XSW variants) — no specialist today. | L | P0 | Common audit-failure point. SAML still a gap. |
+| ✅ | **WebSocket / SSE auth probe**. Shipped: `scan_websocket_auth`. | M | P1 | Modern apps universally have these endpoints. |
+| ✅ | **Race condition / TOCTOU** detector — repeat-fire requests with timing variance against state-changing endpoints (transfer / coupon-apply / checkout). Shipped: `scan_race_condition` — baseline + N-parallel-fire + success-rate classification + dotted-path JSON field extraction. | L | P2 | Business-logic attack class hardly anyone covers. Differentiator. |
 | 🚧 | **Diff-aware scanning** — scan only the routes a PR changes. Engine already has scope-mode `diff`; needs route-level granularity. | M | P0 | Single biggest determinant of developer adoption per the comparison. Dev mutes the bot otherwise. |
 
 ### Expected impact on scoring
