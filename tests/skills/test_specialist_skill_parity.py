@@ -388,3 +388,56 @@ def test_phase_3_skills_appear_in_menu() -> None:
     ]
     missing = [s for s in expected if s not in menu]
     assert not missing, f"Phase-3 skills missing from menu: {missing}"
+
+
+def test_phase_4_chains_category_exists() -> None:
+    """New `chains/` category houses cross-cutting meta-skills."""
+    from strix.skills import get_available_skills
+
+    available = get_available_skills()
+    assert "chains" in available, (
+        "chains/ category must exist after Phase 4"
+    )
+    assert len(available["chains"]) >= 4, (
+        f"expected ≥4 chains skills; got "
+        f"{len(available['chains'])}: {available['chains']}"
+    )
+
+
+def test_phase_4_meta_skills_present() -> None:
+    """Pin the Phase 4 meta-skills."""
+    base = get_strix_resource_path("skills")
+    expected_in_chains = [
+        "kg_traversal_patterns",
+        "cross_asset_chains",
+        "attack_path_synthesis",
+        "unknown_vuln_hypothesis",
+    ]
+    for skill in expected_in_chains:
+        path: Path = base / "chains" / f"{skill}.md"
+        assert path.exists(), f"missing chains skill: {path}"
+        content = path.read_text(encoding="utf-8")
+        assert content.startswith("---\n"), f"{skill}: missing frontmatter"
+        assert "\ntriggers:" in content, f"{skill}: missing `triggers:`"
+
+    # llm_app_attack_surface lives in vulnerabilities/
+    llm_path = base / "vulnerabilities" / "llm_app_attack_surface.md"
+    assert llm_path.exists(), "missing llm_app_attack_surface skill"
+    assert "\ntriggers:" in llm_path.read_text(encoding="utf-8")
+
+
+def test_phase_4_chains_appear_in_menu() -> None:
+    """chains/ category renders in the menu under CHAINS header."""
+    from strix.skills.menu import generate_skills_menu
+
+    menu = generate_skills_menu()
+    assert "CHAINS" in menu, "CHAINS category header missing from menu"
+    expected = [
+        "kg_traversal_patterns",
+        "cross_asset_chains",
+        "attack_path_synthesis",
+        "unknown_vuln_hypothesis",
+        "llm_app_attack_surface",
+    ]
+    missing = [s for s in expected if s not in menu]
+    assert not missing, f"Phase-4 skills missing from menu: {missing}"

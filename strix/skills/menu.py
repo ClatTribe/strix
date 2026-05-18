@@ -83,6 +83,10 @@ _FIELD_RE = re.compile(r"^(\w+)\s*:\s*(.*)$", re.MULTILINE)
 
 # Display ordering for categories — vulnerabilities first (the
 # bread-and-butter), then tooling, then everything else alphabetical.
+# Phase 4: `chains/` houses cross-cutting meta-skills (KG traversal,
+# attack-path synthesis, unknown-vuln hypothesis); displayed after
+# the specific-vulnerability and recon skills so the agent reaches
+# for it when stuck.
 _CATEGORY_ORDER = (
     "vulnerabilities",
     "tooling",
@@ -91,6 +95,7 @@ _CATEGORY_ORDER = (
     "reconnaissance",
     "frameworks",
     "cloud",
+    "chains",
     "custom",
 )
 
