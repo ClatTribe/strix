@@ -763,7 +763,11 @@ class StrixTUIApp(App):  # type: ignore[misc]
             from strix.agents.specialist_orchestrator import (  # noqa: PLC0415
                 reset_dispatch_counter,
             )
+            from strix.agents.specialist_verdict_cache import (  # noqa: PLC0415
+                reset as reset_verdict_cache,
+            )
             reset_dispatch_counter()
+            reset_verdict_cache()
         except Exception:  # noqa: BLE001
             pass
         llm_config = LLMConfig(

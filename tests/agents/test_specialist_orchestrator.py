@@ -37,6 +37,7 @@ def _reset(monkeypatch):
     monkeypatch.delenv("STRIX_SPECIALIST_MAX_ITERATIONS", raising=False)
     monkeypatch.delenv("STRIX_SCAN_MODE", raising=False)
     monkeypatch.delenv("STRIX_DISPATCH_CAP_OVERRIDE", raising=False)
+    monkeypatch.delenv("STRIX_VERDICT_CACHE_DISABLED", raising=False)
     so.reset_for_testing()
     yield
     so.reset_for_testing()
@@ -824,3 +825,225 @@ def test_dispatch_cap_denied_call_does_not_consume_counter(
         )
         assert r["status"] == "DENIED_BY_SCAN_MODE"
     assert so.get_dispatch_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# v2 step 2 — specialist verdict cache integration
+# (docs/proposals/2026-05-19-scan-mode-cost-optimization.md, workflow
+# phase 4). These pin the integration with dispatch_specialist:
+#   * a cacheable BLOCKED on endpoint A short-circuits dispatch on
+#     endpoint B (same shape) with status=CACHE_HIT_BLOCKED
+#   * cache hits do NOT consume the scan-mode dispatch counter
+#   * PASSED results never enter the cache (recall-critical)
+#   * the kill switch + reset semantics work end-to-end
+# ---------------------------------------------------------------------------
+
+
+def _fake_blocked_no_sql_call(*, history, iteration, profile, **_):
+    """Inner-LLM stub that emits a complete_objective(BLOCKED) with
+    a cacheable 'no SQL backend' reason."""
+    return {
+        "message": "Exhausted SQLi probes.",
+        "tool_calls": [{
+            "tool": "complete_objective",
+            "args": {
+                "status": "BLOCKED",
+                "reason": "no SQL backend on this endpoint; ORM only",
+                "summary": "ran 5 SQLi probe variants, all returned static",
+            },
+        }],
+        "cost_usd": 0.001,
+    }
+
+
+def _fake_blocked_vague_call(*, history, iteration, profile, **_):
+    """Inner-LLM stub that emits a BLOCKED with a NON-cacheable
+    vague reason — must NOT enter the cache."""
+    return {
+        "message": "Ran out of iterations.",
+        "tool_calls": [{
+            "tool": "complete_objective",
+            "args": {
+                "status": "BLOCKED",
+                "reason": "lost track of the auth state mid-probe",
+                "summary": "partial coverage",
+            },
+        }],
+        "cost_usd": 0.001,
+    }
+
+
+def test_verdict_cache_blocks_similar_endpoint_dispatch() -> None:
+    """First dispatch returns BLOCKED with 'no SQL backend' →
+    cached. Second dispatch on a structurally-similar endpoint
+    (different numeric ID) hits the cache."""
+    r1 = so.dispatch_specialist(
+        category="sqli", objective="probe SQLi on user 42",
+        target="https://vampi.local/api/users/42",
+        inner_call_fn=_fake_blocked_no_sql_call,
+    )
+    assert r1["status"] == "BLOCKED"
+
+    r2 = so.dispatch_specialist(
+        category="sqli", objective="probe SQLi on user 99",
+        target="https://vampi.local/api/users/99",
+        inner_call_fn=_fake_blocked_no_sql_call,
+    )
+    assert r2["status"] == "CACHE_HIT_BLOCKED"
+    assert "verdict cache hit" in r2["reason"]
+    assert "no SQL backend" in r2["reason"]
+
+
+def test_verdict_cache_hits_do_not_consume_dispatch_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache hits must NOT count against the scan-mode cap. A
+    `standard` run that hits the cache 100 times should still
+    have 7 real dispatches available."""
+    monkeypatch.setenv("STRIX_SCAN_MODE", "standard")
+    # First dispatch — real, counts as 1
+    so.dispatch_specialist(
+        category="sqli", objective="probe user 42",
+        target="https://vampi.local/api/users/42",
+        inner_call_fn=_fake_blocked_no_sql_call,
+    )
+    assert so.get_dispatch_count() == 1
+
+    # 10 cache hits — must NOT bump the counter
+    for i in range(10):
+        r = so.dispatch_specialist(
+            category="sqli", objective=f"probe user {i}",
+            target=f"https://vampi.local/api/users/{100 + i}",
+            inner_call_fn=_fake_blocked_no_sql_call,
+        )
+        assert r["status"] == "CACHE_HIT_BLOCKED"
+    assert so.get_dispatch_count() == 1  # still 1
+
+
+def test_verdict_cache_does_not_cache_passed_results() -> None:
+    """A PASSED result must NEVER enter the cache — otherwise a
+    successful SQLi on /users/42 would suppress dispatch on
+    /users/99 where there might be a different vulnerability."""
+    r1 = so.dispatch_specialist(
+        category="sqli", objective="probe user 42",
+        target="https://vampi.local/api/users/42",
+        inner_call_fn=_fake_exit_call,  # emits PASSED
+    )
+    assert r1["status"] == "PASSED"
+
+    # Second dispatch on similar shape — must NOT cache-hit.
+    r2 = so.dispatch_specialist(
+        category="sqli", objective="probe user 99",
+        target="https://vampi.local/api/users/99",
+        inner_call_fn=_fake_exit_call,
+    )
+    assert r2["status"] == "PASSED"
+    assert r2.get("reason") != "verdict cache hit"
+
+
+def test_verdict_cache_does_not_cache_vague_blocked() -> None:
+    """A BLOCKED with a non-'no-signal' reason must NOT cache."""
+    r1 = so.dispatch_specialist(
+        category="sqli", objective="probe user 42",
+        target="https://vampi.local/api/users/42",
+        inner_call_fn=_fake_blocked_vague_call,
+    )
+    assert r1["status"] == "BLOCKED"
+
+    r2 = so.dispatch_specialist(
+        category="sqli", objective="probe user 99",
+        target="https://vampi.local/api/users/99",
+        inner_call_fn=_fake_blocked_vague_call,
+    )
+    # Second dispatch is a real BLOCKED, not a cache hit
+    assert r2["status"] == "BLOCKED"
+
+
+def test_verdict_cache_misses_on_different_category() -> None:
+    """Same shape, different category → cache miss. SQLi BLOCKED
+    on /users/{id} does NOT suppress XSS dispatch on the same
+    surface."""
+    so.dispatch_specialist(
+        category="sqli", objective="probe user 42",
+        target="https://vampi.local/api/users/42",
+        inner_call_fn=_fake_blocked_no_sql_call,
+    )
+    r = so.dispatch_specialist(
+        category="xss", objective="probe user 99",
+        target="https://vampi.local/api/users/99",
+        inner_call_fn=_fake_exit_call,
+    )
+    assert r["status"] != "CACHE_HIT_BLOCKED"
+
+
+def test_verdict_cache_misses_on_different_endpoint_shape() -> None:
+    """Cached `/users/{id}` does NOT suppress `/orders/{id}` — the
+    backends are different."""
+    so.dispatch_specialist(
+        category="sqli", objective="probe user 42",
+        target="https://vampi.local/api/users/42",
+        inner_call_fn=_fake_blocked_no_sql_call,
+    )
+    r = so.dispatch_specialist(
+        category="sqli", objective="probe order 42",
+        target="https://vampi.local/api/orders/42",
+        inner_call_fn=_fake_exit_call,
+    )
+    assert r["status"] != "CACHE_HIT_BLOCKED"
+
+
+def test_verdict_cache_kill_switch_disables_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the kill switch on, even a cached entry doesn't hit."""
+    # Seed the cache without the kill switch
+    so.dispatch_specialist(
+        category="sqli", objective="probe user 42",
+        target="https://vampi.local/api/users/42",
+        inner_call_fn=_fake_blocked_no_sql_call,
+    )
+    # Now turn on the kill switch
+    monkeypatch.setenv("STRIX_VERDICT_CACHE_DISABLED", "1")
+    r = so.dispatch_specialist(
+        category="sqli", objective="probe user 99",
+        target="https://vampi.local/api/users/99",
+        inner_call_fn=_fake_blocked_no_sql_call,
+    )
+    # Real BLOCKED, not cache hit
+    assert r["status"] == "BLOCKED"
+
+
+def test_verdict_cache_reset_clears_between_scans() -> None:
+    """reset_for_testing must clear the cache so a new scan
+    starts fresh — otherwise findings from a prior run could
+    silently suppress dispatch on the next run."""
+    so.dispatch_specialist(
+        category="sqli", objective="probe user 42",
+        target="https://vampi.local/api/users/42",
+        inner_call_fn=_fake_blocked_no_sql_call,
+    )
+    so.reset_for_testing()
+    r = so.dispatch_specialist(
+        category="sqli", objective="probe user 99",
+        target="https://vampi.local/api/users/99",
+        inner_call_fn=_fake_blocked_no_sql_call,
+    )
+    # Cache was cleared → real BLOCKED, not a cache hit
+    assert r["status"] == "BLOCKED"
+
+
+def test_verdict_cache_skipped_when_target_is_none() -> None:
+    """Without an endpoint we can't build a cache key — dispatch
+    must proceed normally (real BLOCKED, not cache hit)."""
+    so.dispatch_specialist(
+        category="sqli", objective="probe",
+        target=None,
+        inner_call_fn=_fake_blocked_no_sql_call,
+    )
+    # Second call also without target — should not cache-hit
+    r = so.dispatch_specialist(
+        category="sqli", objective="probe again",
+        target=None,
+        inner_call_fn=_fake_blocked_no_sql_call,
+    )
+    assert r["status"] == "BLOCKED"
