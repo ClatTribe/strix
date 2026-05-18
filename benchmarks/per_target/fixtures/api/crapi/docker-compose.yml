@@ -1,0 +1,131 @@
+# OWASP crAPI (Completely Ridiculous API)
+#
+# Source: https://github.com/OWASP/crAPI
+# Image registry: docker.io/crapi/* (Docker Hub)
+#
+# crAPI is a microservice-architected vulnerable application designed
+# specifically to demonstrate OWASP API Top 10. The full stack runs
+# under docker-compose with ~7 services. This file pulls the official
+# OWASP-published compose, pinning to a specific tag for fixture
+# reproducibility.
+#
+# Pin reason: tag floats break the fixture's expected.yaml manifest.
+# When OWASP publishes a new crAPI version with shifted endpoints,
+# bump the tag here AND re-baseline expected.yaml against it.
+#
+# Network: services bind to 8888 (web), 8080 (API), 8000 (mailhog UI),
+# 8025 (mailhog SMTP). The benchmark target is the API at 8080.
+
+x-crapi-image: &crapi-image
+  pull_policy: always
+
+services:
+  crapi-identity:
+    image: crapi/crapi-identity:0.7.0
+    <<: *crapi-image
+    container_name: bench-crapi-identity
+    environment:
+      DB_NAME: crapi
+      DB_USER: admin
+      DB_PASSWORD: crapisecretpassword
+      DB_HOST: postgresdb
+      DB_PORT: 5432
+      JWT_EXPIRATION_TIME: 86400000
+      SMTP_HOST: mailhog
+      SMTP_PORT: 1025
+    depends_on:
+      postgresdb:
+        condition: service_healthy
+    networks:
+      - bench-crapi
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/identity/health-check"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  crapi-community:
+    image: crapi/crapi-community:0.7.0
+    <<: *crapi-image
+    container_name: bench-crapi-community
+    environment:
+      MONGO_DB_HOST: mongodb
+      MONGO_DB_PORT: 27017
+      IDENTITY_SERVICE_HOST: crapi-identity
+      IDENTITY_SERVICE_PORT: 8080
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      crapi-identity:
+        condition: service_healthy
+    networks:
+      - bench-crapi
+
+  crapi-workshop:
+    image: crapi/crapi-workshop:0.7.0
+    <<: *crapi-image
+    container_name: bench-crapi-workshop
+    environment:
+      MONGO_DB_HOST: mongodb
+      MONGO_DB_PORT: 27017
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - bench-crapi
+
+  crapi-web:
+    image: crapi/crapi-web:0.7.0
+    <<: *crapi-image
+    container_name: bench-crapi-web
+    ports:
+      - "8888:80"
+      - "8025:8025"
+    environment:
+      IDENTITY_HOST: crapi-identity
+      COMMUNITY_HOST: crapi-community
+      WORKSHOP_HOST: crapi-workshop
+    depends_on:
+      - crapi-identity
+      - crapi-community
+      - crapi-workshop
+    networks:
+      - bench-crapi
+
+  postgresdb:
+    image: postgres:14
+    container_name: bench-crapi-postgres
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: crapisecretpassword
+      POSTGRES_DB: crapi
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d crapi"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bench-crapi
+
+  mongodb:
+    image: mongo:6
+    container_name: bench-crapi-mongo
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - bench-crapi
+
+  mailhog:
+    image: mailhog/mailhog
+    container_name: bench-crapi-mailhog
+    ports:
+      - "8025:8025"
+    networks:
+      - bench-crapi
+
+networks:
+  bench-crapi:
+    driver: bridge

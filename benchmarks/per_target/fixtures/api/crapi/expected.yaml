@@ -1,0 +1,157 @@
+target_type: api
+target: http://host.docker.internal:8888/identity/api/v2
+description: |
+  OWASP crAPI (Completely Ridiculous API) — the canonical OWASP API
+  Top 10 (2023) demonstration target. Multi-service architecture
+  intentionally riddled with API-specific vulnerabilities for
+  benchmark + training purposes.
+
+  This fixture covers a curated subset of crAPI's documented vulns,
+  one per OWASP API Top 10 category where crAPI has a clean planted
+  example. crAPI ships ~30 documented issues total; we don't try to
+  cover all.
+
+  Pin: crAPI tag `0.7.0`. Bumping the tag may shift which endpoints
+  trigger which findings — re-baseline after any version bump.
+
+  Target endpoint is the identity service's API. The `crapi-web`
+  container fronts everything at 8888 with path-based routing
+  (`/identity/*`, `/community/*`, `/workshop/*`). Strix probes via
+  the unified web endpoint.
+
+  Hint to the lead: ingestion of the postman collection at
+  https://github.com/OWASP/crAPI/blob/main/postman_collections/crAPI.postman_collection.json
+  is the operator's fastest seed for the API surface map. Add
+  `--postman-collection` when running the strix CLI if available.
+
+docker:
+  compose_file: docker-compose.yml
+  wait_url: http://127.0.0.1:8888/identity/health-check
+  wait_timeout_seconds: 180
+
+expected_findings:
+  # API1:2023 — Broken Object Level Authorization (BOLA)
+  - id: bola-vehicle
+    category: idor
+    cwe: CWE-639
+    endpoint: /identity/api/v2/vehicle/{vehicleId}/location
+    severity: critical
+    must_find: true
+    description: |
+      Vehicle location endpoint returns location data for ANY vehicleId
+      regardless of ownership. Classic BOLA — sequential UUID iteration
+      yields other users' GPS history.
+
+  # API2:2023 — Broken Authentication (multiple flavours)
+  - id: weak-jwt-secret
+    category: jwt
+    cwe: CWE-347
+    endpoint: /identity/api/auth/login
+    severity: critical
+    must_find: true
+    description: |
+      JWT signed with a weak / hardcoded secret AND accepts alg=none.
+      Token forgery yields arbitrary identity.
+
+  - id: password-reset-otp-brute
+    category: business_logic
+    cwe: CWE-307
+    endpoint: /identity/api/auth/v3/check-otp
+    severity: high
+    must_find: true
+    description: |
+      Password-reset OTP endpoint lacks rate-limiting AND the OTP space
+      is 0000-9999. Brute force succeeds in seconds.
+
+  # API3:2023 — Broken Object Property Level Authorization (mass-assignment)
+  - id: mass-assignment-user
+    category: mass_assignment
+    cwe: CWE-915
+    endpoint: /identity/api/v2/user/dashboard
+    severity: high
+    must_find: true
+    description: |
+      User PATCH accepts `is_admin: true` field — never intended to be
+      client-settable. Promotes any user to admin.
+
+  # API4:2023 — Unrestricted Resource Consumption
+  - id: rate-limit-coupons
+    category: rate_limit
+    cwe: CWE-770
+    endpoint: /community/api/v2/coupon/validate-coupon
+    severity: medium
+    must_find: true
+    description: |
+      Coupon validation has no rate-limit. Used for coupon-code brute
+      force AND single-coupon repeat-redemption.
+
+  # API5:2023 — Broken Function Level Authorization (BFLA)
+  - id: bfla-mechanic-internal
+    category: bfla
+    cwe: CWE-862
+    endpoint: /workshop/api/mechanic/mechanic_report
+    severity: high
+    must_find: true
+    description: |
+      Mechanic-internal endpoint accessible to any authenticated user.
+      Returns service reports for arbitrary vehicles.
+
+  # API6:2023 — Unrestricted Access to Sensitive Business Flows
+  - id: bulk-coupon-claim
+    category: business_logic
+    cwe: CWE-840
+    endpoint: /community/api/v2/coupon/new-coupon
+    severity: medium
+    must_find: false
+    description: |
+      Coupon-claim flow allows the same coupon to be claimed
+      unlimited times by the same user. Marked must_find=false
+      because it's a race-condition variant; detection depends
+      on scan_race_condition firing.
+
+  # API7:2023 — SSRF
+  - id: ssrf-profile-pic
+    category: ssrf
+    cwe: CWE-918
+    endpoint: /workshop/api/merchant/contact_mechanic
+    severity: high
+    must_find: true
+    description: |
+      Mechanic-contact endpoint fetches a user-supplied URL server-side
+      (intended for invoice retrieval). Reachable to AWS metadata, GCP
+      metadata, internal services.
+
+  # API8:2023 — Security Misconfiguration
+  - id: missing-security-headers
+    category: misconfig
+    cwe: CWE-693
+    endpoint: /
+    severity: low
+    must_find: true
+    description: |
+      Web tier missing X-Content-Type-Options, Strict-Transport-Security,
+      CSP. Trivially detected by http_security_headers_audit.
+
+  # API9:2023 — Improper Inventory Management
+  - id: shadow-v2-api
+    category: api_inventory
+    cwe: CWE-1059
+    endpoint: /identity/api/v3/user
+    severity: medium
+    must_find: false
+    description: |
+      A /v3/ shadow API exists alongside /v2/ with weaker auth checks.
+      Marked must_find=false because discovery requires inventory-aware
+      probing; detection depends on openapi_recon + bfs_crawl ingest.
+
+  # API10:2023 — Unsafe Consumption of APIs (external)
+  - id: unsafe-external-api
+    category: ssrf
+    cwe: CWE-1336
+    endpoint: /community/api/v2/community/posts/{postId}
+    severity: medium
+    must_find: false
+    description: |
+      Post-author lookup pings an external "user info" service without
+      validating the response shape. JSON-injection abuse leads to
+      response forgery for admin-marker fields.

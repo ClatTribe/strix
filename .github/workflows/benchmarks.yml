@@ -1,0 +1,117 @@
+# Manual-trigger benchmark runs.
+#
+# These are expensive — full agentic scans against vulnerable apps,
+# each ~5-45 min runtime + LLM API cost. Triggered manually via the
+# GitHub Actions UI (workflow_dispatch) or on a weekly cron.
+#
+# Required secrets:
+#   STRIX_LLM_PROVIDER — model identifier (e.g., 'anthropic/claude-sonnet-4-6')
+#   STRIX_LLM_API_KEY  — provider API key
+#
+# Result artefacts are uploaded per-run; for trend analysis, persist
+# baselines via the `benchmarks/per_target/baseline/` directory in main.
+
+name: benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'Benchmark suite to run'
+        required: true
+        default: 'per_target'
+        type: choice
+        options:
+          - all
+          - per_target
+          - public
+      fixture:
+        description: 'Specific fixture name (optional; leave blank to run all in the suite)'
+        required: false
+        type: string
+      scan_mode:
+        description: 'Strix scan mode for per_target fixtures'
+        required: true
+        default: 'standard'
+        type: choice
+        options:
+          - quick
+          - standard
+          - deep
+  schedule:
+    # Weekly Monday 06:00 UTC — pick up overnight upstream fixture changes
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+  # Results are uploaded as workflow artifacts; no PR / issue write needed.
+
+jobs:
+  bench:
+    name: 'Benchmark run (${{ github.event.inputs.suite || ''per_target'' }} / ${{ github.event.inputs.scan_mode || ''standard'' }})'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180   # 3 h ceiling; individual runs much shorter
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install strix
+        run: |
+          curl -sSL https://strix.ai/install | bash
+          # Or, when building from source:
+          # python -m pip install -e .[dev]
+          python -m pip install pyyaml
+
+      - name: Pull strix sandbox image
+        run: |
+          docker pull ghcr.io/usestrix/strix-sandbox:0.1.13
+
+      - name: Run benchmarks
+        env:
+          STRIX_LLM: ${{ secrets.STRIX_LLM_PROVIDER }}
+          LLM_API_KEY: ${{ secrets.STRIX_LLM_API_KEY }}
+          STRIX_TELEMETRY: '0'
+          STRIX_KEV_DISABLED: '1'
+        run: |
+          SUITE='${{ github.event.inputs.suite || ''per_target'' }}'
+          FIXTURE='${{ github.event.inputs.fixture }}'
+          SCAN_MODE='${{ github.event.inputs.scan_mode || ''standard'' }}'
+
+          ARGS="--suite ${SUITE} --scan-mode ${SCAN_MODE}"
+          if [[ -n "${FIXTURE}" ]]; then
+            ARGS="${ARGS} --fixture ${FIXTURE}"
+          fi
+
+          ./benchmarks/run_all.sh ${ARGS}
+
+      - name: Upload result artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.run_id }}
+          path: |
+            benchmarks/per_target/baseline/*.json
+            benchmarks/public/fixtures/**/baseline/*.json
+          retention-days: 30
+
+      - name: Surface result summary
+        if: always()
+        run: |
+          echo "## Benchmark run summary" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "| Fixture | Recall (must-find) | Precision | Cost (USD) | Wall (s) |" >> "${GITHUB_STEP_SUMMARY}"
+          echo "|---|---|---|---|---|" >> "${GITHUB_STEP_SUMMARY}"
+          for f in benchmarks/per_target/baseline/*.json; do
+            [[ -f "$f" ]] || continue
+            NAME="$(basename "$f" .json)"
+            RECALL="$(python3 -c "import json,sys; d=json.load(open('$f')); print(round(d.get('recall_must_find', 0)*100, 1))" 2>/dev/null || echo '?')"
+            PRECISION="$(python3 -c "import json,sys; d=json.load(open('$f')); print(round(d.get('precision', 0)*100, 1))" 2>/dev/null || echo '?')"
+            COST="$(python3 -c "import json,sys; d=json.load(open('$f')); print(round(d.get('cost_usd', 0), 2))" 2>/dev/null || echo '?')"
+            WALL="$(python3 -c "import json,sys; d=json.load(open('$f')); print(round(d.get('wall_seconds', 0), 0))" 2>/dev/null || echo '?')"
+            echo "| ${NAME} | ${RECALL}% | ${PRECISION}% | \$${COST} | ${WALL} |" >> "${GITHUB_STEP_SUMMARY}"
+          done
