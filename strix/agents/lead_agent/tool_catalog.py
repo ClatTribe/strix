@@ -100,6 +100,7 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_idor",  # Phase 4.1 — cross-session IDOR (CWE-639/862)
         "scan_multi_role_auth",  # Phase 3.1 — multi-role authz orchestrator (IDOR precondition)
         "scan_oauth",  # Phase 2.11 — OAuth 2.0 / OIDC misconfiguration (CWE-352/602/601/922)
+        "scan_saml_xsw",  # masterroadmap §1 P0 — SAML XML Signature Wrapping + SP config audit (CWE-347)
         "scan_request_smuggling_active",  # Phase 2.10 — timing-based smuggle confirmation (CWE-444)
         "scan_ldap_injection",  # Phase 2.8 — LDAP filter injection (CWE-90)
         "scan_xpath_injection",  # Phase 2.7 — XPath injection (CWE-643)
@@ -201,6 +202,7 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_deserialization", "scan_blind_cmd_injection",
         "scan_oob_xxe", "scan_auth_flow", "scan_business_logic",
         "scan_idor", "scan_multi_role_auth", "scan_oauth",
+        "scan_saml_xsw",  # masterroadmap §1 P0 — SAML XSW + SP config audit
         "scan_request_smuggling_active", "scan_ldap_injection",
         "scan_xpath_injection", "scan_cmd_injection",
         "scan_secrets_in_response", "scan_nosql_injection",
