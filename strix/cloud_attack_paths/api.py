@@ -192,6 +192,41 @@ def analyze_cloud_attack_paths(
     graph = build_graph_from_cspm(
         findings_list, assets=assets_list,
     )
+
+    # engine-wishlist §8 — surface the cross-resource graph to
+    # the tracer as `kg_delta.jsonl` rows so the wrapper's KG
+    # store can union graph state across all scans in a project
+    # and serve cross-target attack-path queries the engine
+    # itself doesn't compute. Best-effort: a tracer mis-state or
+    # missing module never blocks the scan.
+    try:
+        from strix.telemetry.kg_delta import (  # noqa: PLC0415
+            from_cloud_graph,
+        )
+        from strix.telemetry.tracer import (  # noqa: PLC0415
+            get_global_tracer,
+        )
+        tracer = get_global_tracer()
+        if tracer is not None:
+            scan_id = getattr(tracer, "run_id", None) or getattr(
+                tracer, "run_name", None,
+            )
+            project_id = getattr(tracer, "_project_id", None)
+            node_deltas, edge_deltas = from_cloud_graph(
+                graph,
+                scan_id=scan_id,
+                project_id=project_id,
+                source_prefix="cloud_attack_paths",
+            )
+            tracer.kg_node_deltas.extend(n.to_dict() for n in node_deltas)
+            tracer.kg_edge_deltas.extend(e.to_dict() for e in edge_deltas)
+    except Exception:  # noqa: BLE001 — tracer wiring must not block scan
+        import logging as _logging  # noqa: PLC0415
+        _logging.getLogger(__name__).debug(
+            "analyze_cloud_attack_paths: kg_delta push failed",
+            exc_info=True,
+        )
+
     paths = find_attack_paths(
         graph, patterns=patterns, custom_patterns=custom_patterns,
     )
