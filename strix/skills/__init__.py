@@ -1,3 +1,4 @@
+import os
 import re
 
 from strix.utils.resource_paths import get_strix_resource_path
@@ -5,6 +6,38 @@ from strix.utils.resource_paths import get_strix_resource_path
 
 _EXCLUDED_CATEGORIES = {"scan_modes", "coordination"}
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n.*?\n---\s*\n", re.DOTALL)
+
+
+# Phase 1C — raise hard 5-cap to env-tunable default 20.
+#
+# The 5-cap predates the Decepticon two-level menu (strix/skills/menu.py):
+# in the old model every skill body sat in the system prompt at agent
+# boot, so 5 bodies × ~5-20K tokens already cost 25-100K. With the menu
+# in place only the (~50-100 token) menu line per skill is fixed; the
+# body costs only when the agent calls `load_skill`. Multi-stack apps
+# (Django + Postgres + Stripe + Auth0 + AWS + Cloudflare) routinely
+# warrant more than 5 skills; the cap was the bottleneck.
+#
+# The new default of 20 covers every realistic stack we've seen in
+# vibe-coded SaaS audits while still preventing pathological loads.
+# Operators can dial higher via `STRIX_SKILLS_MAX_PER_AGENT`. A future
+# Phase 1F upgrade will swap the count-based cap for a token-budget
+# cap (`STRIX_SKILLS_TOKEN_BUDGET`); the count cap is the safer first
+# step and stays as the fallback.
+_DEFAULT_MAX_SKILLS_PER_AGENT = 20
+
+
+def get_max_skills_per_agent() -> int:
+    """Resolve the per-agent skill-count cap from the env or fall back
+    to the default. Always returns a positive int."""
+    raw = (os.environ.get("STRIX_SKILLS_MAX_PER_AGENT") or "").strip()
+    if not raw:
+        return _DEFAULT_MAX_SKILLS_PER_AGENT
+    try:
+        n = int(float(raw))
+    except (ValueError, TypeError):
+        return _DEFAULT_MAX_SKILLS_PER_AGENT
+    return max(1, n)
 
 
 def get_available_skills() -> dict[str, list[str]]:
@@ -60,9 +93,21 @@ def parse_skill_list(skills: str | None) -> list[str]:
     return [s.strip() for s in skills.split(",") if s.strip()]
 
 
-def validate_requested_skills(skill_list: list[str], max_skills: int = 5) -> str | None:
-    if len(skill_list) > max_skills:
-        return "Cannot specify more than 5 skills for an agent (use comma-separated format)"
+def validate_requested_skills(
+    skill_list: list[str], max_skills: int | None = None,
+) -> str | None:
+    """Validate a skill-name list against the registry + the per-agent
+    count cap. The cap defaults to `get_max_skills_per_agent()` (env-
+    tunable via `STRIX_SKILLS_MAX_PER_AGENT`, default 20). Pass an
+    explicit `max_skills` to override for a specific call site."""
+    cap = max_skills if max_skills is not None else get_max_skills_per_agent()
+    if len(skill_list) > cap:
+        return (
+            f"Cannot specify more than {cap} skills for an agent "
+            f"(set STRIX_SKILLS_MAX_PER_AGENT to raise; default is "
+            f"{_DEFAULT_MAX_SKILLS_PER_AGENT}). Use comma-separated "
+            f"format."
+        )
 
     if not skill_list:
         return None
@@ -92,7 +137,11 @@ def generate_skills_description() -> str:
     sorted_skills = sorted(all_skill_names)
     skills_str = ", ".join(sorted_skills)
 
-    description = f"List of skills to load for this agent (max 5). Available skills: {skills_str}. "
+    cap = get_max_skills_per_agent()
+    description = (
+        f"List of skills to load for this agent (max {cap}). "
+        f"Available skills: {skills_str}. "
+    )
 
     example_skills = sorted_skills[:2]
     if example_skills:
