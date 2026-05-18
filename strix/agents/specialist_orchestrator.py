@@ -431,11 +431,16 @@ class SpecialistRunResult:
       category: the dispatched specialist category
       objective: the objective string the orchestrator passed in
       status: PASSED | BLOCKED | ITERATION_CAP_REACHED |
-        BUDGET_EXCEEDED | DENIED_BY_SCAN_MODE | ERROR — the exit
-        reason. DENIED_BY_SCAN_MODE means the run-level dispatch
-        cap (derived from --scan-mode) was exhausted; the lead
-        should fall back to deterministic probes for this
-        objective rather than retrying dispatch.
+        BUDGET_EXCEEDED | DENIED_BY_SCAN_MODE | CACHE_HIT_BLOCKED |
+        ERROR — the exit reason. DENIED_BY_SCAN_MODE means the
+        run-level dispatch cap (derived from --scan-mode) was
+        exhausted; the lead should fall back to deterministic
+        probes for this objective rather than retrying dispatch.
+        CACHE_HIT_BLOCKED means a prior dispatch on a
+        structurally-similar endpoint already returned BLOCKED
+        with a no-signal reason — re-running would re-confirm
+        the same negative; the lead should pivot to a different
+        surface or category.
       reason: optional human-readable explanation, especially for
         BLOCKED / ERROR
       iterations_used: how many inner-LLM rounds the specialist ran
@@ -483,6 +488,14 @@ def reset_for_testing() -> None:
     global _SPECIALIST_EXIT
     _SPECIALIST_EXIT = None
     reset_dispatch_counter()
+    # v2 step 2 — clear the verdict cache between scans.
+    try:
+        from strix.agents.specialist_verdict_cache import (  # noqa: PLC0415
+            reset as _verdict_cache_reset,
+        )
+        _verdict_cache_reset()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def signal_specialist_complete(*, status: str, reason: str | None = None,
@@ -717,6 +730,34 @@ def dispatch_specialist(
             status="ERROR", reason="objective required",
         ).to_dict()
 
+    # v2 step 2 — specialist verdict cache. If a prior dispatch on a
+    # structurally-similar endpoint (same category, same canonical
+    # shape, same auth state) returned a cacheable BLOCKED verdict
+    # ("no SQL backend", "no XSS sink", etc.), short-circuit with
+    # the cached verdict. Recall-safe because only "no-signal"
+    # BLOCKED verdicts get cached — PASSED / ERROR / cap-reached
+    # results never enter the cache.
+    #
+    # Looked up BEFORE the scan-mode dispatch counter so cache hits
+    # don't consume the per-run dispatch budget.
+    from strix.agents.specialist_verdict_cache import (  # noqa: PLC0415
+        should_skip as _cache_should_skip,
+    )
+    _cached = _cache_should_skip(
+        category=category, endpoint=target, auth_state=None,
+    )
+    if _cached is not None:
+        return SpecialistRunResult(
+            category=category,
+            objective=objective,
+            status="CACHE_HIT_BLOCKED",
+            reason=(
+                f"verdict cache hit: prior dispatch on similar "
+                f"endpoint returned BLOCKED — '{_cached.reason}'"
+            ),
+            summary=_cached.summary,
+        ).to_dict()
+
     # Phase-1 scan-mode gate. Quick / initial modes set the cap to 0
     # so the fresh-context loop is skipped entirely; standard caps at
     # 8 dispatches per run; deep is unbounded. The cap is read from
@@ -875,6 +916,26 @@ def dispatch_specialist(
     findings_count = _count_findings_emitted_during(
         before_count=before_count,
     )
+
+    # v2 step 2 — record the verdict in the cache if it's a
+    # cacheable BLOCKED with no findings emitted. See
+    # specialist_verdict_cache.record for the cacheable predicate.
+    try:
+        from strix.agents.specialist_verdict_cache import (  # noqa: PLC0415
+            record as _cache_record,
+        )
+        _cache_record(
+            category=category,
+            endpoint=target,
+            auth_state=None,
+            status=final_status,
+            reason=final_reason,
+            objective=objective,
+            summary=final_summary,
+            findings_count=findings_count,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("verdict_cache record failed: %s", e)
 
     return SpecialistRunResult(
         category=category,
