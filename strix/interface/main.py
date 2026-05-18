@@ -776,6 +776,26 @@ Examples:
         ),
     )
 
+    # engine-wishlist §3 — target-metadata pass-through. Loaded
+    # blob is stashed on args.target_metadata for the LLMConfig
+    # builder + tracer.run_metadata stamp.
+    parser.add_argument(
+        "--target-metadata-file",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a JSON file with target metadata (language, "
+            "framework_hints, last_active, tags, owner, "
+            "deploy_target). The engine treats it as Researcher-"
+            "phase hints — no schema enforcement, no validation. "
+            "Lets the Researcher prioritise exploit classes based "
+            "on upstream context (Django + PCI → ORM injection "
+            "first). Falls back to STRIX_TARGET_METADATA env var. "
+            "engine-wishlist.md §3."
+        ),
+    )
+
     # engine-wishlist.md §5 — skip-if-unchanged. Compute a per-target
     # fingerprint (git HEAD / TLS cert + page hash / image digest);
     # when an explicit prior-run-dir was supplied (or env equivalent
@@ -817,6 +837,19 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    # engine-wishlist §3 — load target metadata blob (best-effort;
+    # absent / malformed → empty dict and the scan continues).
+    try:
+        from strix.interface.target_metadata import (  # noqa: PLC0415
+            load_target_metadata,
+        )
+        args.target_metadata = load_target_metadata(
+            path=getattr(args, "target_metadata_file", None),
+        )
+    except Exception:  # noqa: BLE001
+        # Loader is best-effort by design; any failure → empty.
+        args.target_metadata = {}
 
     # engine-wishlist §2 — resolve --profile / STRIX_SCAN_PROFILE
     # into args.scan_mode. Precedence: --profile > --scan-mode >

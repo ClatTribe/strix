@@ -66,6 +66,19 @@ AUTHORIZED TARGETS:
 {{ system_prompt_context.engagement_scope_block }}
 {% endif %}
 
+{# engine-wishlist §3 — wrapper-supplied target metadata. Lets the Researcher
+   phase prioritise probes by ecosystem rather than re-deriving stack context
+   from cold start. The block is rendered into a flat list by
+   `strix/interface/target_metadata.py::render_for_prompt`. #}
+{% if system_prompt_context and system_prompt_context.target_metadata_rendered %}
+═══════════════════════════════════════════════════════════════
+TARGET METADATA (from wrapper)
+═══════════════════════════════════════════════════════════════
+{{ system_prompt_context.target_metadata_rendered }}
+═══════════════════════════════════════════════════════════════
+
+{% endif %}
+
 {% if system_prompt_context and system_prompt_context.lead_architecture_active %}
 SINGLE-LEAD ARCHITECTURE (roadmap §8.5):
 - You are running in single-lead mode. There are NO sub-agents to spawn — `create_agent`, `spawn_webapp_specialist_team`, and similar helpers are intentionally absent from your tool catalog.

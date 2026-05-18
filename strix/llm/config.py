@@ -17,6 +17,7 @@ class LLMConfig:
         interactive: bool = False,
         reasoning_effort: str | None = None,
         system_prompt_context: dict[str, Any] | None = None,
+        target_metadata: dict[str, Any] | None = None,
     ):
         resolved_model, self.api_key, self.api_base = resolve_llm_config()
         self.model_name = model_name or resolved_model
@@ -47,4 +48,27 @@ class LLMConfig:
         self.is_whitebox = is_whitebox
         self.interactive = interactive
         self.reasoning_effort = reasoning_effort
-        self.system_prompt_context = system_prompt_context or {}
+        self.system_prompt_context = dict(system_prompt_context or {})
+
+        # engine-wishlist §3 — target metadata is consumed by the
+        # system-prompt template; stash it on the context so the
+        # llm render path picks it up without further plumbing.
+        # Stored both raw (for downstream consumers that want the
+        # dict) and pre-rendered (for the prompt template).
+        self.target_metadata = dict(target_metadata or {})
+        if self.target_metadata:
+            try:
+                from strix.interface.target_metadata import (  # noqa: PLC0415
+                    render_for_prompt,
+                )
+                self.system_prompt_context["target_metadata"] = (
+                    self.target_metadata
+                )
+                self.system_prompt_context["target_metadata_rendered"] = (
+                    render_for_prompt(self.target_metadata)
+                )
+            except Exception:  # noqa: BLE001
+                # Renderer is best-effort; raw dict still flows.
+                self.system_prompt_context["target_metadata"] = (
+                    self.target_metadata
+                )

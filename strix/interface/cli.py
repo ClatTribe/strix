@@ -84,11 +84,19 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
         # `_build_system_scope_context` renders this into the system
         # prompt under <engagement_scope>.
         "scope": getattr(args, "scope", None),
+        # engine-wishlist §3 — surface metadata in run_meta.json.
+        "target_metadata": getattr(args, "target_metadata", None) or {},
     }
 
     llm_config = LLMConfig(
         scan_mode=scan_mode,
         is_whitebox=bool(getattr(args, "local_sources", [])),
+        # engine-wishlist §3 — pass the wrapper-supplied target
+        # metadata blob (loaded once in main.py) into the LLM
+        # config so the system-prompt template can render it for
+        # the Researcher phase. Absent → empty dict, no prompt
+        # section.
+        target_metadata=getattr(args, "target_metadata", None) or {},
     )
     agent_config = {
         "llm_config": llm_config,

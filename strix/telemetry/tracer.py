@@ -2930,16 +2930,20 @@ class Tracer:
 
     def set_scan_config(self, config: dict[str, Any]) -> None:
         self.scan_config = config
-        self.run_metadata.update(
-            {
-                "targets": config.get("targets", []),
-                "user_instructions": config.get("user_instructions", ""),
-                "max_iterations": config.get("max_iterations", 200),
-                "scan_mode": config.get("scan_mode"),
-                "scope_mode": config.get("scope_mode"),
-                "model_name": config.get("model_name") or Config.get("strix_llm"),
-            }
-        )
+        update_payload: dict[str, Any] = {
+            "targets": config.get("targets", []),
+            "user_instructions": config.get("user_instructions", ""),
+            "max_iterations": config.get("max_iterations", 200),
+            "scan_mode": config.get("scan_mode"),
+            "scope_mode": config.get("scope_mode"),
+            "model_name": config.get("model_name") or Config.get("strix_llm"),
+        }
+        # engine-wishlist §3 — target metadata lands in
+        # run_meta.json so wrappers can verify the engine received
+        # what was passed.
+        if config.get("target_metadata"):
+            update_payload["target_metadata"] = config["target_metadata"]
+        self.run_metadata.update(update_payload)
         self._set_association_properties(
             {
                 "run_id": self.run_id,
