@@ -7,13 +7,16 @@
 # for fast iteration during development. crAPI is the comprehensive
 # benchmark; VAmPI is the smoke test.
 #
-# Pin: `erev0s/vampi:0.4.3`. Container exposes Flask on 5000.
-# The benchmark binds it to 5001 host-side to avoid collisions
-# with juiceshop (3001) and other fixtures.
+# Pin: `erev0s/vampi:latest`. Upstream publishes only `latest`
+# (no numbered tags as of 2026-05); pin is therefore unstable —
+# re-baseline expected.yaml whenever the upstream image changes.
+# Container exposes Flask on 5000. The benchmark binds it to 5001
+# host-side to avoid collisions with juiceshop (3001) and other
+# fixtures.
 
 services:
   vampi:
-    image: erev0s/vampi:0.4.3
+    image: erev0s/vampi:latest
     pull_policy: always
     container_name: bench-vampi
     ports:
