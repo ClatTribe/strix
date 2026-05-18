@@ -906,6 +906,40 @@ def dispatch_specialist(
             status="ERROR", reason="objective required",
         ).to_dict()
 
+    # v2 step 6 — pre-dispatch deterministic gate. If a registered
+    # prober for this category positively confirms a vulnerability
+    # against the target, emit the finding and skip the LLM
+    # dispatch entirely. The gate is strictly additive: anything
+    # other than FOUND falls through to the existing dispatch
+    # path (recall is preserved — we never skip a dispatch we
+    # would have otherwise done).
+    #
+    # Runs BEFORE the verdict cache + scan-mode cap so a
+    # successful pre-probe doesn't consume the per-run dispatch
+    # budget.
+    try:
+        from strix.agents.predispatch_gate import (  # noqa: PLC0415
+            try_short_circuit as _predispatch_try,
+        )
+        _probe = _predispatch_try(
+            category=category, target=target, objective=objective,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("predispatch_gate lookup failed: %s", e)
+        _probe = None
+    if _probe is not None and _probe.verdict == "FOUND":
+        return SpecialistRunResult(
+            category=category,
+            objective=objective,
+            status="PASSED",
+            reason=(
+                "pre-dispatch deterministic gate confirmed finding"
+                + (f": {_probe.summary}" if _probe.summary else "")
+            ),
+            findings_count=_probe.findings_count,
+            summary=_probe.summary or None,
+        ).to_dict()
+
     # v2 step 2 — specialist verdict cache. If a prior dispatch on a
     # structurally-similar endpoint (same category, same canonical
     # shape, same auth state) returned a cacheable BLOCKED verdict
