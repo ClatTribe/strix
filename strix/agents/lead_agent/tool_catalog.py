@@ -317,6 +317,12 @@ _BLOCKED_TOOLS: frozenset[str] = frozenset({
 _ORCHESTRATOR_ALLOWED_TOOLS: frozenset[str] = frozenset({
     # Dispatch — the lead's primary action
     "dispatch_specialist",
+    # v2 step 3 — batched dispatch. Preferred when probing the
+    # same category against multiple similar endpoints. The
+    # specialist's 25K-token system prompt is paid once for the
+    # whole batch; the batch counts as ONE call against the
+    # scan-mode per-run dispatch cap.
+    "dispatch_specialist_batch",
     # Workflow control
     "workflow_status", "advance_workflow_phase",
     # Coordination + planning

@@ -47,6 +47,7 @@ from strix.tools.workflow.probe_endpoint import probe_endpoint
 from strix.tools.workflow.specialist_dispatch import (
     complete_objective,
     dispatch_specialist,
+    dispatch_specialist_batch,
 )
 from strix.tools.workflow.verification_tools import (
     advance_verification_stage,
@@ -68,6 +69,7 @@ __all__ = [
     "complete_objective",
     "create_objective",
     "dispatch_specialist",
+    "dispatch_specialist_batch",
     "get_objective",
     "kg_create_edge",
     "kg_create_node",

@@ -483,10 +483,19 @@ class SpecialistRunResult:
 # via `reset_for_testing`.
 _SPECIALIST_EXIT: dict[str, Any] | None = None
 
+# v2 step 3 — per-target completion signals for batched dispatch.
+# `complete_objective(target=...)` writes here; the batch loop
+# in `dispatch_specialist_batch` polls until every batch target
+# has a signal (or the iteration cap is hit). Keyed by the
+# raw target string the lead passed in (NOT the canonicalized
+# cache shape) — that way the lead can use any unique label.
+_BATCH_EXITS: dict[str, dict[str, Any]] = {}
+
 
 def reset_for_testing() -> None:
     global _SPECIALIST_EXIT
     _SPECIALIST_EXIT = None
+    _BATCH_EXITS.clear()
     reset_dispatch_counter()
     # v2 step 2 — clear the verdict cache between scans.
     try:
@@ -498,8 +507,13 @@ def reset_for_testing() -> None:
         pass
 
 
-def signal_specialist_complete(*, status: str, reason: str | None = None,
-                                summary: str | None = None) -> None:
+def signal_specialist_complete(
+    *,
+    status: str,
+    reason: str | None = None,
+    summary: str | None = None,
+    target: str | None = None,
+) -> None:
     """Called by the specialist's `complete_objective` tool to
     declare done. Sets the module-level signal that
     `dispatch_specialist`'s inner loop polls.
@@ -509,22 +523,49 @@ def signal_specialist_complete(*, status: str, reason: str | None = None,
         determined safe)
       BLOCKED — couldn't complete (missing prerequisite, scope
         boundary, etc.)
+
+    Batch mode (v2 step 3):
+      When `target` is provided, the signal is written to the
+      batch state (`_BATCH_EXITS`) keyed by target rather than
+      the single-slot `_SPECIALIST_EXIT`. The batch loop polls
+      that state and exits when every batched target has a
+      signal. Passing `target=None` (the default) preserves
+      single-dispatch semantics — backwards-compatible.
     """
-    global _SPECIALIST_EXIT
-    _SPECIALIST_EXIT = {
+    rec = {
         "status": str(status or "PASSED").upper(),
         "reason": reason,
         "summary": summary,
     }
+    if target is not None and isinstance(target, str) and target.strip():
+        _BATCH_EXITS[target.strip()] = rec
+        return
+    global _SPECIALIST_EXIT
+    _SPECIALIST_EXIT = rec
 
 
 def get_specialist_exit_signal() -> dict[str, Any] | None:
-    """Read + clear the exit signal. Returns None if no signal
-    has been raised since the last reset."""
+    """Read + clear the single-dispatch exit signal. Returns None
+    if no signal has been raised since the last reset.
+
+    Batch completions do NOT clear this — they live in
+    `_BATCH_EXITS` and are polled via `pop_batch_exit_signal`.
+    """
     global _SPECIALIST_EXIT
     sig = _SPECIALIST_EXIT
     _SPECIALIST_EXIT = None
     return sig
+
+
+def pop_batch_exit_signal(target: str) -> dict[str, Any] | None:
+    """Read + clear ONE target's batch exit signal. Returns None
+    if that target hasn't been signaled yet."""
+    return _BATCH_EXITS.pop(target.strip(), None)
+
+
+def list_batch_exit_signals() -> dict[str, dict[str, Any]]:
+    """Snapshot of un-polled batch signals — for telemetry / tests."""
+    return dict(_BATCH_EXITS)
 
 
 # ---------------------------------------------------------------------------
@@ -949,6 +990,380 @@ def dispatch_specialist(
     ).to_dict()
 
 
+def dispatch_specialist_batch(
+    *,
+    category: str,
+    objectives: list[dict[str, str]],
+    max_iterations: int | None = None,
+    max_cost_usd: float | None = None,
+    skills_override: list[str] | None = None,
+    inner_call_fn: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """v2 step 3 — batched per-category dispatch.
+
+    Probe N related objectives in ONE fresh-context loop, instead
+    of N separate dispatches. The specialist's 25K-token system
+    prompt is paid once; each objective still gets full reasoning
+    bandwidth inside the shared loop.
+
+    Args:
+      category: specialist category — same semantics as
+        `dispatch_specialist`. All objectives in the batch share
+        this category.
+      objectives: list of `{"target": str, "objective": str}`
+        dicts. Each represents one probe. Two objectives with
+        the same target are deduplicated (last write wins);
+        empty `target` strings are rejected.
+      max_iterations: total iteration cap across the entire
+        batch. Defaults to `2 + N × 6` (scales with batch size).
+      max_cost_usd: cost cap for the whole batch. Defaults to
+        profile.max_cost_usd × N (so 2x cap for a 2-objective
+        batch). None = no cost cap.
+      skills_override: same semantics as single dispatch.
+      inner_call_fn: TEST HOOK — when provided, called instead
+        of the real LLM. Receives `history`, `iteration`,
+        `profile`, `pending_targets`.
+
+    Returns:
+      Dict with:
+        - `batch_results`: per-target list of SpecialistRunResult-
+          shaped dicts. Includes targets that hit the verdict
+          cache (with status=CACHE_HIT_BLOCKED).
+        - `iterations_used`: total iterations across the batch.
+        - `duration_s`: wall-clock seconds for the whole batch.
+        - `findings_count`: total findings across all targets.
+        - `cache_hits`: number of objectives that pre-filtered via
+          the verdict cache (cost-free).
+        - `dispatched`: 1 if the LLM loop actually ran (counts
+          against the scan-mode counter), 0 if every objective was
+          a cache hit.
+
+    Recall-safety contract:
+      * Each objective is recorded into the verdict cache
+        individually after the batch completes — same predicate
+        as single-dispatch (only BLOCKED + no-signal reason).
+      * PASSED on one target never suppresses dispatch on
+        another target in the same or future batch.
+      * Targets that never receive a per-target completion
+        signal land as ITERATION_CAP_REACHED so the lead knows
+        they need re-dispatch.
+      * The batch counts as ONE dispatch against the scan-mode
+        counter (the cost win) — but only if at least one
+        objective wasn't cache-served.
+    """
+    if not isinstance(category, str) or not category.strip():
+        return {
+            "batch_results": [],
+            "iterations_used": 0,
+            "duration_s": 0.0,
+            "findings_count": 0,
+            "cache_hits": 0,
+            "dispatched": 0,
+            "error": "category required",
+        }
+    if not isinstance(objectives, list) or not objectives:
+        return {
+            "batch_results": [],
+            "iterations_used": 0,
+            "duration_s": 0.0,
+            "findings_count": 0,
+            "cache_hits": 0,
+            "dispatched": 0,
+            "error": "objectives must be a non-empty list",
+        }
+
+    # Normalize + de-dupe objectives. Preserve list order while
+    # dropping duplicates by target.
+    seen_targets: set[str] = set()
+    norm_objectives: list[dict[str, str]] = []
+    for entry in objectives:
+        if not isinstance(entry, dict):
+            continue
+        target = (entry.get("target") or "").strip()
+        objective_str = (entry.get("objective") or "").strip()
+        if not target or not objective_str:
+            continue
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        norm_objectives.append({"target": target, "objective": objective_str})
+    if not norm_objectives:
+        return {
+            "batch_results": [],
+            "iterations_used": 0,
+            "duration_s": 0.0,
+            "findings_count": 0,
+            "cache_hits": 0,
+            "dispatched": 0,
+            "error": "no valid objectives after normalization",
+        }
+
+    # v2 step 2 + step 3 interaction — pre-filter via the verdict
+    # cache. Each cache hit becomes a result row but does NOT
+    # consume any iteration / cost budget and does NOT count
+    # against the scan-mode counter.
+    from strix.agents.specialist_verdict_cache import (  # noqa: PLC0415
+        should_skip as _cache_should_skip,
+    )
+    batch_results: list[dict[str, Any]] = []
+    pending: list[dict[str, str]] = []
+    for entry in norm_objectives:
+        cached = _cache_should_skip(
+            category=category, endpoint=entry["target"], auth_state=None,
+        )
+        if cached is not None:
+            batch_results.append(SpecialistRunResult(
+                category=category,
+                objective=entry["objective"],
+                status="CACHE_HIT_BLOCKED",
+                reason=(
+                    f"verdict cache hit: prior dispatch on similar "
+                    f"endpoint returned BLOCKED — '{cached.reason}'"
+                ),
+                summary=cached.summary,
+            ).to_dict())
+        else:
+            pending.append(entry)
+
+    cache_hits = len(batch_results)
+
+    # All objectives served by cache — return without touching the
+    # LLM or the scan-mode counter.
+    if not pending:
+        return {
+            "batch_results": batch_results,
+            "iterations_used": 0,
+            "duration_s": 0.0,
+            "findings_count": 0,
+            "cache_hits": cache_hits,
+            "dispatched": 0,
+        }
+
+    # Scan-mode gate (same logic as single dispatch). The batch
+    # counts as ONE dispatch regardless of how many objectives it
+    # contains — that's the cost win.
+    global _DISPATCH_COUNT
+    cap_dispatches = get_scan_mode_dispatch_cap()
+    if cap_dispatches is not None and _DISPATCH_COUNT >= cap_dispatches:
+        mode = (os.environ.get("STRIX_SCAN_MODE") or "").strip().lower() or "unset"
+        reason = (
+            f"scan_mode={mode} caps specialist dispatch at "
+            f"{cap_dispatches}; batch of {len(pending)} would be #{_DISPATCH_COUNT + 1}"
+        )
+        # Mark every pending objective as DENIED so the lead sees
+        # what didn't run.
+        for entry in pending:
+            batch_results.append(SpecialistRunResult(
+                category=category,
+                objective=entry["objective"],
+                status="DENIED_BY_SCAN_MODE",
+                reason=reason,
+            ).to_dict())
+        return {
+            "batch_results": batch_results,
+            "iterations_used": 0,
+            "duration_s": 0.0,
+            "findings_count": 0,
+            "cache_hits": cache_hits,
+            "dispatched": 0,
+        }
+    _DISPATCH_COUNT += 1
+
+    profile = get_profile(category)
+    # Default batch caps scale with N. Per-objective floor of ~6
+    # iterations preserves reasoning bandwidth.
+    cap = max_iterations or (2 + len(pending) * 6)
+    cost_cap = max_cost_usd
+    if cost_cap is None and profile.max_cost_usd is not None:
+        cost_cap = profile.max_cost_usd * len(pending)
+
+    # Snapshot findings count before the batch runs so we can
+    # attribute the delta. (We attribute the delta to the batch
+    # as a whole; per-target attribution would need finding
+    # metadata threading, which is a future polish.)
+    before_count = 0
+    try:
+        from strix.telemetry.tracer import get_global_tracer
+        tracer = get_global_tracer()
+        if tracer is not None:
+            before_count = len(tracer.vulnerability_reports or [])
+    except Exception:  # noqa: BLE001
+        pass
+
+    scope_context = _resolve_scope_context()
+    relevant_findings = _resolve_relevant_findings(category)
+    system_prompt = _build_system_prompt(
+        profile=profile,
+        scope_context=scope_context,
+        relevant_findings=relevant_findings,
+        skills_override=skills_override,
+    )
+
+    # Initial user message — the lead's batch objective. Lists
+    # every pending target with its objective text, and tells the
+    # specialist to call `complete_objective(target=..., ...)` for
+    # each. Compact format so we don't blow up the context.
+    obj_lines = []
+    for i, entry in enumerate(pending, start=1):
+        obj_lines.append(
+            f"[{i}] target={entry['target']}  "
+            f"objective={entry['objective']}"
+        )
+    batch_user_msg = (
+        f"You have {len(pending)} objectives to probe in this "
+        f"batch (category={category}). Work through them "
+        f"sequentially. For each, when you reach a verdict, call:\n"
+        f"  complete_objective(target=\"<target>\", "
+        f"status=\"PASSED\"|\"BLOCKED\", reason=\"...\", summary=\"...\")\n"
+        f"You're done when every target has received a "
+        f"completion. Order: start with [1].\n\n"
+        + "\n".join(obj_lines)
+    )
+
+    # Clear stale batch signals + the single-dispatch signal.
+    _BATCH_EXITS.clear()
+    global _SPECIALIST_EXIT
+    _SPECIALIST_EXIT = None
+
+    pending_targets: set[str] = {e["target"] for e in pending}
+    completed: dict[str, dict[str, Any]] = {}
+
+    started = time.monotonic()
+    history: list[dict[str, str]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": batch_user_msg},
+    ]
+    iterations_used = 0
+    cost_spent = 0.0
+    batch_error: str | None = None
+
+    for i in range(cap):
+        iterations_used = i + 1
+        if cost_cap is not None and cost_spent >= cost_cap:
+            batch_error = (
+                f"batch cost ${cost_spent:.4f} >= cap ${cost_cap:.2f}"
+            )
+            break
+
+        try:
+            if inner_call_fn is not None:
+                response = inner_call_fn(
+                    history=history, iteration=i, profile=profile,
+                    pending_targets=sorted(pending_targets - set(completed)),
+                )
+            else:
+                response = _real_inner_llm_call(
+                    history=history, profile=profile,
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "batch[%s] inner-LLM call failed at iter %d: %s",
+                category, i, e,
+            )
+            batch_error = f"{type(e).__name__}: {e}"
+            break
+
+        if not isinstance(response, dict):
+            batch_error = "inner LLM returned non-dict response"
+            break
+
+        cost_spent += float(response.get("cost_usd") or 0.0)
+        msg = response.get("message") or ""
+        history.append({"role": "assistant", "content": str(msg)})
+
+        tool_calls = response.get("tool_calls") or []
+        for tc in tool_calls:
+            try:
+                result = _execute_inner_tool_call(tc, profile=profile)
+            except Exception as e:  # noqa: BLE001
+                result = {
+                    "success": False,
+                    "error": f"{type(e).__name__}: {e}",
+                }
+            history.append({
+                "role": "tool",
+                "content": json.dumps(result, default=str)[:2000],
+            })
+
+        # Drain per-target signals — every signaled target moves
+        # from `pending_targets` to `completed`.
+        for tgt in list(pending_targets):
+            sig = pop_batch_exit_signal(tgt)
+            if sig is not None:
+                completed[tgt] = sig
+
+        # All targets accounted for → done.
+        if pending_targets <= set(completed):
+            break
+
+        # No tool calls AND no exit signal → the model is stuck.
+        # Don't exit prematurely on batch — let it continue until
+        # the iteration cap. (Different from single dispatch
+        # where "no tool calls" means done.)
+
+    duration = time.monotonic() - started
+    findings_count = _count_findings_emitted_during(
+        before_count=before_count,
+    )
+
+    # Build per-target result rows. Targets that never signaled
+    # land as ITERATION_CAP_REACHED so the lead can re-dispatch.
+    from strix.agents.specialist_verdict_cache import (  # noqa: PLC0415
+        record as _cache_record,
+    )
+    for entry in pending:
+        tgt = entry["target"]
+        sig = completed.get(tgt)
+        if sig is not None:
+            status = sig.get("status") or "PASSED"
+            reason = sig.get("reason")
+            summary = sig.get("summary")
+        else:
+            status = "ITERATION_CAP_REACHED"
+            reason = batch_error or (
+                f"batch loop exited without a per-target signal "
+                f"for {tgt}"
+            )
+            summary = None
+        batch_results.append(SpecialistRunResult(
+            category=category,
+            objective=entry["objective"],
+            status=status,
+            reason=reason,
+            summary=summary,
+        ).to_dict())
+
+        # Per-target verdict cache record — applies the same
+        # cacheable predicate as single dispatch. PASSED never
+        # caches; only BLOCKED + no-signal reason does.
+        try:
+            _cache_record(
+                category=category,
+                endpoint=tgt,
+                auth_state=None,
+                status=status,
+                reason=reason,
+                objective=entry["objective"],
+                summary=summary,
+                # Conservative: any per-target finding count is
+                # unknown in batch mode (we attribute delta to
+                # the batch as a whole), so default 0 — record()
+                # treats 0 as cacheable when the reason matches.
+                findings_count=0,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("verdict_cache record (batch) failed: %s", e)
+
+    return {
+        "batch_results": batch_results,
+        "iterations_used": iterations_used,
+        "duration_s": round(duration, 2),
+        "findings_count": findings_count,
+        "cache_hits": cache_hits,
+        "dispatched": 1,
+    }
+
+
 def _real_inner_llm_call(
     *, history: list[dict[str, str]],
     profile: SpecialistDispatchProfile,
@@ -1065,11 +1480,17 @@ def _execute_inner_tool_call(
     # complete_objective — the exit signal — never goes through
     # the registry. Profile gating is also bypassed; this is the
     # one tool every specialist must always have.
+    #
+    # v2 step 3 — `target` arg routes the signal to the batch
+    # state (`_BATCH_EXITS`) so per-target completions in a
+    # batched dispatch are tracked independently. When target is
+    # absent (the default), behaviour is unchanged.
     if name == "complete_objective":
         signal_specialist_complete(
             status=args.get("status", "PASSED"),
             reason=args.get("reason"),
             summary=args.get("summary"),
+            target=args.get("target"),
         )
         return {"success": True, "signaled": "complete_objective"}
 
