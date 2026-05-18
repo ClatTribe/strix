@@ -240,6 +240,39 @@ _FAN_OUT_DIRECTIVE = (
 )
 
 
+# v2 step 4 — skip-lead-think rule. The specialist's structured
+# result carries `interesting=true|false` + `next_suggested_dispatch`.
+# When the result is boring, spend a single short turn picking the
+# next dispatch rather than a full deliberation pass — that's where
+# the ~50% lead-between-dispatches cost cut comes from.
+_SKIP_LEAD_THINK_DIRECTIVE = (
+    "SPECIALIST RESULTS CARRY A STRUCTURED `interesting` FLAG.\n\n"
+    "Every `dispatch_specialist` / `dispatch_specialist_batch` "
+    "result now includes:\n"
+    "  * `interesting: bool` — true when you should deliberate "
+    "(findings emitted, blocks present, or ERROR); false when "
+    "you can auto-advance (PASSED-no-finding, BLOCKED-no-signal, "
+    "cache hit, scan-mode denial).\n"
+    "  * `next_suggested_dispatch: {category, objective, target} "
+    "| null` — the specialist's own opinion about what to "
+    "dispatch next.\n"
+    "  * `blocks: [str]` — short noun phrases for unmet "
+    "preconditions; when non-empty, marks the result interesting "
+    "so you address them before next dispatch.\n\n"
+    "RULE: when `interesting=false`, do NOT spend a full reasoning "
+    "turn deliberating. Take `next_suggested_dispatch` if non-null, "
+    "otherwise advance to the next category in your plan or call "
+    "`advance_workflow_phase`. Save deliberation for interesting "
+    "results — findings to chain, blocks to clear, errors to "
+    "investigate.\n\n"
+    "This is a recall-safe efficiency rule: the specialist's "
+    "structured handoff IS your reasoning input for boring "
+    "results. The savings come from skipping redundant 'what "
+    "should I try next?' passes after dispatches that conclude "
+    "with nothing actionable."
+)
+
+
 # Compose the final addendum used by `LeadAgent.augment_system_prompt_context`
 # (see `_LEAD_OPERATING_DIRECTIVE` reference below).
 _LEAD_SYSTEM_PROMPT_ADDENDUM = (
@@ -248,6 +281,8 @@ _LEAD_SYSTEM_PROMPT_ADDENDUM = (
     + _AUTH_CRAWL_DIRECTIVE
     + "\n\n"
     + _FAN_OUT_DIRECTIVE
+    + "\n\n"
+    + _SKIP_LEAD_THINK_DIRECTIVE
 )
 
 
