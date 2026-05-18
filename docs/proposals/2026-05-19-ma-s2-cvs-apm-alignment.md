@@ -1,0 +1,462 @@
+# MA-S2 alignment — CVS + APM as defensible strengths
+
+**Status:** Proposal · 2026-05-19 · **Owner:** ClatTribe/strix
+**Tracking:** masterroadmap §10–§11 · engine-wishlist (next refresh)
+**Related:** Palantir MA-S2 v1.0 (May 2026) — Mission Assurance Security Standard for Software
+**Paired:** webappsec/engine-wishlist.md (wrapper-side analysis)
+
+## Why this document exists
+
+Palantir published **MA-S2** in May 2026 — a candidate standard for any
+software vendor operating in mission-critical environments. The
+standard names four control domains and a vendor *fails* if it cannot
+demonstrate the required evidence:
+
+| Domain | Name | What it tests |
+|---|---|---|
+| **CVS** | Continuous AI-Augmented Vulnerability Scanning | per-release scanning, CVSS+EPSS+KEV, AI-novel-vuln discovery, auto-escalation, **contextual** SLAs |
+| **APM** | Attack Path Modeling + Adversarial AI Simulation | multi-stage chains, ongoing AI red-teaming, **context-aware** triage, current threat intel |
+| INV | Real-Time Software Inventory + Domain Awareness | SBOM at release, runtime reconciliation, env-level visibility, supply chain, air-gap |
+| ARO | Autonomous Remediation Orchestration | auto patch deployment, fleet-wide, compliance-aware, suppression with audit, MTTR telemetry |
+
+**Strategic posture:** CVS and APM are where strix earns its keep —
+they're vulnerability *identification* and *prioritization*, which is
+the engine's job. INV and ARO live almost entirely in webappsec
+(inventory, patch orchestration, deployment).
+
+This proposal is the engine-side roadmap to *not just pass* MA-S2 on
+CVS+APM but be the reference implementation. Webappsec's own
+engine-wishlist covers the wrapper-side controls and joins this doc
+where the boundary blurs.
+
+## State of strix today (capability scan)
+
+### CVS — what's already there
+
+| Control | strix today | gap |
+|---|---|---|
+| **CVS-0.1** Auto container + dep scanning | `scan_sca_lockfiles`, `scan_iac`, `scan_sast`, `scan_nuclei_templates`, `container_image` target type | Container-image scanning is shallow (relies on wrapper's per-release trigger) |
+| **CVS-0.2** CVSS + EPSS + KEV | CVSS v3 calc in `create_vulnerability_report`; KEV via `list_actively_exploited_cves`/`lookup_cve_by_id`; threat-intel cache | **EPSS scoring is not enriched onto findings** |
+| **CVS-0.3** AI-augmented analysis | The entire specialist architecture — this is strix's reason to exist | Need explicit "novel\_vuln" tagging on findings for attestation |
+| **CVS-0.4** Auto detection / mitigation / recall | Detection ✅ via tracer; emit events for Critical+exploitable | No `interim_mitigation_hint` field; recall is webappsec's job but strix doesn't give it a clean signal |
+| **CVS-0.5** Contextual SLAs | CVSS-only severity; reachability evidence partial via SAST | **No `contextual_priority` object**; no reachability rollup; no attack-path context wired into priority |
+
+### APM — what's already there
+
+| Control | strix today | gap |
+|---|---|---|
+| **APM-1.1** Attack path modeling | KG (`knowledge_graph.py`), `chaining_graph.py`, `correlate_findings`, `attack_path_synthesis` skill | **No `attack_paths.jsonl` artifact** for attestation; paths are implicit in the KG |
+| **APM-1.2** Adversarial AI simulation | The whole scan is one | **No `simulation_run.json` attestation** (model, prompts hash, MITRE techniques exercised, chains attempted) |
+| **APM-1.3** Contextual triage integration | Each finding stands alone; severity is CVSS only | **No attack-path-aware triage** — biggest single gap |
+| **APM-1.4** Threat intel integration | CVE/KEV/EPSS partial; MITRE technique tags on tools | **No actor-TTP feed** (nation-state, ransomware groups); no `threat_intel_index.json` |
+
+## Architecture split — strix vs webappsec
+
+| Capability | strix owns | webappsec owns | joint |
+|---|---|---|---|
+| Per-run vulnerability identification | ● | | |
+| Per-finding contextual fields (EPSS, reachability, attack-path) | ● | | |
+| Attack-path graph construction (KG, chains) | ● | | |
+| Adversarial AI simulation (the scan) | ● | | |
+| Attestation artifacts (per-run JSONs) | ● | | |
+| Cross-scan correlation / dedupe-over-time | | ● | |
+| SLA tracking + breach alerts | | ● | |
+| Patch deployment / recall orchestration | | ● | |
+| Software inventory (INV-2.1 .. INV-2.5) | | ● | |
+| Continuous scheduling (cron, on-deploy) | | ● | |
+| Air-gap coverage (INV-2.5, ARO-3.2) | | ● | |
+| Compliance evidence aggregation | | ● | |
+| EPSS feed refresh | | ● | ● strix consumes |
+| Actor-TTP feed refresh | | ● | ● strix consumes |
+| Attestation report compilation | | ● | ● strix emits artifacts |
+
+## Proposed strix changes — CVS
+
+### P0-CVS-A — EPSS enrichment on every finding
+
+CVS-0.2 names EPSS explicitly as a *disqualifying deficiency*. We have
+the data path (`threat_intel_cache`); we don't enrich emitted findings.
+
+**Engine change:**
+- Add an `epss` block to the finding schema in
+  `strix/tools/reporting/reporting_actions.py`:
+  ```json
+  "epss": {
+    "score": 0.94,
+    "percentile": 0.998,
+    "last_updated": "2026-05-18T00:00:00Z"
+  }
+  ```
+- Resolve from the threat-intel cache at finding-emit time. When
+  the cache is stale (>7d) or unavailable, emit
+  `epss: {score: null, reason: "cache_stale"}` rather than omit —
+  attestation needs an *explicit* "we tried."
+
+**Webappsec dependency:** webappsec must keep the threat-intel cache
+fresh (daily refresh of FIRST EPSS + CISA KEV). The cache loader
+already lives in strix; webappsec triggers the refresh.
+
+**Effort:** S. **Impact:** unblocks CVS-0.2 + CVS-0.5 attestation.
+
+### P0-CVS-B — `contextual_priority` object on every finding
+
+CVS-0.5 explicitly disqualifies vendors who "apply uniform SLAs
+based on CVSS alone, without contextual enrichment." We need to emit
+the 4 contextual inputs the standard names — not just compute them
+internally.
+
+**Engine change:**
+- New field on every finding:
+  ```json
+  "contextual_priority": {
+    "raw_cvss": 9.8,
+    "raw_severity": "critical",
+    "epss_score": 0.94,
+    "kev_listed": true,
+    "reachability": {
+      "source_level": "reachable",       // via SAST taint
+      "dependency_level": "called",       // via SCA reach
+      "runtime_level": "observed",        // via DAST hit
+      "verdict": "reachable"              // worst-case rollup
+    },
+    "asset_context": {
+      "criticality": "high",              // from target_metadata
+      "data_sensitivity": "pii",
+      "blast_radius": "tenant"            // shared/tenant/single
+    },
+    "attack_path_membership": [
+      "ap-2026-05-19-001",                // APM artifact IDs
+      "ap-2026-05-19-007"
+    ],
+    "max_chained_severity": "critical",
+    "priority_tier": "p0_emergency"       // derived from all inputs
+  }
+  ```
+- The `priority_tier` is the engine's recommendation (`p0_emergency`,
+  `p1_urgent`, `p2_standard`, `p3_deferrable`, `p4_suppressible`).
+  Webappsec uses it to assign SLAs but is free to override.
+- Asset context comes from `target_metadata` (engine-wishlist §3
+  already plumbs this). Reachability rolls up from
+  `scan_sast`, `scan_sca_lockfiles`, and DAST evidence.
+
+**Webappsec dependency:** webappsec passes `target_metadata` with
+`criticality` / `data_sensitivity` / `blast_radius` per target
+(already plumbed via §3; just needs the schema extended).
+
+**Effort:** M. **Impact:** unblocks CVS-0.5 + plugs into APM-1.3.
+This is the single most important change for MA-S2 alignment.
+
+### P0-CVS-C — `interim_mitigation_hint` on Critical/High findings
+
+CVS-0.4 requires the platform to "automatically apply compensating
+controls that reduce exposure while full remediation is in progress."
+Strix doesn't apply mitigation (that's ARO), but it owns the
+*knowledge* of what mitigation is appropriate — the specialist that
+just found the bug knows whether network isolation, feature
+disablement, or config change is the right fence.
+
+**Engine change:**
+- New optional finding field `interim_mitigation_hint`:
+  ```json
+  "interim_mitigation_hint": {
+    "type": "feature_disable",            // | network_isolate | config_change | rate_limit | rule_block
+    "target": "/api/admin/export",
+    "instructions": "Disable the export endpoint until patch lands.",
+    "estimated_blast_reduction": "high",
+    "rollback_command": "POST /admin/features {export: true}"
+  }
+  ```
+- Required when severity ≥ HIGH AND KEV-listed OR EPSS > 0.5.
+- Specialists pre-populate via their per-category profile (SQLi
+  specialist knows "rate-limit the affected param + WAF rule";
+  IDOR specialist knows "enforce server-side ownership check or
+  block the endpoint").
+
+**Webappsec dependency:** webappsec consumes the hint and routes to
+the appropriate ARO action.
+
+**Effort:** M (per specialist; can be incremental).
+**Impact:** unblocks CVS-0.4 attestation.
+
+### P1-CVS-D — `novel_vuln` tag for AI-discovered findings
+
+CVS-0.3 requires demonstrating "novel, zero-day-class vulnerabilities
+that do not yet have CVE assignments must be discoverable within the
+vendor's pipeline." Today strix finds these but doesn't *label* them
+as such — making attestation harder.
+
+**Engine change:**
+- New finding field `discovery_method`:
+  ```json
+  "discovery_method": {
+    "primary": "ai_specialist",   // | cve_pattern_match | sast_rule | sca_lookup | nuclei_template
+    "specialist_category": "idor",
+    "is_novel": true,             // true when primary=ai_specialist AND no CVE matched
+    "ai_reasoning_evidence": "specialist run id ref"
+  }
+  ```
+- `is_novel=true` findings get a banner in the report + count toward
+  the CVS-0.3 attestation metric.
+
+**Effort:** S. **Impact:** CVS-0.3 attestation evidence.
+
+## Proposed strix changes — APM
+
+### P0-APM-A — `attack_paths.jsonl` artifact + KG-derived path enumeration
+
+APM-1.1 requires "the capability to model multi-stage attack paths"
+with output "technically integrated into vulnerability prioritization
+tooling and decisions." We have the KG; we don't surface paths.
+
+**Engine change:**
+- New per-run artifact `<run_dir>/attack_paths.jsonl` — one path
+  per line:
+  ```json
+  {
+    "id": "ap-2026-05-19-001",
+    "name": "Public SAML SP → admin tenant takeover",
+    "max_severity": "critical",
+    "stages": [
+      {"step": 1, "type": "entry", "finding_id": "f-001", "mitre_technique": "T1190", "description": "SAML XSW on /saml/acs"},
+      {"step": 2, "type": "auth_bypass", "finding_id": "f-002", "mitre_technique": "T1078", "description": "tenant-id substitution in IdP response"},
+      {"step": 3, "type": "data_access", "finding_id": "f-003", "mitre_technique": "T1530", "description": "cross-tenant Firestore read via tenant_id=*"}
+    ],
+    "preconditions": ["public_internet_reachable"],
+    "impact_summary": "Cross-tenant exfiltration of all customer PII.",
+    "confidence": 0.85
+  }
+  ```
+- Source: `chaining_graph.py` + `attack_path_synthesis` skill +
+  KG path-finding (`kg_query_paths` already exists).
+- One specialist run at the end of the scan (after `correlate_findings`)
+  walks the KG and emits paths. Conservative threshold: only emit
+  paths with ≥2 stages AND at least one HIGH/CRITICAL stage.
+
+**Effort:** M. **Impact:** APM-1.1 attestation; feeds APM-1.3.
+
+### P0-APM-B — Contextual triage via attack-path membership
+
+APM-1.3 is the single highest-leverage MA-S2 control: "A Critical CVE
+in a component that is not reachable from any external attack surface
+may be appropriately deprioritized. A Medium CVE in a component that
+is the first link in a traversable attack path to a privileged
+credential store must be treated as urgent."
+
+This goes far beyond per-finding severity adjustment — it changes
+which findings show up at the top of the report.
+
+**Engine change:**
+- In `strix/llm/fp_filter.py` (workflow phase 6, just shipped in
+  PR #336), add two new contextual rules:
+  - **R9 — unreachable_high_downgrade:** if `reachability.verdict ==
+    "unreachable"` AND severity ∈ {high, critical} AND no path
+    membership → DOWNGRADE to `low`. Recall-safe because
+    unreachability is verified by SAST/SCA evidence.
+  - **R10 — chain_first_link_upgrade:** if finding is the first
+    stage of an attack path AND `max_chained_severity == critical`
+    → set `priority_tier=p0_emergency` regardless of raw CVSS.
+    UPGRADE only, never DROP.
+- Rules run AFTER the `attack_paths` synthesis step (sequenced
+  by the workflow phase model).
+
+**Effort:** M (rules + sequencing change in the workflow phases).
+**Impact:** APM-1.3 + CVS-0.5 attestation. Improves *signal-to-noise*
+of the customer-facing report by an order of magnitude.
+
+### P0-APM-C — `simulation_run.json` attestation artifact
+
+APM-1.2 requires "evidence of adversarial AI simulation." Today strix
+runs the simulation but doesn't emit an attestation-grade record.
+
+**Engine change:**
+- New per-run artifact `<run_dir>/simulation_run.json`:
+  ```json
+  {
+    "run_id": "scan-...",
+    "started_at": "2026-05-19T...",
+    "duration_s": 3247,
+    "models_used": [
+      {"role": "lead", "model": "anthropic/claude-opus-4-7", "version": "..."},
+      {"role": "specialist", "model": "anthropic/claude-sonnet-4-6", "version": "..."}
+    ],
+    "scan_mode": "deep",
+    "specialists_dispatched": 14,
+    "specialist_categories_exercised": ["sqli", "xss", "idor", "auth", "saml-xsw", ...],
+    "mitre_techniques_exercised": ["T1190", "T1078", "T1530", ...],
+    "chains_attempted": 22,
+    "chains_confirmed": 3,
+    "kg_node_count": 187,
+    "kg_edge_count": 412,
+    "ai_reasoning_calls": 318,
+    "deterministic_tool_calls": 1024,
+    "novel_findings_count": 5
+  }
+  ```
+- Sourced from `tracer` + `chaining_graph` + `specialist_orchestrator`
+  + the v2 step-3 batch counter.
+
+**Effort:** S. **Impact:** APM-1.2 attestation, ready as a single
+file customers / regulators can read.
+
+### P1-APM-D — Threat intel index with actor TTPs
+
+APM-1.4 names "nation-state actor TTPs aligned to frameworks such as
+MITRE ATT&CK." Today we tag tools with techniques but don't track
+which actors are currently using which.
+
+**Engine change:**
+- New consumable: `<run_dir>/threat_intel_index.json` — emitted at
+  scan start, referenced during specialist dispatch + reporting:
+  ```json
+  {
+    "feed_refreshed_at": "2026-05-18T...",
+    "current_priority_actors": [
+      {
+        "actor": "APT29",
+        "techniques": ["T1190", "T1078.004", "T1098.001"],
+        "campaigns": ["MUMMY_SPIDER", "..."],
+        "last_observed": "2026-05-10"
+      }
+    ],
+    "active_campaigns": [...],
+    "newly_added_kev": [
+      {"cve_id": "CVE-2026-...", "added": "2026-05-15"}
+    ]
+  }
+  ```
+- The lead's system prompt gains a `<threat_intel_priority>` block
+  listing the techniques most-relevant to current campaigns
+  affecting the target's industry (passed via `target_metadata`).
+- Specialist dispatch is biased toward those techniques first.
+
+**Webappsec dependency:** webappsec refreshes the underlying feed
+(MITRE ATT&CK navigator, CISA alerts, possibly vendor TI subscriptions)
+and writes the index to a known path that strix loads at scan start.
+
+**Effort:** M. **Impact:** APM-1.4 attestation + nudges specialist
+selection toward what adversaries actually use today.
+
+## Prioritization
+
+**P0 — ship this quarter:** unblocks the MA-S2 attestation report.
+
+1. **P0-CVS-A** — EPSS enrichment (S) ← prereq for everything else
+2. **P0-CVS-B** — `contextual_priority` object (M) ← biggest single change
+3. **P0-APM-A** — `attack_paths.jsonl` artifact (M) ← feeds APM-1.3
+4. **P0-APM-B** — Contextual triage rules (R9 / R10) (M) ← the
+   downstream payoff of A + B above
+5. **P0-APM-C** — `simulation_run.json` (S) ← cheap, big attestation win
+6. **P0-CVS-C** — `interim_mitigation_hint` (M) ← per-specialist
+   incremental
+
+**P1 — ship next quarter:**
+
+7. **P1-CVS-D** — `novel_vuln` tag (S)
+8. **P1-APM-D** — Threat intel index (M)
+
+**Sequence note:** P0-CVS-A is on the critical path for P0-CVS-B
+which feeds P0-APM-B. Land them in that order. P0-APM-A + P0-APM-C
+can ship in parallel.
+
+## Interaction with the v2 cost-optimization arc
+
+The recall-safe per-workflow-phase plan
+([scan-mode-cost-optimization.md](2026-05-19-scan-mode-cost-optimization.md))
+is **complementary** to MA-S2:
+
+- The verdict cache (step 2, PR #337) cuts cost on the *same*
+  category against similar endpoints; MA-S2's contextual triage
+  cuts cost-of-attention on findings the operator doesn't need
+  to act on. Both reduce noise in the right places.
+- The FP pre-filter (step 1, PR #336) is where MA-S2's R9 / R10
+  contextual rules belong — same execution point, same kill
+  switch, same recall-canary discipline.
+- The batched dispatch (step 3, WIP) is the same architectural
+  shape as the proposed APM-A path-enumeration specialist:
+  one fresh-context loop, multiple objectives.
+
+**No conflicts.** The MA-S2 changes can land between the v2 steps.
+
+## Attestation artifacts strix must emit (summary)
+
+After all P0 lands, every scan produces (in `<run_dir>/`):
+
+| File | Sources | MA-S2 control |
+|---|---|---|
+| `findings.json` (existing) | tracer + specialist results | CVS-0.1, CVS-0.2, CVS-0.3, CVS-0.5 |
+| `attack_paths.jsonl` (NEW) | KG + chaining_graph | APM-1.1, APM-1.3 |
+| `simulation_run.json` (NEW) | tracer + orchestrator | APM-1.2 |
+| `coverage.json` (existing) | telemetry | APM-1.4 (technique coverage) |
+| `verification.jsonl` (existing) | verification_pipeline | CVS-0.3 evidence |
+| `compliance_evidence.json` (existing) | `emit_compliance_evidence` | CVS-0.5, APM-1.3 (audit) |
+
+Webappsec aggregates these across scans + time, layers SLA tracking
+on top, produces the customer-facing MA-S2 attestation bundle.
+
+## Coordination with webappsec
+
+The matching webappsec-side proposal must commit to:
+
+1. **Target metadata schema** — extend `target_metadata` with
+   `{criticality, data_sensitivity, blast_radius}` per target.
+   Strix consumes via the existing engine-wishlist §3 plumbing.
+2. **Threat-intel feed refresh** — webappsec keeps EPSS + KEV +
+   actor-TTP feeds fresh on a cadence; strix reads them.
+3. **Attestation bundle compiler** — webappsec consumes the new
+   per-run artifacts + cross-scan SLA telemetry + INV/ARO
+   evidence to produce the deliverable bundle.
+4. **Continuous scheduling** — webappsec schedules per-release
+   strix scans (the CVS-0.1 "per-release" guarantee).
+5. **Recall + interim mitigation execution** — webappsec consumes
+   `interim_mitigation_hint`s and routes to ARO actions.
+
+## Non-goals
+
+- **Implementing INV inside strix.** SBOM at release, runtime
+  reconciliation, supply chain visibility — these are inventory
+  problems, not vulnerability-identification problems. Stays in
+  webappsec.
+- **Implementing ARO inside strix.** Patch deployment, rollback,
+  compliance-aware change management — these are CD problems,
+  not pentest problems. Stays in webappsec.
+- **Replacing CVSS.** The contextual priority *augments* CVSS,
+  not replace. Auditors expect CVSS.
+- **One-size-fits-all priority tier.** The engine's `priority_tier`
+  is a *recommendation* — webappsec is free to override based on
+  customer SLA contracts.
+
+## Validation plan
+
+- **Schema tests:** every new artifact has a JSONSchema in
+  `tests/telemetry/` and a positive-shape test using a fixture
+  derived from a benchmark run.
+- **Recall canary:** the FP-filter rules R9 / R10 ship with
+  canaries pinning that benchmark must_find findings tagged as
+  first-link-in-chain are correctly upgraded (and that
+  must_find findings on reachable surfaces are never downgraded
+  to "low" by R9).
+- **Benchmark sweep:** re-run the full per_target suite after
+  each P0 lands; the `recall_must_find` floor remains ≥ 0.80
+  per fixture.
+- **Attestation walk-through:** generate the full bundle from a
+  benchmark scan + walk it against the MA-S2 Appendix A2 procurement
+  questions (page 20 of the standard). Every question maps to a
+  named artifact field.
+
+## Appendix — MA-S2 procurement questions, strix coverage
+
+The MA-S2 Appendix A2 lists 7 procurement questions any organization
+should ask. After all P0 lands, strix-produced artifacts answer:
+
+| Q | Question (paraphrased) | strix artifact |
+|---|---|---|
+| [0] | Automated scanning + AI-assisted novel-vuln discovery? | `simulation_run.json` (model + specialist categories) + `findings.json` (`discovery_method.is_novel`) |
+| [1] | EPSS + KEV in prioritization? | `findings.json` (`contextual_priority.epss_score`, `.kev_listed`) |
+| [2] | Real-time machine-readable inventory? | **webappsec** (INV-2.1 .. INV-2.5) |
+| [3] | AI-assisted adversarial simulation across multi-stage paths? | `attack_paths.jsonl` + `simulation_run.json` |
+| [4] | Patch deployment orchestration? | **webappsec** (ARO-3.1, ARO-3.2) |
+| [5] | Responsible-person + time-to-deploy? | **webappsec** (ARO-3.5, ARO-3.6) |
+| [6] | Air-gapped + compliance-constrained envs? | **webappsec** (INV-2.5, ARO-3.3) |
+
+Three of seven are strix's job. The rest are webappsec's. The
+boundary is clean.
