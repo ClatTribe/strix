@@ -776,6 +776,26 @@ Examples:
         ),
     )
 
+    # engine-wishlist §6 — project_id stamp. When the wrapper
+    # supplies it, the engine writes `project_id` onto every
+    # finding row + every `assets.discovered.jsonl` row + into
+    # `run_meta.json` so the wrapper's cross-scan dedup ledger
+    # can group N targets in one project under one finding.
+    # Engine does NOT dedup itself — that's wrapper-side; engine
+    # only emits the context.
+    parser.add_argument(
+        "--project-id",
+        type=str,
+        default=None,
+        help=(
+            "Stable project identifier stamped onto every finding "
+            "+ discovered-asset emission. The wrapper uses it to "
+            "group findings across N targets in the same project. "
+            "Falls back to STRIX_PROJECT_ID env var. "
+            "engine-wishlist.md §6."
+        ),
+    )
+
     # engine-wishlist §3 — target-metadata pass-through. Loaded
     # blob is stashed on args.target_metadata for the LLMConfig
     # builder + tracer.run_metadata stamp.
@@ -837,6 +857,14 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    # engine-wishlist §6 — resolve --project-id / STRIX_PROJECT_ID
+    # into args.project_id. Explicit flag wins.
+    args.project_id = (
+        getattr(args, "project_id", None)
+        or os.environ.get("STRIX_PROJECT_ID", "").strip()
+        or None
+    )
 
     # engine-wishlist §3 — load target metadata blob (best-effort;
     # absent / malformed → empty dict and the scan continues).
