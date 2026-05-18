@@ -247,6 +247,34 @@ def webapp_recon_pipeline(  # noqa: PLR0912
     if not target_host:
         return {"success": False, "error": f"could not resolve hostname from {target_url!r}"}
 
+    # v2 step 5 — recon cache lookup. Re-scans of the same target
+    # within the TTL replay the cached surface_map without re-running
+    # the inner recon steps. Key is parameter-aware so different
+    # max_pages/max_depth/enable_* shapes get distinct entries.
+    _cache_params = {
+        "max_pages": max_pages,
+        "max_depth": max_depth,
+        "seed_urls": seed_urls,
+        "openapi_url": openapi_url,
+        "enable_well_known": enable_well_known,
+        "enable_tls": enable_tls,
+        "enable_security_headers": enable_security_headers,
+    }
+    try:
+        from strix.agents.recon_cache import get as _recon_cache_get
+        _cached = _recon_cache_get(
+            pipeline="webapp_recon_pipeline",
+            target_url=target_norm,
+            params=_cache_params,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("recon_cache lookup failed: %s", e)
+        _cached = None
+    if _cached is not None:
+        # Cache hit — replay verbatim. Skip the inner pipeline +
+        # phase bracket (no work was done; no events to emit).
+        return _cached
+
     tracer, phase_id = _open_phase(f"webapp:{target_host}")
 
     errors: list[dict[str, Any]] = []
@@ -360,7 +388,7 @@ def webapp_recon_pipeline(  # noqa: PLR0912
         if path:
             surface_map["surface_map_path"] = str(path)
 
-        return {
+        result = {
             "success": True,
             "target_url": target_norm,
             "target_host": target_host,
@@ -368,6 +396,23 @@ def webapp_recon_pipeline(  # noqa: PLR0912
             "surface_map": surface_map,
             "next_steps": _format_next_steps(surface_map),
         }
+
+        # v2 step 5 — store in the recon cache only when the run
+        # succeeded cleanly. `put()` ignores results where
+        # success=False, so this is conservative even if we drift.
+        if not errors:
+            try:
+                from strix.agents.recon_cache import put as _recon_cache_put
+                _recon_cache_put(
+                    pipeline="webapp_recon_pipeline",
+                    target_url=target_norm,
+                    result=result,
+                    params=_cache_params,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.debug("recon_cache store failed: %s", e)
+
+        return result
     finally:
         _close_phase(
             tracer, phase_id,
