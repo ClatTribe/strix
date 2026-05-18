@@ -480,6 +480,15 @@ class Tracer:
         # import the dataclass.
         self.discovered_assets: list[dict[str, Any]] = []
 
+        # engine-wishlist §8 — accumulator for knowledge-graph
+        # deltas (add_node / add_edge rows from the engine's
+        # internal CloudGraph). Producers append converted dicts
+        # via `kg_delta.from_cloud_graph()`; finalisation flushes
+        # to `kg_delta.jsonl` so the wrapper's KG store can union
+        # graph state across all scans in a project.
+        self.kg_node_deltas: list[dict[str, Any]] = []
+        self.kg_edge_deltas: list[dict[str, Any]] = []
+
         # Phase + check tracking (roadmap §1).
         # `_open_phases` keyed by phase_id; entries are popped on complete_phase.
         # `_open_checks` keyed by check_id; entries are popped on complete_check.
@@ -3103,6 +3112,47 @@ class Tracer:
                 except (OSError, TypeError):
                     logger.warning(
                         "Failed to write assets.discovered.jsonl",
+                        exc_info=True,
+                    )
+
+            # engine-wishlist §8 — flush `kg_delta.jsonl`. Nodes
+            # first (so an `add_edge` within the same scan never
+            # references an unknown id), then edges. Same project_id
+            # stamp as §4 / §6 — wrapper's KG store scopes the
+            # cross-scan union by project. No file when empty.
+            if self.kg_node_deltas or self.kg_edge_deltas:
+                try:
+                    kg_file = run_dir / "kg_delta.jsonl"
+                    with kg_file.open("w", encoding="utf-8") as f:
+                        for row in self.kg_node_deltas:
+                            stamped = dict(row)
+                            if self._project_id:
+                                stamped.setdefault(
+                                    "project_id", self._project_id,
+                                )
+                            f.write(
+                                json.dumps(
+                                    self._sanitize_data(stamped),
+                                    ensure_ascii=False,
+                                )
+                            )
+                            f.write("\n")
+                        for row in self.kg_edge_deltas:
+                            stamped = dict(row)
+                            if self._project_id:
+                                stamped.setdefault(
+                                    "project_id", self._project_id,
+                                )
+                            f.write(
+                                json.dumps(
+                                    self._sanitize_data(stamped),
+                                    ensure_ascii=False,
+                                )
+                            )
+                            f.write("\n")
+                except (OSError, TypeError):
+                    logger.warning(
+                        "Failed to write kg_delta.jsonl",
                         exc_info=True,
                     )
 
