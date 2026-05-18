@@ -1,6 +1,7 @@
 ---
 name: kubernetes
 description: Kubernetes cluster security testing - RBAC, API exposure, container escapes, network policies, secrets, and supply chain
+triggers: [kubernetes, k8s, kubectl, eks, gke, aks, pod, rbac, kube-system, service account, kubelet, dashboard, etcd]
 ---
 
 # Kubernetes Security Testing

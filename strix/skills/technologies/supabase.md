@@ -1,6 +1,7 @@
 ---
 name: supabase
 description: Supabase security testing covering Row Level Security, PostgREST, Edge Functions, and service key exposure
+triggers: [supabase, postgrest, rls, row level security, supabase service role, edge functions, anon key, supabase.auth, supabase.from]
 ---
 
 # Supabase

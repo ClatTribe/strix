@@ -1,6 +1,7 @@
 ---
 name: nextjs
 description: Security testing playbook for Next.js covering App Router, Server Actions, RSC, and Edge runtime vulnerabilities
+triggers: [nextjs, next.js, app router, server actions, rsc, react server components, edge runtime, vercel, middleware.ts, _next, getServerSideProps]
 ---
 
 # Next.js

@@ -1,6 +1,7 @@
 ---
 name: sqlmap
 description: sqlmap target syntax, non-interactive execution, and common validation/enumeration workflows.
+triggers: [sqlmap, sql injection, batch enumeration, dump tables, dbms fingerprint, --dbs, --tables, --dump, sqli automation]
 ---
 
 # sqlmap CLI Playbook
