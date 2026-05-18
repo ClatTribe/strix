@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import atexit
 import logging
+import os
 import signal
 import sys
 import threading
@@ -755,6 +756,16 @@ class StrixTUIApp(App):  # type: ignore[misc]
 
     def _build_agent_config(self, args: argparse.Namespace) -> dict[str, Any]:
         scan_mode = getattr(args, "scan_mode", "deep")
+        # Phase-1 cost gate — publish scan_mode on the env + reset
+        # the dispatch counter; see strix/agents/specialist_orchestrator.py.
+        os.environ["STRIX_SCAN_MODE"] = scan_mode
+        try:
+            from strix.agents.specialist_orchestrator import (  # noqa: PLC0415
+                reset_dispatch_counter,
+            )
+            reset_dispatch_counter()
+        except Exception:  # noqa: BLE001
+            pass
         llm_config = LLMConfig(
             scan_mode=scan_mode,
             interactive=True,

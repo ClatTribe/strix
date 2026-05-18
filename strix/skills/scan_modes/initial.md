@@ -15,6 +15,12 @@ cadence afterwards.
 everything that requires exploit verification, business-logic
 reasoning, or long crawls.
 
+**`dispatch_specialist` is disabled in initial mode** (cap = 0) — the
+fresh-context multi-round loop is too expensive for a 2-5 min budget.
+Over-cap calls return `status=DENIED_BY_SCAN_MODE`. Use deterministic
+specialist tools (`scan_sqli`, `scan_xss`, etc.) directly, or call
+`finish_scan` once surface + dependency / secret / IaC scans complete.
+
 ## What this mode COVERS
 
 1. **Surface mapping**

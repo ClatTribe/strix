@@ -35,6 +35,8 @@ from strix.agents import specialist_orchestrator as so
 def _reset(monkeypatch):
     monkeypatch.delenv("STRIX_ORCHESTRATOR_MODE", raising=False)
     monkeypatch.delenv("STRIX_SPECIALIST_MAX_ITERATIONS", raising=False)
+    monkeypatch.delenv("STRIX_SCAN_MODE", raising=False)
+    monkeypatch.delenv("STRIX_DISPATCH_CAP_OVERRIDE", raising=False)
     so.reset_for_testing()
     yield
     so.reset_for_testing()
@@ -655,3 +657,170 @@ def test_kill_switch_still_allows_complete_objective(
         profile=profile,
     )
     assert r["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# Phase-1 scan-mode dispatch gate
+# (docs/proposals/2026-05-19-scan-mode-cost-optimization.md)
+#
+# These tests pin the engine-level gate: --scan-mode quick / initial cap
+# at 0 dispatches (deterministic-only); standard caps at 8; deep is
+# unbounded. The override env (STRIX_DISPATCH_CAP_OVERRIDE) takes
+# precedence.
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_cap_quick_blocks_first_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--scan-mode quick` → cap=0 → first dispatch is denied."""
+    monkeypatch.setenv("STRIX_SCAN_MODE", "quick")
+    assert so.get_scan_mode_dispatch_cap() == 0
+    r = so.dispatch_specialist(
+        category="sqli", objective="probe /login",
+        inner_call_fn=_fake_exit_call,
+    )
+    assert r["status"] == "DENIED_BY_SCAN_MODE"
+    assert "quick" in (r["reason"] or "")
+    assert r["iterations_used"] == 0
+    assert r["findings_count"] == 0
+    # Counter does not increment for denied calls — the cap is the
+    # gate, not a quota that the denied call consumes.
+    assert so.get_dispatch_count() == 0
+
+
+def test_dispatch_cap_initial_blocks_first_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Engine-wishlist §2 — `initial` mode shares the cap=0
+    semantics with quick."""
+    monkeypatch.setenv("STRIX_SCAN_MODE", "initial")
+    assert so.get_scan_mode_dispatch_cap() == 0
+    r = so.dispatch_specialist(
+        category="recon", objective="enumerate endpoints",
+        inner_call_fn=_fake_exit_call,
+    )
+    assert r["status"] == "DENIED_BY_SCAN_MODE"
+
+
+def test_dispatch_cap_standard_allows_8_denies_9th(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--scan-mode standard` → cap=8 → first 8 dispatches run,
+    9th is denied."""
+    monkeypatch.setenv("STRIX_SCAN_MODE", "standard")
+    assert so.get_scan_mode_dispatch_cap() == 8
+    statuses = []
+    for i in range(9):
+        r = so.dispatch_specialist(
+            category="sqli", objective=f"dispatch-{i}",
+            inner_call_fn=_fake_exit_call,
+        )
+        statuses.append(r["status"])
+    assert statuses[:8] == ["PASSED"] * 8
+    assert statuses[8] == "DENIED_BY_SCAN_MODE"
+    assert so.get_dispatch_count() == 8
+
+
+def test_dispatch_cap_deep_unbounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--scan-mode deep` → no cap — caller is bounded only by
+    `--max-cost`."""
+    monkeypatch.setenv("STRIX_SCAN_MODE", "deep")
+    assert so.get_scan_mode_dispatch_cap() is None
+    statuses = [
+        so.dispatch_specialist(
+            category="sqli", objective=f"dispatch-{i}",
+            inner_call_fn=_fake_exit_call,
+        )["status"]
+        for i in range(12)
+    ]
+    assert statuses == ["PASSED"] * 12
+    assert so.get_dispatch_count() == 12
+
+
+def test_dispatch_cap_unset_mode_falls_through_to_unbounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset / unknown scan_mode → unbounded (we never silently
+    throttle a run that didn't opt in)."""
+    monkeypatch.delenv("STRIX_SCAN_MODE", raising=False)
+    assert so.get_scan_mode_dispatch_cap() is None
+    monkeypatch.setenv("STRIX_SCAN_MODE", "wat")
+    assert so.get_scan_mode_dispatch_cap() is None
+
+
+def test_dispatch_cap_override_overrides_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`STRIX_DISPATCH_CAP_OVERRIDE=2` should win over the mode."""
+    monkeypatch.setenv("STRIX_SCAN_MODE", "deep")
+    monkeypatch.setenv("STRIX_DISPATCH_CAP_OVERRIDE", "2")
+    assert so.get_scan_mode_dispatch_cap() == 2
+    statuses = [
+        so.dispatch_specialist(
+            category="sqli", objective=f"d-{i}",
+            inner_call_fn=_fake_exit_call,
+        )["status"]
+        for i in range(3)
+    ]
+    assert statuses == ["PASSED", "PASSED", "DENIED_BY_SCAN_MODE"]
+
+
+def test_dispatch_cap_override_zero_disables_everything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Override = 0 should hard-disable dispatch even on deep."""
+    monkeypatch.setenv("STRIX_SCAN_MODE", "deep")
+    monkeypatch.setenv("STRIX_DISPATCH_CAP_OVERRIDE", "0")
+    r = so.dispatch_specialist(
+        category="sqli", objective="probe",
+        inner_call_fn=_fake_exit_call,
+    )
+    assert r["status"] == "DENIED_BY_SCAN_MODE"
+
+
+def test_dispatch_cap_override_garbage_falls_back_to_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-int override is ignored — we fall back to the
+    mode-derived cap, so we never silently disable dispatch on a
+    typo."""
+    monkeypatch.setenv("STRIX_SCAN_MODE", "deep")
+    monkeypatch.setenv("STRIX_DISPATCH_CAP_OVERRIDE", "high")
+    assert so.get_scan_mode_dispatch_cap() is None
+
+
+def test_reset_for_testing_clears_dispatch_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`reset_for_testing` (called between scans + by the
+    cli/tui boot path) must zero the counter, otherwise a
+    re-entrant CLI invocation would inherit the previous run's
+    count and start partway into the cap."""
+    monkeypatch.setenv("STRIX_SCAN_MODE", "standard")
+    for _ in range(3):
+        so.dispatch_specialist(
+            category="sqli", objective="probe",
+            inner_call_fn=_fake_exit_call,
+        )
+    assert so.get_dispatch_count() == 3
+    so.reset_for_testing()
+    assert so.get_dispatch_count() == 0
+
+
+def test_dispatch_cap_denied_call_does_not_consume_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DENIED_BY_SCAN_MODE call must not bump the counter —
+    otherwise repeated denied attempts would loop the counter
+    upward without anyone noticing."""
+    monkeypatch.setenv("STRIX_SCAN_MODE", "quick")
+    for _ in range(5):
+        r = so.dispatch_specialist(
+            category="sqli", objective="probe",
+            inner_call_fn=_fake_exit_call,
+        )
+        assert r["status"] == "DENIED_BY_SCAN_MODE"
+    assert so.get_dispatch_count() == 0

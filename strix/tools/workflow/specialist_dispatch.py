@@ -79,8 +79,15 @@ def dispatch_specialist(
 
     Returns:
       Dict with `status` (PASSED / BLOCKED / ITERATION_CAP_REACHED
-      / BUDGET_EXCEEDED / ERROR), `reason`, `iterations_used`,
-      `findings_count`, `duration_s`, `summary`.
+      / BUDGET_EXCEEDED / DENIED_BY_SCAN_MODE / ERROR), `reason`,
+      `iterations_used`, `findings_count`, `duration_s`, `summary`.
+
+    Scan-mode cap (phase 1 of cost optimization): `--scan-mode quick`
+    caps dispatches at 0 (deterministic probes only); `--scan-mode
+    standard` caps at 8; `--scan-mode deep` is unbounded. Over-cap
+    calls return immediately with status=DENIED_BY_SCAN_MODE — fall
+    back to running the deterministic specialist tool directly
+    (e.g. `scan_sqli`) instead of retrying dispatch.
 
     Idiomatic use (orchestrator pattern):
       1. Recon: dispatch_specialist('recon', 'enumerate endpoints', target=URL)
