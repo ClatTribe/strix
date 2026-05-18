@@ -366,6 +366,31 @@ def create_vulnerability_report(  # noqa: PLR0912, PLR0913
             if fp_result.verdict == "DOWNGRADE" and fp_result.new_severity:
                 severity = fp_result.new_severity
 
+            # v2 step 7 — canonical-CWE template auto-fill. For
+            # well-known classes (CWE-89 SQLi, CWE-79 XSS, etc.)
+            # the boilerplate-shaped fields (recommended_action,
+            # fix_time_estimate, business_impact_plain) get
+            # auto-populated from a template when the agent left
+            # them blank. Agent-supplied values always win.
+            try:
+                from strix.tools.reporting.cwe_templates import (
+                    auto_fill_missing_fields,
+                )
+                _tpl_result = auto_fill_missing_fields(
+                    cwe=cwe,
+                    recommended_action=recommended_action,
+                    fix_time_estimate=fix_time_estimate,
+                    business_impact_plain=business_impact_plain,
+                )
+                recommended_action = _tpl_result["recommended_action"]
+                fix_time_estimate = _tpl_result["fix_time_estimate"]
+                business_impact_plain = _tpl_result["business_impact_plain"]
+                _template_applied = _tpl_result["template_applied"]
+                _template_cwe = _tpl_result["template_cwe"]
+            except Exception:  # noqa: BLE001
+                _template_applied = False
+                _template_cwe = None
+
             dedupe_result = check_duplicate(candidate, existing_reports)
 
             if dedupe_result.get("is_duplicate"):
@@ -416,13 +441,17 @@ def create_vulnerability_report(  # noqa: PLR0912, PLR0913
                 proof_artifact_path=proof_artifact_path,
             )
 
-            return {
+            response: dict[str, Any] = {
                 "success": True,
                 "message": f"Vulnerability report '{title}' created successfully",
                 "report_id": report_id,
                 "severity": severity,
                 "cvss_score": cvss_score,
             }
+            if _template_applied:
+                response["template_applied"] = True
+                response["template_cwe"] = _template_cwe
+            return response
 
         import logging
 
