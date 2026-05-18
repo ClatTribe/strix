@@ -618,14 +618,17 @@ def main() -> int:
         docker_running = False
         try:
             docker_running = docker_up(fixture_dir, manifest)
-            # Single target → pass the bare string for parity with the
-            # legacy CLI invocation captured in baseline results.
+            # Single target → still route through the typed-tuple path
+            # so the `<type>:<value>` prefix lands in the CLI args.
+            # Without this, single-target fixtures with target_type=api /
+            # domain / ip_address etc. silently get the
+            # web_application catalog (PR #333 fixed this for the
+            # multi-target list path; the single-target string path
+            # was missed).
+            #
             # Paired → pass the (type, target) list so the CLI receives
             # repeated -t flags.
-            run_targets: str | list[tuple[str, str]] = (
-                primary_target if len(target_tuples) == 1
-                else target_tuples
-            )
+            run_targets: list[tuple[str, str]] = target_tuples
             exit_code, duration = run_strix(
                 run_targets, args.scan_mode, run_dir, args.strix_arg
             )
