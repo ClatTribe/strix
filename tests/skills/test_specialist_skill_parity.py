@@ -184,3 +184,62 @@ def test_phase_1a_skills_appear_in_menu() -> None:
     ]
     missing = [s for s in expected if s not in menu]
     assert not missing, f"skills missing from generated menu: {missing}"
+
+
+def test_phase_1b_reconnaissance_skills_present() -> None:
+    """Pin that the 7 Phase-1B reconnaissance skills landed and parse."""
+    base = get_strix_resource_path("skills") / "reconnaissance"
+    expected = [
+        "subdomain_strategy",
+        "dns_hygiene_attacks",
+        "asset_discovery_pipeline",
+        "threat_intel_pivoting",
+        "kev_diff_workflow",
+        "har_burp_ingestion",
+        "openapi_recon",
+    ]
+    for skill in expected:
+        path: Path = base / f"{skill}.md"
+        assert path.exists(), f"missing reconnaissance skill: {path}"
+        content = path.read_text(encoding="utf-8")
+        assert content.startswith("---\n"), f"{skill}: missing frontmatter"
+        assert "\nname:" in content, f"{skill}: missing `name:` field"
+        assert "\ndescription:" in content, (
+            f"{skill}: missing `description:` field"
+        )
+        assert "\ntriggers:" in content, f"{skill}: missing `triggers:` field"
+
+
+def test_reconnaissance_category_no_longer_empty() -> None:
+    """Phase 1B closes the empty reconnaissance/ category."""
+    from strix.skills import get_available_skills
+
+    available = get_available_skills()
+    assert "reconnaissance" in available, (
+        "reconnaissance category should appear in available skills"
+    )
+    assert len(available["reconnaissance"]) >= 7, (
+        f"expected ≥7 reconnaissance skills; got "
+        f"{len(available['reconnaissance'])}: {available['reconnaissance']}"
+    )
+
+
+def test_phase_1b_skills_appear_in_menu() -> None:
+    """Reconnaissance category renders in the menu."""
+    from strix.skills.menu import generate_skills_menu
+
+    menu = generate_skills_menu()
+    assert "RECONNAISSANCE" in menu, (
+        "RECONNAISSANCE category header missing from menu"
+    )
+    expected = [
+        "subdomain_strategy",
+        "dns_hygiene_attacks",
+        "asset_discovery_pipeline",
+        "threat_intel_pivoting",
+        "kev_diff_workflow",
+        "har_burp_ingestion",
+        "openapi_recon",
+    ]
+    missing = [s for s in expected if s not in menu]
+    assert not missing, f"reconnaissance skills missing from menu: {missing}"
