@@ -74,6 +74,21 @@ class LLM:
         self._total_stats = RequestStats()
         self.memory_compressor = MemoryCompressor(model_name=config.litellm_model)
         self.system_prompt = self._load_system_prompt(agent_name)
+
+        # v2 step 8 — persist the rendered system prompt to the
+        # disk cache. Best-effort: failures are swallowed; we
+        # never block agent boot on a cache-write error. The
+        # cache is opt-out via STRIX_PROMPT_CACHE_DISABLED.
+        try:
+            from strix.agents.prompt_cache import persist as _persist_prompt
+            _persist_prompt(
+                prompt=self.system_prompt,
+                scan_mode=getattr(config, "scan_mode", None),
+                role=agent_name,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
         # Roadmap §8.5 Phase 0.A — cost-bisection telemetry. Stash
         # the most-recent prepared-message breakdown so
         # `_update_usage_stats` can emit it alongside the usage event.
