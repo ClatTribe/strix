@@ -79,8 +79,21 @@ def dispatch_specialist(
 
     Returns:
       Dict with `status` (PASSED / BLOCKED / ITERATION_CAP_REACHED
-      / BUDGET_EXCEEDED / DENIED_BY_SCAN_MODE / ERROR), `reason`,
-      `iterations_used`, `findings_count`, `duration_s`, `summary`.
+      / BUDGET_EXCEEDED / DENIED_BY_SCAN_MODE / CACHE_HIT_BLOCKED /
+      ERROR), `reason`, `iterations_used`, `findings_count`,
+      `duration_s`, `summary`, plus the v2 step-4 structured
+      fields:
+        * `next_suggested_dispatch` — `{category, objective,
+          target}` dict (or None) — the specialist's own opinion
+          about the next dispatch you should run. When non-null,
+          consider taking it without further deliberation.
+        * `blocks` — list of unmet-precondition strings the
+          specialist hit (e.g. ["needs admin auth state"]).
+        * `interesting` — bool — True when the lead should
+          deliberate on this result (findings emitted, blocks
+          present, or ERROR). False when you can auto-advance
+          (PASSED-no-finding, BLOCKED-no-signal, cache hit,
+          scan-mode denial).
 
     Scan-mode cap (phase 1 of cost optimization): `--scan-mode quick`
     caps dispatches at 0 (deterministic probes only); `--scan-mode
@@ -96,6 +109,13 @@ def dispatch_specialist(
       4. Custom skill bundle: dispatch_specialist('generic', 'verify SAML XSW
          on /saml/acs', skills_override=['saml_xsw'])
       5. When done: finish_scan
+
+    Skip-lead-think rule (v2 step 4): when the returned
+    `interesting` flag is False, do NOT spend a full reasoning
+    turn deliberating. Take `next_suggested_dispatch` if non-null,
+    otherwise advance to the next category in your plan or call
+    `advance_workflow_phase`. Save the deliberation budget for
+    INTERESTING results (findings to chain, blocks to clear).
     """
     return _orchestrator().dispatch_specialist(
         category=category,
@@ -113,6 +133,8 @@ def complete_objective(
     reason: str | None = None,
     summary: str | None = None,
     target: str | None = None,
+    next_suggested_dispatch: dict[str, Any] | None = None,
+    blocks: list[str] | None = None,
 ) -> dict[str, Any]:
     """Specialist's exit tool. Signals the orchestrator that the
     bounded loop should return.
@@ -131,6 +153,22 @@ def complete_objective(
         tracks per-target completions and exits when every batched
         target has been signaled. Leave None for single-dispatch
         completions (the default, backwards-compatible).
+      next_suggested_dispatch: v2 step 4 — your opinion about what
+        the lead should dispatch next. Shape:
+        `{"category": str, "objective": str, "target": str | None}`.
+        Use this to handoff. Examples:
+          * After SQLi BLOCKED on an ORM-only backend, suggest
+            the lead try `idor` against the same surface.
+          * After confirming SAML XSW, suggest `auth_flow` to
+            gather tokens from the bypassed session.
+        The lead is free to override. The suggestion collapses
+        the "what next?" deliberation call.
+      blocks: v2 step 4 — list of unmet preconditions you hit as
+        short noun phrases. Examples:
+          ["needs admin auth state"]
+          ["needs SAML SP config", "needs IdP metadata"]
+        Non-empty `blocks` marks the result as INTERESTING so
+        the lead deliberates on how to unblock you.
 
     Returns:
       Confirmation dict. The actual exit happens in the
@@ -138,7 +176,12 @@ def complete_objective(
       iteration.
     """
     _orchestrator().signal_specialist_complete(
-        status=status, reason=reason, summary=summary, target=target,
+        status=status,
+        reason=reason,
+        summary=summary,
+        target=target,
+        next_suggested_dispatch=next_suggested_dispatch,
+        blocks=blocks,
     )
     return {
         "success": True,
@@ -147,6 +190,8 @@ def complete_objective(
         "reason": reason,
         "summary": summary,
         "target": target,
+        "next_suggested_dispatch": next_suggested_dispatch,
+        "blocks": blocks or [],
     }
 
 

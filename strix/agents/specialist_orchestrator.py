@@ -448,6 +448,16 @@ class SpecialistRunResult:
         specialist emitted (read from tracer's delta)
       duration_s: wall-clock seconds the specialist ran
       summary: short string summary of what the specialist did
+      next_suggested_dispatch: v2 step 4 — the specialist's own
+        opinion about what the lead should dispatch next. Shape:
+        `{"category": str, "objective": str, "target": str | None}`.
+        The lead is free to override; the suggestion exists to
+        collapse the "what next?" deliberation call.
+      blocks: v2 step 4 — list of unmet preconditions the
+        specialist hit. Each entry is a short noun phrase
+        (e.g. "needs admin auth state", "needs SAML SP config").
+        When the specialist is BLOCKED, these are the actionable
+        items the lead can address before re-dispatching.
     """
     category: str
     objective: str
@@ -457,6 +467,43 @@ class SpecialistRunResult:
     findings_count: int = 0
     duration_s: float = 0.0
     summary: str | None = None
+    next_suggested_dispatch: dict[str, Any] | None = None
+    blocks: list[str] = field(default_factory=list)
+
+    def is_interesting(self) -> bool:
+        """v2 step 4 — does the lead need to deliberate on this
+        result, or can it auto-advance?
+
+        A result is INTERESTING when any of:
+          * findings were emitted (lead may want to chain off them)
+          * the specialist explicitly named blocking preconditions
+            (lead may want to address them before next dispatch)
+          * the status is ERROR (lead needs to investigate /
+            potentially retry)
+
+        A result is BORING (interesting=False) when:
+          * PASSED with no findings + no blocks (specialist
+            confidently determined the surface safe)
+          * BLOCKED with a no-signal reason + no blocks (surface
+            isn't fertile for this category; lead should pivot)
+          * CACHE_HIT_BLOCKED (already-known no-op)
+          * DENIED_BY_SCAN_MODE (dispatch budget exhausted; lead
+            should fall back to deterministic probes)
+          * ITERATION_CAP_REACHED / BUDGET_EXCEEDED with no
+            findings (specialist ran out of room; lead might
+            re-dispatch later but no deliberation needed now)
+
+        The lead's prompt uses this to decide whether to spend a
+        full reasoning call or just take `next_suggested_dispatch`
+        and continue.
+        """
+        if self.findings_count > 0:
+            return True
+        if self.status == "ERROR":
+            return True
+        if self.blocks:
+            return True
+        return False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -468,6 +515,9 @@ class SpecialistRunResult:
             "findings_count": self.findings_count,
             "duration_s": round(self.duration_s, 2),
             "summary": self.summary,
+            "next_suggested_dispatch": self.next_suggested_dispatch,
+            "blocks": list(self.blocks),
+            "interesting": self.is_interesting(),
         }
 
 
@@ -513,6 +563,8 @@ def signal_specialist_complete(
     reason: str | None = None,
     summary: str | None = None,
     target: str | None = None,
+    next_suggested_dispatch: dict[str, Any] | None = None,
+    blocks: list[str] | None = None,
 ) -> None:
     """Called by the specialist's `complete_objective` tool to
     declare done. Sets the module-level signal that
@@ -531,17 +583,83 @@ def signal_specialist_complete(
       that state and exits when every batched target has a
       signal. Passing `target=None` (the default) preserves
       single-dispatch semantics — backwards-compatible.
+
+    Structured fields (v2 step 4):
+      next_suggested_dispatch — the specialist's own opinion about
+        what the lead should dispatch next, shape
+        `{"category": str, "objective": str, "target": str | None}`.
+        Optional; when present, the lead's prompt sees it as a
+        suggestion and can take it without a full deliberation
+        call.
+      blocks — list of unmet preconditions the specialist hit
+        (short noun phrases). Optional; when present, marks the
+        result as INTERESTING so the lead deliberates.
     """
     rec = {
         "status": str(status or "PASSED").upper(),
         "reason": reason,
         "summary": summary,
+        "next_suggested_dispatch": _normalize_suggested_dispatch(
+            next_suggested_dispatch,
+        ),
+        "blocks": _normalize_blocks(blocks),
     }
     if target is not None and isinstance(target, str) and target.strip():
         _BATCH_EXITS[target.strip()] = rec
         return
     global _SPECIALIST_EXIT
     _SPECIALIST_EXIT = rec
+
+
+def _normalize_suggested_dispatch(
+    value: Any,
+) -> dict[str, Any] | None:
+    """Validate + normalize `next_suggested_dispatch`. Accepts:
+      * None (default)
+      * A dict with at least `category` and `objective` keys
+      * Anything else → None (silent reject; we never crash the
+        loop on a malformed suggestion)
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        return None
+    category = (value.get("category") or "").strip()
+    objective = (value.get("objective") or "").strip()
+    if not category or not objective:
+        return None
+    out: dict[str, Any] = {
+        "category": category.lower(),
+        "objective": objective,
+    }
+    target = value.get("target")
+    if isinstance(target, str) and target.strip():
+        out["target"] = target.strip()
+    return out
+
+
+def _normalize_blocks(value: Any) -> list[str]:
+    """Accept a list-of-strings or None; coerce + dedupe;
+    silently drop non-stringy entries."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        # Tolerate a single string as a degenerate input.
+        s = value.strip()
+        return [s] if s else []
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for entry in value:
+        if not isinstance(entry, str):
+            continue
+        s = entry.strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
 
 
 def get_specialist_exit_signal() -> dict[str, Any] | None:
@@ -651,7 +769,24 @@ def _build_system_prompt(
         "\n\nEXIT PROTOCOL: call `complete_objective(status=..., "
         "reason=..., summary=...)` to return control to the "
         "orchestrator. Do NOT just stop responding — the "
-        "orchestrator's loop blocks waiting for this signal."
+        "orchestrator's loop blocks waiting for this signal.\n\n"
+        "STRUCTURED HANDOFF (v2 step 4) — when exiting, also "
+        "populate these two optional fields when you have a "
+        "view:\n"
+        "  * `next_suggested_dispatch={\"category\": \"<cat>\", "
+        "\"objective\": \"<one-line>\", \"target\": \"<url-or-null>\"}` "
+        "— your opinion about the most-valuable next dispatch the "
+        "lead should run. Examples: after BLOCKED on SQLi on an "
+        "ORM-only stack, suggest IDOR on the same surface; after "
+        "confirming a CSRF, suggest auth_flow to chain it. Save "
+        "this slot for HIGH-leverage handoffs only; leave None if "
+        "nothing obvious follows.\n"
+        "  * `blocks=[\"...\", \"...\"]` — short noun phrases for "
+        "unmet preconditions you hit (e.g. \"needs admin auth "
+        "state\", \"needs SAML SP config\"). The lead reads these "
+        "to decide what to set up before re-dispatching you.\n"
+        "These fields collapse the lead's \"what's next?\" "
+        "deliberation; fill them when you can."
     )
 
     return "\n".join(parts)
@@ -878,6 +1013,8 @@ def dispatch_specialist(
     final_status = "ITERATION_CAP_REACHED"
     final_reason: str | None = None
     final_summary: str | None = None
+    final_next_suggested: dict[str, Any] | None = None
+    final_blocks: list[str] = []
 
     for i in range(cap):
         iterations_used = i + 1
@@ -943,6 +1080,11 @@ def dispatch_specialist(
             final_status = exit_signal["status"]
             final_reason = exit_signal.get("reason")
             final_summary = exit_signal.get("summary")
+            # v2 step 4 — structured fields.
+            final_next_suggested = exit_signal.get(
+                "next_suggested_dispatch",
+            )
+            final_blocks = exit_signal.get("blocks") or []
             break
 
         # If the model produced no tool calls AND no exit signal,
@@ -987,6 +1129,8 @@ def dispatch_specialist(
         findings_count=findings_count,
         duration_s=duration,
         summary=final_summary,
+        next_suggested_dispatch=final_next_suggested,
+        blocks=final_blocks,
     ).to_dict()
 
 
@@ -1318,6 +1462,9 @@ def dispatch_specialist_batch(
             status = sig.get("status") or "PASSED"
             reason = sig.get("reason")
             summary = sig.get("summary")
+            # v2 step 4 — propagate structured fields per target.
+            next_suggested = sig.get("next_suggested_dispatch")
+            tgt_blocks = sig.get("blocks") or []
         else:
             status = "ITERATION_CAP_REACHED"
             reason = batch_error or (
@@ -1325,12 +1472,16 @@ def dispatch_specialist_batch(
                 f"for {tgt}"
             )
             summary = None
+            next_suggested = None
+            tgt_blocks = []
         batch_results.append(SpecialistRunResult(
             category=category,
             objective=entry["objective"],
             status=status,
             reason=reason,
             summary=summary,
+            next_suggested_dispatch=next_suggested,
+            blocks=tgt_blocks,
         ).to_dict())
 
         # Per-target verdict cache record — applies the same
@@ -1485,12 +1636,20 @@ def _execute_inner_tool_call(
     # state (`_BATCH_EXITS`) so per-target completions in a
     # batched dispatch are tracked independently. When target is
     # absent (the default), behaviour is unchanged.
+    #
+    # v2 step 4 — `next_suggested_dispatch` and `blocks` carry
+    # structured handoff data the lead reads to skip the
+    # "what's next?" deliberation. Malformed values are silently
+    # rejected by `_normalize_*` so a buggy specialist response
+    # can't crash the loop.
     if name == "complete_objective":
         signal_specialist_complete(
             status=args.get("status", "PASSED"),
             reason=args.get("reason"),
             summary=args.get("summary"),
             target=args.get("target"),
+            next_suggested_dispatch=args.get("next_suggested_dispatch"),
+            blocks=args.get("blocks"),
         )
         return {"success": True, "signaled": "complete_objective"}
 
