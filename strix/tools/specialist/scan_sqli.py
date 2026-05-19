@@ -441,6 +441,12 @@ def _emit_finding(
                 "deterministic detection based on observed response "
                 "shape.",
             ],
+            # V3-2 — flag deterministic provenance so the tracer
+            # can auto-verify in quick/initial modes (skips the
+            # LLM verifier round-trip; HIGH/CRITICAL still needs a
+            # second method).
+            discovery_method="deterministic_specialist",
+            discovery_source_tool="scan_sqli",
         )
     except Exception as e:  # noqa: BLE001
         logger.debug("scan_sqli: emit failed: %s", e, exc_info=True)
