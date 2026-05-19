@@ -3137,6 +3137,26 @@ class Tracer:
             except (OSError, TypeError):
                 logger.warning("Failed to write run_meta.json", exc_info=True)
 
+            # MA-S2 P0-APM-C — emit `simulation_run.json` at scan
+            # completion. This is the adversarial-AI-simulation
+            # attestation artefact APM-1.2 requires. Always
+            # emitted (no opt-out env yet — auditors need the
+            # file present; gaps are surfaced via null / 0 values
+            # within the file, not via missing files).
+            if mark_complete:
+                try:
+                    from strix.telemetry.simulation_run import (
+                        build_simulation_run,
+                    )
+                    sim_summary = build_simulation_run(self)
+                    sim_file = run_dir / "simulation_run.json"
+                    with sim_file.open("w", encoding="utf-8") as f:
+                        json.dump(sim_summary, f, indent=2, ensure_ascii=False)
+                except (OSError, TypeError, ImportError):
+                    logger.debug(
+                        "Failed to write simulation_run.json", exc_info=True,
+                    )
+
             # engine-wishlist §4 — emit `assets.discovered.jsonl`
             # alongside `run_meta.json`. Modules that discover
             # assets during a scan (cloud_attack_paths discovery,
