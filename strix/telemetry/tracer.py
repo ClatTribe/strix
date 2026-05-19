@@ -999,6 +999,18 @@ class Tracer:
         # is too coarse to pin down. Optional — SAST / DAST findings
         # without a rule_id stay CWE-driven.
         rule_id: str | None = None,
+        # V3-2 — finding-discovery provenance. When set to
+        # "deterministic_specialist", the verification pipeline
+        # auto-registers + records evidence + advances the finding
+        # toward VERIFIED in quick / initial scan modes (skipping
+        # the LLM verifier round-trip). When set to "ai_specialist"
+        # or left None, the finding flows through the normal
+        # verifier path — the agent has to call
+        # `advance_verification_stage` itself.
+        # Source tool name (e.g. "scan_sqli") is captured as the
+        # evidence's `tool` field for audit.
+        discovery_method: str | None = None,
+        discovery_source_tool: str | None = None,
     ) -> str:
         report_id = f"vuln-{len(self.vulnerability_reports) + 1:04d}"
 
@@ -1368,6 +1380,30 @@ class Tracer:
 
         if self.vulnerability_found_callback:
             self.vulnerability_found_callback(report)
+
+        # V3-2 — auto-verify deterministic findings in quick/initial
+        # modes. The deterministic specialist that emitted the
+        # finding already verified it at the oracle level (payload
+        # reflected, time-based delta, static-taint, SCA CVE match).
+        # Skipping the LLM verifier saves the lead's verify-phase
+        # round-trips. Best-effort: a failure here never blocks
+        # the finding from landing.
+        if discovery_method == "deterministic_specialist":
+            try:
+                from strix.agents.verification_pipeline import (  # noqa: PLC0415
+                    auto_verify_deterministic,
+                    should_auto_verify_deterministic,
+                )
+                if should_auto_verify_deterministic():
+                    auto_verify_deterministic(
+                        finding_id=report_id,
+                        severity=report["severity"],
+                        source_tool=(discovery_source_tool or "deterministic"),
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.debug(
+                    "auto-verify deterministic finding failed: %s", e,
+                )
 
         self.save_run_data()
         return report_id

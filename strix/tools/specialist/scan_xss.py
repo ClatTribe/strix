@@ -369,6 +369,10 @@ def _emit_finding(
                 f"Reflection in {ctx_human} context → executable "
                 f"JavaScript.",
             ],
+            # V3-2 — flag deterministic provenance for the tracer's
+            # auto-verify path in quick/initial modes.
+            discovery_method="deterministic_specialist",
+            discovery_source_tool="scan_xss",
         )
     except Exception as e:  # noqa: BLE001
         logger.debug("scan_xss: emit failed: %s", e, exc_info=True)

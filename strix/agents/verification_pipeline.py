@@ -338,6 +338,120 @@ def reset_for_testing() -> None:
 
 
 # ---------------------------------------------------------------------------
+# V3-2 — auto-verify deterministic findings
+# ---------------------------------------------------------------------------
+
+
+def is_quick_skip_verifier_disabled() -> bool:
+    """Kill switch for V3-2 (auto-verify deterministic findings in
+    quick mode). When set, deterministic findings flow through
+    the normal verifier path the same as LLM-discovered ones."""
+    return os.environ.get(
+        "STRIX_QUICK_SKIP_VERIFIER_DISABLED", ""
+    ).lower() in ("1", "true", "yes", "on")
+
+
+def should_auto_verify_deterministic() -> bool:
+    """V3-2 — auto-verify only applies in `quick` and `initial`
+    modes. Standard / deep keep the full LLM-verifier round-trips
+    for every finding so the lead can chain off them.
+
+    Kill switch (`STRIX_QUICK_SKIP_VERIFIER_DISABLED=1`) disables
+    auto-verify regardless of mode.
+    """
+    if is_disabled() or is_quick_skip_verifier_disabled():
+        return False
+    mode = (os.environ.get("STRIX_SCAN_MODE") or "").strip().lower()
+    return mode in ("quick", "initial")
+
+
+def auto_verify_deterministic(
+    *,
+    finding_id: str,
+    severity: str,
+    source_tool: str,
+    detail: str = "",
+) -> VerificationRecord | None:
+    """V3-2 — register + record evidence + advance to VERIFIED in
+    one atomic call, for findings emitted by a deterministic
+    specialist that already verified at the oracle level (payload
+    reflected / time-based delta / static-analysis taint / SCA
+    CVE match etc.).
+
+    The agent doesn't have to issue a separate LLM round-trip to
+    advance these through DETECTED → VERIFYING → VERIFIED — saves
+    the lead's verify-phase calls when the deterministic stack
+    already did the work.
+
+    Recall-safety:
+      * The synthesized evidence (`method='static_match'`,
+        `outcome='PASSED'`) only counts toward the 1-method
+        verification floor for non-HIGH/CRITICAL severities. The
+        HIGH/CRITICAL floor (≥2 methods) is unchanged — those
+        findings still require a second method (or the agent
+        explicitly records one). This preserves the existing
+        "≥2 independent methods for HIGH/CRITICAL" invariant.
+      * `is_disabled()` + `should_auto_verify_deterministic()`
+        are both checked; failures fall through to the normal
+        path (the agent can still verify by hand).
+
+    Args:
+      finding_id: as emitted by the tracer
+      severity: lowercased severity string (high/critical use the
+        ≥2-method floor)
+      source_tool: name of the deterministic specialist that
+        emitted the finding (e.g. "scan_sqli")
+      detail: optional one-line audit string
+
+    Returns:
+      The final `VerificationRecord` (status may be VERIFIED for
+      non-HIGH/CRITICAL or VERIFYING for HIGH/CRITICAL pending a
+      second method), or None when the pipeline is disabled.
+    """
+    if is_disabled():
+        return None
+
+    pipeline = get_pipeline()
+    rec = pipeline.register(finding_id=finding_id, severity=severity)
+
+    # SCANNED → DETECTED → VERIFYING transitions are unconditional —
+    # all three are non-controversial state moves with no method
+    # requirements.
+    for stage in ("DETECTED", "VERIFYING"):
+        pipeline.advance(
+            finding_id, target_stage=stage,
+            reason=f"v3-2 auto-verify from {source_tool}",
+        )
+
+    # Record the deterministic evidence. `static_match` is the
+    # canonical method for deterministic detection (semgrep / SAST
+    # rule / etc.); using it here unifies the evidence-method
+    # taxonomy across LLM-driven + deterministic paths.
+    pipeline.record_evidence(
+        finding_id,
+        method="static_match",
+        outcome="PASSED",
+        tool=source_tool,
+        detail=detail or f"emitted directly by deterministic specialist {source_tool}",
+    )
+
+    # Attempt VERIFYING → VERIFIED. For HIGH/CRITICAL findings the
+    # ≥2-method floor will block this — by design. The agent (or a
+    # second deterministic method like timing oracle) can supply
+    # the second method later.
+    ok, reason_msg, final_rec = pipeline.advance(
+        finding_id, target_stage="VERIFIED",
+        reason=f"v3-2 auto-verify (deterministic source: {source_tool})",
+    )
+    if not ok:
+        logger.debug(
+            "auto_verify_deterministic: advance to VERIFIED blocked: %s",
+            reason_msg,
+        )
+    return final_rec or rec
+
+
+# ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
 
