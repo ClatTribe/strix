@@ -1129,6 +1129,43 @@ class Tracer:
                 "is_novel": False,
             }
 
+        # MA-S2 P0-CVS-B — contextual_priority rollup. Builds on
+        # the EPSS block above + KEV via threat_intel + asset
+        # context from target_metadata + reachability evidence
+        # from existing finding fields. The block is ALWAYS
+        # present; every section is canonical-shape so the
+        # wrapper / auditor can rely on the keys existing.
+        try:
+            from strix.llm.contextual_priority import (
+                build_contextual_priority,
+            )
+            report["contextual_priority"] = build_contextual_priority(
+                report=report,
+                scan_config=self.scan_config,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("contextual_priority build failed: %s", e)
+            report["contextual_priority"] = {
+                "raw_cvss": None,
+                "raw_severity": report.get("severity"),
+                "epss_score": None,
+                "kev_listed": False,
+                "reachability": {
+                    "source_level": "unknown",
+                    "dependency_level": "unknown",
+                    "runtime_level": "unknown",
+                    "verdict": "unknown",
+                },
+                "asset_context": {
+                    "criticality": "unknown",
+                    "data_sensitivity": "unknown",
+                    "blast_radius": "unknown",
+                },
+                "attack_path_membership": [],
+                "max_chained_severity": report.get("severity"),
+                "priority_tier": "unknown",
+            }
+
         if code_locations:
             report["code_locations"] = code_locations
 
