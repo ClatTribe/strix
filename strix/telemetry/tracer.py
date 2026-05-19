@@ -3234,6 +3234,27 @@ class Tracer:
                         "Failed to write simulation_run.json", exc_info=True,
                     )
 
+                # MA-S2 P0-APM-A — emit `attack_paths.jsonl` at
+                # scan completion. This is the attack-path
+                # attestation artefact APM-1.1 requires. ALWAYS
+                # written (even when zero paths qualify) so the
+                # auditor sees the explicit "we tried"
+                # attestation signal.
+                try:
+                    from strix.telemetry.attack_paths import (
+                        write_attack_paths_jsonl,
+                    )
+                    write_attack_paths_jsonl(
+                        tracer=self,
+                        run_dir=run_dir,
+                        run_id=self.run_metadata.get("run_id"),
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to write attack_paths.jsonl",
+                        exc_info=True,
+                    )
+
             # engine-wishlist §4 — emit `assets.discovered.jsonl`
             # alongside `run_meta.json`. Modules that discover
             # assets during a scan (cloud_attack_paths discovery,
