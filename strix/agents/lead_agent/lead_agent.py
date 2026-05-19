@@ -578,17 +578,59 @@ class LeadAgent(StrixAgent):
         state = config.get("state")
         if state is not None and hasattr(state, "category"):
             state.category = "lead"
+            # v3 step 1 — apply scan-mode iter cap on the
+            # caller-supplied state too. Ceiling-only: never
+            # raises max_iterations.
+            try:
+                from strix.agents.lead_iter_cap import (  # noqa: PLC0415
+                    get_effective_max_iterations,
+                    emit_cap_applied_event,
+                )
+                configured = int(getattr(state, "max_iterations", self.max_iterations))
+                effective = get_effective_max_iterations(configured)
+                if effective < configured:
+                    state.max_iterations = effective
+                    config["max_iterations"] = effective
+                    emit_cap_applied_event(
+                        configured_max=configured,
+                        effective_max=effective,
+                    )
+            except Exception:  # noqa: BLE001
+                pass
         else:
             # Mirror BaseAgent's default state construction with
             # category="lead" pre-set.
             from strix.agents.state import AgentState
 
+            # v3 step 1 — scan-mode-aware lead iteration cap. The
+            # cap is a CEILING on max_iterations; never raises the
+            # configured value. Kill switch:
+            # STRIX_LEAD_ITER_CAP_DISABLED=1.
+            configured_max = int(config.get("max_iterations", self.max_iterations))
+            try:
+                from strix.agents.lead_iter_cap import (  # noqa: PLC0415
+                    get_effective_max_iterations,
+                    emit_cap_applied_event,
+                )
+                effective_max = get_effective_max_iterations(configured_max)
+                if effective_max < configured_max:
+                    emit_cap_applied_event(
+                        configured_max=configured_max,
+                        effective_max=effective_max,
+                    )
+            except Exception:  # noqa: BLE001
+                effective_max = configured_max
+
             state = AgentState(
                 agent_name="Root Agent",  # preserved for back-compat
                 category="lead",
-                max_iterations=int(config.get("max_iterations", self.max_iterations)),
+                max_iterations=effective_max,
             )
             config["state"] = state
+            # Reflect the capped value on the instance too so any
+            # downstream code reading `self.max_iterations` after
+            # super().__init__ sees the same number.
+            config["max_iterations"] = effective_max
 
         # Capture target_types from scan_config when available so the
         # tool catalog is filtered correctly. The actual filtering
