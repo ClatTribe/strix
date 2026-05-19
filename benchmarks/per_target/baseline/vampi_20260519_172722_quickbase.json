@@ -1,0 +1,30 @@
+{
+  "fixture": "benchmarks/per_target/fixtures/api/vampi",
+  "target": "http://host.docker.internal:5001",
+  "target_type": "api",
+  "additional_targets": [],
+  "scan_mode": "quick",
+  "model": "gemini/gemini-2.5-flash",
+  "strix_exit_code": 0,
+  "duration_seconds": 589.9,
+  "cost_usd": null,
+  "iterations": null,
+  "run_dir": "/Users/ashish/Downloads/cowork/strix/.claude/worktrees/objective-sammet-7e7f2b/benchmarks/per_target/fixtures/api/vampi/.strix-bench-work/run-1779191842/strix_runs/http-host-docker-internal-5001_249b",
+  "expected_count": 8,
+  "found_count": 0,
+  "matched_count": 0,
+  "precision": 0.0,
+  "recall": 0.0,
+  "missed": [
+    "bola-user-by-username",
+    "jwt-none-alg",
+    "jwt-weak-secret",
+    "mass-assignment-admin",
+    "rate-limit-login",
+    "bfla-debug-endpoint",
+    "sqli-books",
+    "openapi-spec-exposed"
+  ],
+  "false_positives": [],
+  "matches": []
+}

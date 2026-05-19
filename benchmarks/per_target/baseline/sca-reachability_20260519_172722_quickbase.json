@@ -1,0 +1,29 @@
+{
+  "fixture": "benchmarks/per_target/fixtures/code/sca-reachability",
+  "target": "/Users/ashish/Downloads/cowork/strix/.claude/worktrees/objective-sammet-7e7f2b/benchmarks/per_target/fixtures/code/sca-reachability/src",
+  "target_type": "local_code",
+  "additional_targets": [],
+  "scan_mode": "quick",
+  "model": "gemini/gemini-2.5-flash",
+  "strix_exit_code": 2,
+  "duration_seconds": 581.1,
+  "cost_usd": null,
+  "iterations": null,
+  "run_dir": "/Users/ashish/Downloads/cowork/strix/.claude/worktrees/objective-sammet-7e7f2b/benchmarks/per_target/fixtures/code/sca-reachability/.strix-bench-work/run-1779193909/strix_runs/src_22d7",
+  "expected_count": 5,
+  "found_count": 1,
+  "matched_count": 0,
+  "precision": 0.0,
+  "recall": 0.0,
+  "missed": [
+    "reach-lodash",
+    "reach-ejs",
+    "reach-ws",
+    "reach-minimist",
+    "reach-yargs"
+  ],
+  "false_positives": [
+    "Prototype Pollution via Lodash merge in /api/merge"
+  ],
+  "matches": []
+}
