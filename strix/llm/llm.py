@@ -612,13 +612,45 @@ class LLM:
             # Never let chain bugs break the LLM init path.
             logger.debug("fallback_chain.next_link_after failed", exc_info=True)
 
+        # Legacy 2-choice fallback defaults.
+        #
+        # Each fallback is credential-gated: returning a provider that
+        # has no API key configured silently converts "rate-limited
+        # but recoverable" into "no creds, hard fail" — observed in
+        # live measurement on 2026-05-20 where a Gemini-only setup
+        # failed over to Anthropic (no key), got 401 invalid x-api-key,
+        # and killed the whole penetration test.
+        #
+        # Order within each branch: prefer the model most-similar in
+        # capability tier to the primary, but ONLY return it when its
+        # provider has a credential set. Return None when no
+        # credentialed fallback exists.
+        try:
+            from strix.llm.fallback_chain import _credential_present
+        except Exception:  # noqa: BLE001
+            logger.debug("fallback_chain._credential_present unavailable",
+                         exc_info=True)
+            return None
+
         primary = (self.config.litellm_model or "").lower()
         if "gemini" in primary or "vertex" in primary:
-            return "anthropic/claude-sonnet-4-5-20250929"
+            if _credential_present("anthropic"):
+                return "anthropic/claude-sonnet-4-5-20250929"
+            if _credential_present("openai"):
+                return "openai/gpt-4o"
+            return None
         if "anthropic" in primary or "claude" in primary:
-            return "openai/gpt-4o"
+            if _credential_present("openai"):
+                return "openai/gpt-4o"
+            if _credential_present("google"):
+                return "gemini/gemini-2.5-flash"
+            return None
         if "openai" in primary or "gpt-" in primary:
-            return "anthropic/claude-sonnet-4-5-20250929"
+            if _credential_present("anthropic"):
+                return "anthropic/claude-sonnet-4-5-20250929"
+            if _credential_present("google"):
+                return "gemini/gemini-2.5-flash"
+            return None
         return None
 
     def _record_request_outcome(self, outcome: str) -> None:
@@ -997,15 +1029,42 @@ class LLM:
         code = getattr(e, "status_code", None) or getattr(
             getattr(e, "response", None), "status_code", None
         )
+        # Diagnostic: when STRIX_LLM_RETRY_DEBUG is set, log every
+        # error that flows through the classifier so we can see exactly
+        # what the upstream is raising. Useful for diagnosing why retry
+        # isn't firing in a live run.
+        if os.environ.get("STRIX_LLM_RETRY_DEBUG"):
+            import sys as _sys
+            _sys.stderr.write(
+                f"[_should_retry] type={type(e).__name__} "
+                f"status_code={code} "
+                f"msg={str(e)[:300]!r}\n"
+            )
+            _sys.stderr.flush()
         if code is None or litellm._should_retry(code):
+            if os.environ.get("STRIX_LLM_RETRY_DEBUG"):
+                import sys as _sys
+                _sys.stderr.write("[_should_retry] verdict=True (canonical path)\n")
+                _sys.stderr.flush()
             return True
         # Quota-disguised-as-auth pattern. Only kicks in on 401 / 403
         # (auth-shaped status codes); other 4xx codes stay non-
         # retryable to avoid masking real bugs.
         if code in (401, 403):
             msg = (str(e) or "").lower()
-            if any(hint in msg for hint in self._QUOTA_HINTS_IN_AUTH_ERROR):
+            matched = [h for h in self._QUOTA_HINTS_IN_AUTH_ERROR if h in msg]
+            if os.environ.get("STRIX_LLM_RETRY_DEBUG"):
+                import sys as _sys
+                _sys.stderr.write(
+                    f"[_should_retry] auth-shape inspection: matched={matched}\n"
+                )
+                _sys.stderr.flush()
+            if matched:
                 return True
+        if os.environ.get("STRIX_LLM_RETRY_DEBUG"):
+            import sys as _sys
+            _sys.stderr.write("[_should_retry] verdict=False (no retry)\n")
+            _sys.stderr.flush()
         return False
 
     def _raise_error(self, e: Exception) -> None:
