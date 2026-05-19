@@ -947,11 +947,66 @@ class LLM:
         except Exception:  # noqa: BLE001
             return 0.0
 
+    # Substrings that strongly suggest a 401/403 actually masks a
+    # rate-limit / quota-exhaustion event — extracted from observed
+    # error messages across Gemini, Anthropic, and OpenAI free tiers.
+    # Used by `_should_retry` below to recover from the "quota error
+    # disguised as auth error" pattern that LiteLLM's Gemini adapter
+    # surfaces (per-minute / per-day quota → 401 AuthenticationError
+    # instead of the proper 429 RateLimitError).
+    _QUOTA_HINTS_IN_AUTH_ERROR: tuple[str, ...] = (
+        "rate limit",
+        "rate-limit",
+        "rate_limit",
+        "quota",
+        "exhausted",
+        "exceeded",
+        "throttle",
+        "throttl",
+        "resource_exhausted",
+        "resource-exhausted",
+        "too many requests",
+        "limit reached",
+        "per minute",
+        "per-minute",
+        "per day",
+        "per-day",
+        "tokens per minute",
+        "requests per minute",
+    )
+
     def _should_retry(self, e: Exception) -> bool:
+        """Decide whether `e` is a transient upstream failure worth
+        retrying.
+
+        Routes through `litellm._should_retry` for the canonical 408 /
+        409 / 429 / 5xx cases. Adds one strix-specific branch on top:
+        when a provider returns a 401 / 403 AuthenticationError whose
+        message contains quota / rate-limit keywords, we treat it as
+        retryable. This is the "quota-as-auth-error" pattern Gemini
+        free tier exhibits (RESOURCE_EXHAUSTED → 401 instead of 429),
+        which would otherwise silently kill the entire penetration
+        test on the first transient cap.
+
+        Risk: if a customer's API key is genuinely revoked and the
+        provider happens to mention "limit" in the error string (very
+        rare), we'd burn ~65s of backoff before giving up. Worth it
+        to avoid the silent-abort failure mode that's been observed
+        twice in live measurement (2026-05-19 + 2026-05-20).
+        """
         code = getattr(e, "status_code", None) or getattr(
             getattr(e, "response", None), "status_code", None
         )
-        return code is None or litellm._should_retry(code)
+        if code is None or litellm._should_retry(code):
+            return True
+        # Quota-disguised-as-auth pattern. Only kicks in on 401 / 403
+        # (auth-shaped status codes); other 4xx codes stay non-
+        # retryable to avoid masking real bugs.
+        if code in (401, 403):
+            msg = (str(e) or "").lower()
+            if any(hint in msg for hint in self._QUOTA_HINTS_IN_AUTH_ERROR):
+                return True
+        return False
 
     def _raise_error(self, e: Exception) -> None:
         from strix.telemetry import posthog

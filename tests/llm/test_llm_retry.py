@@ -133,10 +133,14 @@ def test_no_retry_on_non_retryable_400(monkeypatch) -> None:
 
 
 def test_no_retry_on_401_auth_error(monkeypatch) -> None:
+    """A REAL 401 (bad credentials, no quota-language in the message)
+    must NOT retry. Retrying genuine auth failures wastes ~65s of
+    backoff for no reason."""
     sleeps = _patch_sleep(monkeypatch)
     llm = _make_llm()
 
     async def fake_stream(self, messages):
+        # Plain "auth failed" — no rate-limit / quota keywords.
         raise _UpstreamError("auth failed", status_code=401)
         yield  # pragma: no cover
 
@@ -150,6 +154,143 @@ def test_no_retry_on_401_auth_error(monkeypatch) -> None:
         asyncio.run(consume())
 
     assert sleeps == []
+
+
+# ---------------------------------------------------------------------------
+# Quota-disguised-as-auth pattern — Gemini free tier surfaces per-minute /
+# per-day quota exhaustion as 401 AuthenticationError instead of the proper
+# 429 RateLimitError. Strix must inspect the message and retry.
+#
+# Two live measurements (2026-05-19 + 2026-05-20) showed the entire
+# penetration test silently aborting on the first transient quota cap.
+# Without these tests, the regression would slip back in.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "status_code,message",
+    [
+        # Gemini Generative AI API — the actual error string LiteLLM
+        # surfaces when the free tier per-minute TPM cap is hit.
+        (401, "API key authentication failed: rate limit exceeded"),
+        (401, "Resource has been exhausted (e.g. check quota)"),
+        (401, "RESOURCE_EXHAUSTED: Quota exceeded for quota metric"),
+        (401, "Too many requests per minute"),
+        # OpenAI 403 / 401 quota variants seen in the wild.
+        (403, "You exceeded your current quota, please check your plan"),
+        (401, "Rate limit reached for requests per minute"),
+        # Anthropic per-minute throttle.
+        (401, "rate-limit error: tokens per minute exceeded"),
+        # Vertex AI variants.
+        (403, "Quota exceeded for resource_exhausted"),
+        # Mixed-case + alt-spelling defensive coverage.
+        (401, "Throttled — per-day limit reached"),
+        (401, "QUOTA EXCEEDED for project foo"),
+    ],
+)
+def test_retries_on_401_or_403_with_quota_keywords(
+    monkeypatch, status_code, message,
+) -> None:
+    """The whole point of the fix: quota-shaped 401/403 errors MUST
+    retry. Without this, Gemini free-tier silently aborts every run."""
+    sleeps = _patch_sleep(monkeypatch)
+    llm = _make_llm()
+
+    call_count = {"n": 0}
+
+    async def fake_stream(self, messages):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise _UpstreamError(message, status_code=status_code)
+        # Second attempt — succeed with a minimal response.
+        yield LLMResponse(content="ok")
+
+    monkeypatch.setattr(LLM, "_stream", fake_stream)
+
+    async def consume():
+        async for _ in llm.generate([]):
+            pass
+
+    asyncio.run(consume())
+
+    # Exactly one backoff sleep happened (between attempt 1 and 2),
+    # AND attempt 2 succeeded — so the retry classifier said "yes, try again".
+    assert len(sleeps) == 1, (
+        f"expected exactly 1 retry sleep for quota-as-{status_code}; "
+        f"got {sleeps}"
+    )
+    # Backoff schedule is 5s ± 20% jitter on attempt 0 → between 4s and 7s.
+    assert 1.0 <= sleeps[0] <= 10.0, (
+        f"first backoff out of expected jitter window: {sleeps[0]}"
+    )
+    assert call_count["n"] == 2, (
+        f"expected exactly 2 _stream invocations (fail + success); "
+        f"got {call_count['n']}"
+    )
+
+
+@pytest.mark.parametrize("status_code", [400, 404, 422])
+def test_no_retry_on_other_4xx_even_with_quota_keywords(
+    monkeypatch, status_code,
+) -> None:
+    """The quota-as-auth recovery is scoped to 401/403. Other 4xx
+    codes (400 / 404 / 422) stay non-retryable even if the message
+    mentions 'quota' — those are bug shapes that retrying would mask.
+
+    A 400 with 'quota' in it is almost always a malformed request
+    payload that happens to mention quota as a field name."""
+    sleeps = _patch_sleep(monkeypatch)
+    llm = _make_llm()
+
+    async def fake_stream(self, messages):
+        raise _UpstreamError(
+            "request validation failed: field 'quota' missing",
+            status_code=status_code,
+        )
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(LLM, "_stream", fake_stream)
+
+    async def consume():
+        async for _ in llm.generate([]):
+            pass
+
+    with pytest.raises(LLMRequestFailedError):
+        asyncio.run(consume())
+
+    assert sleeps == [], (
+        f"expected no retry on {status_code}; got sleeps={sleeps}"
+    )
+
+
+def test_no_retry_on_401_when_message_is_genuine_auth_error(
+    monkeypatch,
+) -> None:
+    """Pin the original behaviour: a 401 whose message clearly says
+    the credential is bad (no quota / rate-limit language) must NOT
+    retry. Catching this regression in CI prevents the quota-recovery
+    branch from accidentally retrying real auth failures."""
+    sleeps = _patch_sleep(monkeypatch)
+    llm = _make_llm()
+
+    async def fake_stream(self, messages):
+        # No quota / rate-limit keywords whatsoever.
+        raise _UpstreamError("Invalid API key provided.", status_code=401)
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(LLM, "_stream", fake_stream)
+
+    async def consume():
+        async for _ in llm.generate([]):
+            pass
+
+    with pytest.raises(LLMRequestFailedError):
+        asyncio.run(consume())
+
+    assert sleeps == [], (
+        "must NOT retry on genuine 401 auth failures — would burn "
+        "~65s of backoff for nothing"
+    )
 
 
 # ---------------------------------------------------------------------------
