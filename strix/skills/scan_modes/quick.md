@@ -22,6 +22,59 @@ Time-boxed assessment focused on high-impact vulnerabilities. Prioritize breadth
 
 Optimize for fast feedback on critical security issues. Skip exhaustive enumeration in favor of targeted testing on high-value attack surfaces.
 
+## Phase 0: Anchor scans — **REQUIRED before any other phase**
+
+Quick mode without these anchor calls collapses to "LLM reads files and guesses,"
+which produces 0–30% recall on benchmarks. The bar is set by free OSS pipelines
+running these same tools directly (semgrep finds 15 vulns in flask-vuln in 3
+seconds; trivy/grype/osv-scanner one-shot the SCA fixtures). **Strix has to at
+least invoke them.**
+
+Anchor the run on the target-type-appropriate deterministic specialist tools
+**before** doing any custom reasoning. If a backend is missing (`scan_sast`
+returns `status="partial"` etc.), surface that explicitly in your findings —
+don't silently move on.
+
+- **API targets (REST / GraphQL / gRPC):**
+  1. `fingerprint_tech_stack` first (3-5 sec, picks the right nuclei tags).
+  2. `scan_nuclei_templates(tags=['cve'], severity=['high', 'critical'])` —
+     this is the canonical signature-match path for known-CVE coverage. Skipping
+     it means you cannot detect ~9k known issues that OSS nuclei catches.
+  3. `openapi_spec_ingest` if a spec exists, else `fingerprint_tech_stack`-driven
+     endpoint inventory.
+  4. THEN run the OWASP-API-Top-10 deterministic specialists in priority order:
+     `jwt_audit` (token forgery / weak-secret) → `scan_api_bola` (BOLA / IDOR) →
+     `scan_api_mass_assignment` → `scan_api_bfla` → `scan_api_rate_limit`.
+
+- **Repository / local_code targets:**
+  1. `scan_sca_lockfiles` FIRST — dependency CVEs are the highest-EPSS finding
+     class, and `attack_path_membership` chain construction depends on
+     Dependency-node emission. KEV / EPSS≥0.5 always override `priority_tier`.
+  2. `scan_sast` (Phase 7 — semgrep-driven, registry rules + vibe-coded pack) —
+     diff-aware on PR context, fast.
+  3. `scan_iac` if any IaC files exist (`vercel.json` / `netlify.toml` /
+     `terraform/` / `Dockerfile` / `docker-compose.yml`). Cross-asset:
+     IaC misconfigs (CORS-credentials, open redirects) become DAST hypotheses
+     for the deployed URL.
+  4. `secrets_scan` (always cheap; gitleaks-driven).
+
+- **Web-application targets (HTML-rendering):**
+  Same API-target anchor sequence, PLUS `scan_xss` and `cors_deep_check` after
+  the nuclei pass. If the repo is co-located (vibe-coded SaaS), also run the
+  `scan_sca_lockfiles` + `scan_sast` + `scan_iac` triple from the repo path.
+
+- **Container-image targets:**
+  1. `scan_container_image` (trivy-driven, vuln + misconfig + secret scanners).
+  2. `sbom_extract` for the dependency manifest.
+
+- **IP-address / domain targets:**
+  No signature corpus to anchor on; fall through to Phase 1 (Rapid Orientation).
+
+Skipping these anchors is the single largest recall regression in quick mode.
+The lead's tool catalog already exposes them (`strix/agents/lead_agent/tool_catalog.py`)
+— this section is the **prompt-level instruction** that they must actually be
+called.
+
 ## Phase 1: Rapid Orientation
 
 **Whitebox (source available)**
