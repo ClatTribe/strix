@@ -13,6 +13,23 @@
 # When OWASP publishes a new crAPI version with shifted endpoints,
 # bump the tag here AND re-baseline expected.yaml against it.
 #
+# Pin history:
+#   2024-Q4 — pinned to 0.7.0 (initial fixture build)
+#   2026-05-19 — repinned to 1.1.6-rc8. OWASP retired the 0.7.0
+#     tags from Docker Hub between Q4 2024 and Q2 2026; the 0.7.0
+#     pulls started returning HTTP 404 (broke the runner with
+#     `docker compose up` exit 1 before strix was ever invoked).
+#     1.1.6-rc8 is the most recent immutable tag that exists for
+#     all four crapi services (identity / community / workshop /
+#     web). The final 1.1.6 tag only landed on identity; the other
+#     three jump straight from rc8 to floating `main`/`latest`.
+#     FOLLOW-UP: this fixture's expected.yaml was baselined against
+#     0.7.0 endpoints. The crAPI HTTP surface drifted between 0.7.0
+#     and 1.1.6 (rate-limit endpoints renamed, JWT secret defaults
+#     changed). Re-baseline expected.yaml against 1.1.6-rc8 in a
+#     separate PR — until then, this fixture's recall numbers are
+#     not directly comparable to the 2024-Q4 baseline.
+#
 # Network: services bind to 8888 (web), 8080 (API), 8000 (mailhog UI),
 # 8025 (mailhog SMTP). The benchmark target is the API at 8080.
 
@@ -21,7 +38,7 @@ x-crapi-image: &crapi-image
 
 services:
   crapi-identity:
-    image: crapi/crapi-identity:0.7.0
+    image: crapi/crapi-identity:1.1.6-rc8
     <<: *crapi-image
     container_name: bench-crapi-identity
     environment:
@@ -45,7 +62,7 @@ services:
       retries: 10
 
   crapi-community:
-    image: crapi/crapi-community:0.7.0
+    image: crapi/crapi-community:1.1.6-rc8
     <<: *crapi-image
     container_name: bench-crapi-community
     environment:
@@ -62,7 +79,7 @@ services:
       - bench-crapi
 
   crapi-workshop:
-    image: crapi/crapi-workshop:0.7.0
+    image: crapi/crapi-workshop:1.1.6-rc8
     <<: *crapi-image
     container_name: bench-crapi-workshop
     environment:
@@ -75,7 +92,7 @@ services:
       - bench-crapi
 
   crapi-web:
-    image: crapi/crapi-web:0.7.0
+    image: crapi/crapi-web:1.1.6-rc8
     <<: *crapi-image
     container_name: bench-crapi-web
     ports:

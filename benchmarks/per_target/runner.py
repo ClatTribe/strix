@@ -516,6 +516,148 @@ def collect_findings(run_dir: Path) -> list[Found]:
     return findings
 
 
+def _oss_tool_check(name: str, args: list[str], timeout: int = 180,
+                    cwd: Path | None = None) -> tuple[int | None, str]:
+    """Run an OSS scanner and return (finding_count, note).
+
+    Returns (None, reason) when the tool errored, isn't installed, or
+    timed out. Returns (n, "") on success, where n is the raw
+    finding count parsed from the tool's JSON output.
+
+    This is best-effort and never raises — a partial floor (e.g. only
+    semgrep + trivy succeeding) is more useful than no floor data.
+    """
+    if not shutil.which(name):
+        return None, f"{name} not on PATH"
+    try:
+        r = subprocess.run(
+            args, capture_output=True, timeout=timeout, cwd=cwd,
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"{name} timed out after {timeout}s"
+    except Exception as e:
+        return None, f"{name}: {type(e).__name__}: {e}"
+    # Per-tool exit-code convention:
+    #   semgrep: 0 = no findings, 1 = findings emitted (NOT an error)
+    #   trivy:   0 = success
+    #   grype:   0 = success
+    #   osv-scanner: 0 = no vulns, 1 = vulns found
+    #   checkov: 0 = no fails, 1 = fails found, 2 = error
+    if r.returncode not in (0, 1):
+        return None, f"{name} exit={r.returncode}"
+    try:
+        d = json.loads(r.stdout or b"{}")
+    except json.JSONDecodeError as e:
+        return None, f"{name}: stdout not JSON ({e})"
+    if name == "semgrep":
+        return len(d.get("results", []) or []), ""
+    if name == "trivy":
+        # Sum HIGH+CRITICAL vulns across all Results.
+        n = sum(len(rr.get("Vulnerabilities") or [])
+                for rr in (d.get("Results") or []))
+        return n, ""
+    if name == "grype":
+        matches = d.get("matches", []) or []
+        hc = [m for m in matches
+              if (m.get("vulnerability") or {}).get("severity", "").lower()
+                  in ("high", "critical")]
+        return len(hc), ""
+    if name == "osv-scanner":
+        n = 0
+        for rr in d.get("results", []) or []:
+            for p in rr.get("packages", []) or []:
+                n += len(p.get("vulnerabilities", []) or [])
+        return n, ""
+    if name == "checkov":
+        if isinstance(d, list):
+            return sum(len((x.get("results") or {}).get("failed_checks", []))
+                       for x in d if isinstance(x, dict)), ""
+        return len((d.get("results") or {}).get("failed_checks", [])), ""
+    return None, f"unknown tool {name}"
+
+
+def compute_oss_floor(fixture_dir: Path, target_type: str | None) -> dict[str, Any]:
+    """Compute the OSS-tool finding floor for a fixture.
+
+    For code/repo fixtures, runs semgrep (p/python+p/javascript+p/security-audit),
+    trivy fs (HIGH+CRITICAL), grype dir (HIGH+CRITICAL), osv-scanner (recursive),
+    and checkov (all frameworks). Returns per-tool counts plus a naive_sum
+    upper-bound and a `backends_present` map.
+
+    For non-source target_types (api, ip_address, domain, container_image),
+    returns a short stub indicating the floor doesn't apply directly to the
+    fixture root.
+
+    Best-effort: missing binaries, timeouts, and parse errors all degrade
+    gracefully — every tool gets recorded as either `count: int` or
+    `note: str` describing why it didn't run.
+
+    Why this exists: R1 (2026-05-19) ran the full per_target baseline with
+    every OSS scanner backend missing from PATH, producing data that
+    measured "strix LLM with no scanners" instead of strix-with-scanners.
+    This helper guarantees every future baseline records the OSS floor
+    alongside strix's numbers — if `oss_floor.naive_sum > strix_found_count`
+    on a code fixture, the run is signalling that the LLM layer is adding
+    negative value vs a $0 OSS pipeline.
+    """
+    source_types = {"local_code", "repository", "web+code", "code"}
+    if target_type not in source_types:
+        return {
+            "applicable": False,
+            "reason": f"target_type={target_type!r} — OSS scanners don't "
+                      f"map directly to the fixture root",
+        }
+
+    p = str(fixture_dir)
+    tools: dict[str, dict[str, Any]] = {}
+    for tname, targs, timeout in (
+        ("semgrep", [
+            "semgrep", "--config", "p/python",
+            "--config", "p/javascript",
+            "--config", "p/security-audit",
+            "--json", "--quiet", p,
+        ], 180),
+        ("trivy", [
+            "trivy", "fs", "--quiet",
+            "--severity", "HIGH,CRITICAL",
+            "--format", "json", p,
+        ], 120),
+        ("grype", ["grype", f"dir:{p}", "-o", "json", "--quiet"], 120),
+        ("osv-scanner", [
+            "osv-scanner", "scan", "source", "-r",
+            "--format=json", p,
+        ], 120),
+        ("checkov", [
+            "checkov", "-d", p, "--quiet", "--compact",
+            "-o", "json", "--skip-download",
+        ], 300),
+    ):
+        n, note = _oss_tool_check(tname, targs, timeout=timeout)
+        if n is None:
+            tools[tname] = {"count": None, "note": note}
+        else:
+            tools[tname] = {"count": n}
+    backends_present = {
+        t: shutil.which(t) is not None
+        for t in ("semgrep", "trivy", "grype", "osv-scanner", "checkov")
+    }
+    naive_sum = sum(
+        v["count"] for v in tools.values()
+        if isinstance(v.get("count"), int)
+    )
+    return {
+        "applicable": True,
+        "tools": tools,
+        "backends_present": backends_present,
+        "naive_sum": naive_sum,
+        "note": (
+            "naive_sum over-counts duplicates across tools; treat as an "
+            "upper bound on signature-detectable findings, not a precision "
+            "comparison."
+        ),
+    }
+
+
 def collect_stats(run_dir: Path) -> dict[str, Any]:
     """Best-effort pull of cost/iterations from events.jsonl."""
     runs_root = run_dir / "strix_runs"
@@ -571,6 +713,17 @@ def main() -> int:
         help=(
             "skip strix, re-score the existing strix_runs/ output under the given dir. "
             "Useful after a parser fix, or to regenerate baselines without paying the LLM cost."
+        ),
+    )
+    parser.add_argument(
+        "--skip-oss-floor",
+        action="store_true",
+        help=(
+            "Skip the OSS-tool floor scan (semgrep / trivy / grype / "
+            "osv-scanner / checkov). The floor is the bar strix has to "
+            "beat — leaving it out hides whether the LLM layer is "
+            "adding value. Only set this when you genuinely don't have "
+            "the OSS binaries available and want a strix-only number."
         ),
     )
     args = parser.parse_args()
@@ -640,12 +793,28 @@ def main() -> int:
 
     result_score = score(expected, findings)
 
+    # Compute the OSS-tool finding floor — the bar strix has to beat.
+    # Skipped when --skip-oss-floor is set or when the target_type
+    # doesn't have a meaningful source path to scan.
+    target_type_resolved = primary_type or manifest.get("target_type")
+    if args.skip_oss_floor:
+        oss_floor = {"applicable": False, "reason": "--skip-oss-floor set"}
+    else:
+        try:
+            oss_floor = compute_oss_floor(fixture_dir, target_type_resolved)
+        except Exception as e:  # noqa: BLE001
+            # Never let the floor scan break the benchmark run.
+            oss_floor = {
+                "applicable": False,
+                "reason": f"compute_oss_floor raised {type(e).__name__}: {e}",
+            }
+
     result = {
         "fixture": str(fixture_dir.relative_to(Path.cwd()))
         if str(fixture_dir).startswith(str(Path.cwd()))
         else str(fixture_dir),
         "target": primary_target,
-        "target_type": primary_type or manifest.get("target_type"),
+        "target_type": target_type_resolved,
         "additional_targets": additional_targets,
         "scan_mode": args.scan_mode,
         "model": os.environ.get("STRIX_LLM"),
@@ -654,17 +823,29 @@ def main() -> int:
         **stats,
         **{k: v for k, v in asdict(result_score).items() if k != "matches"},
         "matches": result_score.matches,
+        "oss_floor": oss_floor,
     }
 
     out = json.dumps(result, indent=2)
     if args.output:
         Path(args.output).write_text(out + "\n")
         print(f"[runner] wrote {args.output}")
-        # Still print a one-line summary to stdout.
+        # Still print a one-line summary to stdout. Includes the OSS
+        # floor delta so the operator immediately sees whether the LLM
+        # layer beat the $0 signature pipeline.
+        floor_summary = ""
+        if oss_floor.get("applicable"):
+            ns = oss_floor.get("naive_sum")
+            backends = oss_floor.get("backends_present") or {}
+            missing = [t for t, present in backends.items() if not present]
+            floor_summary = f" oss_naive_sum={ns}"
+            if missing:
+                floor_summary += f" missing_backends={','.join(missing)}"
         print(
             f"recall={result_score.recall} precision={result_score.precision} "
             f"matched={result_score.matched_count}/{result_score.expected_count} "
             f"duration={result['duration_seconds']}s cost={result.get('cost_usd')}"
+            f"{floor_summary}"
         )
     else:
         print(out)

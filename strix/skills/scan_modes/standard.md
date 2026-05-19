@@ -22,6 +22,59 @@ Balanced security assessment with structured methodology. Thorough coverage with
 
 Systematic testing across the full attack surface. Understand the application before exploiting it.
 
+## Phase 0: OSS signature anchor — **REQUIRED before any other phase**
+
+The OSS signature corpus is your primary detection layer. The LLM's job
+is to **rank, dedupe, chain, and validate** what the signature engines
+emit — not to be a scanner itself. Anchor the run on the target-type-
+appropriate deterministic-specialist wrappers BEFORE any custom
+reasoning. Use the registered tools (`scan_sast`, `scan_sca_lockfiles`,
+`scan_nuclei_templates`, `scan_iac`, `scan_container_image`) rather
+than shelling out to raw binaries — the wrappers attach EPSS / KEV /
+discovery_method / contextual_priority blocks and emit Dependency /
+Finding nodes into the knowledge graph that downstream chain-building
+depends on.
+
+- **API targets (REST / GraphQL / gRPC):**
+  1. `fingerprint_tech_stack` (3-5 sec, picks the right nuclei tags).
+  2. `scan_nuclei_templates(tags=['cve'], severity=['high', 'critical'])` —
+     canonical signature-match for known-CVE coverage.
+  3. `openapi_spec_ingest` if a spec exists; otherwise crawl-driven
+     endpoint inventory.
+  4. THEN OWASP-API-Top-10 deterministic specialists: `jwt_audit` →
+     `scan_api_bola` → `scan_api_mass_assignment` → `scan_api_bfla` →
+     `scan_api_rate_limit`. Also `scan_nuclei_templates(tags=['xss',
+     'sqli', 'ssrf'])` AFTER fingerprint_tech_stack — signature-match
+     for those classes complements the deterministic specialists.
+
+- **Repository / local_code targets:**
+  1. `scan_sca_lockfiles` FIRST — dependency CVEs are the highest-EPSS
+     finding class. KEV / EPSS≥0.5 always override `priority_tier`.
+     Emits Dependency nodes that R10 (chain_first_link_upgrade) and
+     attack_paths.jsonl construction depend on.
+  2. `scan_sast` (semgrep-driven, registry rules + vibe-coded pack).
+  3. `scan_iac` when any IaC files exist (Terraform, Vercel,
+     Netlify, Docker). IaC misconfigs (CORS-credentials, open
+     redirects) become DAST hypotheses for the deployed URL.
+  4. `secrets_scan` (gitleaks + trufflehog).
+
+- **Web-application targets (HTML-rendering):**
+  API-target anchor sequence above PLUS `scan_xss` and `cors_deep_check`.
+  If repo is co-located (vibe-coded SaaS), also run the repository
+  anchor triple (`scan_sca_lockfiles` + `scan_sast` + `scan_iac`).
+
+- **Container-image targets:**
+  1. `scan_container_image` (trivy-driven).
+  2. `sbom_extract`.
+
+- **IP-address / domain targets:**
+  No signature corpus to anchor on; fall through to Phase 1.
+
+These anchor calls are **not optional in standard mode** — they're the
+floor strix's recall is measured against. Skipping them means leaving
+known-CVE coverage that bare OSS pipelines (nuclei, semgrep, trivy,
+grype, osv-scanner, checkov) would catch in seconds.
+
 ## Phase 1: Reconnaissance
 
 **Whitebox (source available)**
