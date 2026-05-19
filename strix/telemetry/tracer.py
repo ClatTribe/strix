@@ -1089,6 +1089,46 @@ class Tracer:
                 "last_updated": None,
                 "reason": "cache_unavailable",
             }
+
+        # MA-S2 P0-CVS-D — discovery_method block for novel-vuln
+        # attestation. CVS-0.3 requires demonstrating that novel,
+        # zero-day-class vulnerabilities (no CVE matched) are
+        # discoverable through the AI specialist pipeline. The
+        # block surfaces:
+        #   - primary: which discovery path emitted the finding
+        #     (ai_specialist / deterministic_specialist /
+        #     cve_pattern_match / sast_rule / sca_lookup /
+        #     nuclei_template). Falls back to "ai_specialist" when
+        #     the emit path doesn't set discovery_method (the
+        #     LLM-driven create_vulnerability_report tool path).
+        #   - specialist_category: derived from discovery_source_tool
+        #     or category (e.g. "sqli").
+        #   - is_novel: True when primary=ai_specialist AND no CVE
+        #     was matched. This is the literal MA-S2 attestation
+        #     for CVS-0.3 — one bit per finding.
+        try:
+            _primary = (discovery_method or "ai_specialist").strip().lower()
+            _src_tool = (discovery_source_tool or "").strip() or None
+            _cat = (
+                _src_tool[len("scan_"):] if _src_tool and _src_tool.startswith("scan_")
+                else (category.strip().lower() if category else None)
+            )
+            _is_novel = (_primary == "ai_specialist" and not cve)
+            report["discovery_method"] = {
+                "primary": _primary,
+                "specialist_category": _cat,
+                "source_tool": _src_tool,
+                "is_novel": bool(_is_novel),
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.debug("discovery_method block build failed: %s", e)
+            report["discovery_method"] = {
+                "primary": "unknown",
+                "specialist_category": None,
+                "source_tool": None,
+                "is_novel": False,
+            }
+
         if code_locations:
             report["code_locations"] = code_locations
 
