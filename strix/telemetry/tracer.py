@@ -3255,6 +3255,31 @@ class Tracer:
                         exc_info=True,
                     )
 
+                # MA-S2 P0-APM-B — apply contextual triage rules
+                # (R9 + R10) AFTER attack_paths.jsonl has been
+                # written. R9 downgrades unreachable HIGH/CRITICAL
+                # findings to p4_suppressible; R10 upgrades chain-
+                # first-link findings to p0_emergency when the
+                # chain has critical severity. Also backfills
+                # attack_path_membership + max_chained_severity
+                # from the loaded paths (couldn't be done at
+                # emit time — paths weren't built yet).
+                try:
+                    from strix.llm.contextual_triage_rules import (
+                        apply_contextual_triage_rules,
+                        load_attack_paths,
+                    )
+                    paths = load_attack_paths(run_dir)
+                    apply_contextual_triage_rules(
+                        findings=self.vulnerability_reports,
+                        attack_paths=paths,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to apply contextual triage rules",
+                        exc_info=True,
+                    )
+
             # engine-wishlist §4 — emit `assets.discovered.jsonl`
             # alongside `run_meta.json`. Modules that discover
             # assets during a scan (cloud_attack_paths discovery,
