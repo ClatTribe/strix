@@ -119,13 +119,21 @@ This is where strix's L2/L3 reasoning gives the strongest delta vs OSS-only — 
 
 ## Per-mode layer depth
 
-The same matrix above is invoked across all three modes; **modes differ in how deep into L2 and L3 the LLM goes**.
+The same matrix above is invoked across all three modes. **Layers L1, L1.5, and L1.7 are deterministic and cheap (~free per check — one API roundtrip per specialist, no LLM); they run fully in every mode.** Modes differ in **how deep into L2 and L3 the LLM goes** after the deterministic layers have emitted their findings.
 
 | Mode | L1 (signature) | L1.5 (specialists) | L1.7 (threat-intel) | L2 (LLM rank/dedupe) | L3 (dispatch + chains + PoC) |
 |---|---|---|---|---|---|
-| **quick** | ✅ Full anchor scans (Phase 0 — required) | ✅ Targeted only — JWT/BOLA/IDOR core set | ✅ Full enrichment (cheap) | ✅ Ranking, dedupe, R9/R10, FP demote, novel-vuln flag. ~5-10 LLM calls | ❌ **dispatch_cap=0** — no specialist team, no exploit synthesis. Quick is **OSS + L1.7 + light L2 triage** |
-| **standard** | ✅ Full anchor scans | ✅ Full specialist sweep | ✅ Full enrichment | ✅ Same as quick + per-finding exploitation reasoning. ~20-50 LLM calls | ✅ **dispatch_cap=8** — fresh-context loops on highest-EPSS surfaces. Attack-path chain construction. Light PoC synthesis. |
+| **quick** | ✅ Full anchor scans (Phase 0 — required) | ✅ **Full specialist sweep** — every L1.5 specialist in the lead's catalog for the target type. Deterministic specialists are negligible-cost; no reason to skip any. | ✅ Full enrichment | ✅ Light triage: dedupe, rank by `contextual_priority`, R9/R10, FP demote, novel-vuln flag. ~5-10 LLM calls TOTAL — no exploration, no chain-building, no PoC | ❌ **dispatch_cap=0** — no specialist team, no exploit synthesis. Quick = **L1 + L1.5 + L1.7 + light L2 triage only** |
+| **standard** | ✅ Full anchor scans | ✅ Full specialist sweep | ✅ Full enrichment | ✅ Same as quick + per-finding exploitation reasoning + chain hypothesis. ~20-50 LLM calls | ✅ **dispatch_cap=8** — fresh-context loops on highest-EPSS surfaces. Attack-path chain construction. Light PoC synthesis. |
 | **deep** | ✅ Wider severity gates (low/medium too — chain first-link candidates) | ✅ Full specialist sweep | ✅ Full enrichment + cross-asset correlation | ✅ Exhaustive reasoning. ~50-200 LLM calls | ✅ **dispatch_cap=None** (unbounded) — full chain enumeration + working PoC for every finding + MOAK Researcher zero-day candidates |
+
+### Why quick mode keeps the full L1.5 set
+
+The earlier "quick mode is light triage" framing led to a wrong assumption that L1.5 specialists should be subset to a "core" list (JWT, BOLA, IDOR). That's incorrect: each L1.5 specialist is a single bounded API roundtrip (`jwt_audit` = 1 token-decode call; `scan_api_bola` = a handful of cross-session HTTP requests; `cors_deep_check` = 3-5 preflights). None of them invoke the LLM. Running all of them costs cents, not dollars.
+
+The expensive part of strix-quick is **L2 — the LLM lead loop reasoning across findings**. That's where dispatch_cap=0 + iter_cap=12 do their cost-control work. Cutting L1.5 to save money would save nothing and miss findings that the deterministic layer would otherwise catch for free.
+
+**Rule**: in quick mode, the LLM lead should invoke every L1.5 specialist relevant to the target type (per the catalog in `strix/agents/lead_agent/tool_catalog.py`), then collapse to its ~5-10-call triage layer to rank/dedupe what landed.
 
 ---
 

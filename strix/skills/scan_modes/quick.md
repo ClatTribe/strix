@@ -72,37 +72,82 @@ don't silently move on.
 - **API targets (REST / GraphQL / gRPC):**
   1. `fingerprint_tech_stack` first (3-5 sec, picks the right nuclei tags).
   2. `scan_nuclei_templates(tags=['cve'], severity=['high', 'critical'])` —
-     this is the canonical signature-match path for known-CVE coverage. Skipping
-     it means you cannot detect ~9k known issues that OSS nuclei catches.
+     canonical signature-match path for known-CVE coverage.
+     ~9k templates ship in the sandbox image.
   3. `openapi_spec_ingest` if a spec exists, else `fingerprint_tech_stack`-driven
      endpoint inventory.
-  4. THEN run the OWASP-API-Top-10 deterministic specialists in priority order:
-     `jwt_audit` (token forgery / weak-secret) → `scan_api_bola` (BOLA / IDOR) →
-     `scan_api_mass_assignment` → `scan_api_bfla` → `scan_api_rate_limit`.
+  4. **Full L1.5 deterministic specialist sweep** — every relevant
+     specialist in the lead's API catalog
+     (`strix/agents/lead_agent/tool_catalog.py`). These are bounded,
+     deterministic, ~free per check (one API roundtrip each, no LLM
+     spend). There is no cost reason to subset them in quick mode.
+     - OWASP API Top 10: `scan_api_bola`, `scan_api_bfla`,
+       `scan_api_mass_assignment`, `scan_api_rate_limit`, `scan_idor`,
+       `scan_multi_role_auth`, `scan_oauth`, `scan_saml_xsw`.
+     - Injection class: `scan_sqli`, `scan_xxe`, `scan_blind_ssrf`,
+       `scan_deserialization`, `scan_blind_cmd_injection`, `scan_ssrf`,
+       `scan_ssti`, `scan_path_traversal`, `scan_nosql_injection`,
+       `scan_ldap_injection`, `scan_xpath_injection`,
+       `scan_cmd_injection`, `scan_oob_xxe`,
+       `scan_request_smuggling_active`, `scan_secrets_in_response`.
+     - Deterministic checks: `jwt_audit`, `tls_audit`,
+       `http_security_headers_audit`, `cors_deep_check`, `csrf_check`,
+       `open_redirect_check`, `sqli_check`, `authz_matrix_check`,
+       `websocket_audit`, `race_check`, `cookie_jwt_scoping_check`.
+     - GraphQL / gRPC: `graphql_introspection_deep`,
+       `scan_api_grpc_reflection`.
+     - Signal complements: `scan_response_anomaly`, `scan_timing_oracle`.
+  5. **Skip only `scan_business_logic`** — that one is LLM-driven and
+     belongs in standard/deep mode. Everything else is deterministic
+     and stays in quick.
 
-- **Repository / local_code targets:**
-  1. `scan_sca_lockfiles` FIRST — dependency CVEs are the highest-EPSS finding
-     class, and `attack_path_membership` chain construction depends on
-     Dependency-node emission. KEV / EPSS≥0.5 always override `priority_tier`.
-  2. `scan_sast` (Phase 7 — semgrep-driven, registry rules + vibe-coded pack) —
+- **Repository / local_code targets — full L1+L1.5+L1.7 sweep:**
+  1. `scan_sca_lockfiles` FIRST — dependency CVEs are the highest-EPSS
+     finding class. `attack_path_membership` chain construction depends
+     on Dependency-node emission. KEV / EPSS≥0.5 always override
+     `priority_tier`. Emits via trivy + grype + osv-scanner internally.
+  2. `scan_sast` (semgrep-driven, registry rules + vibe-coded pack) —
      diff-aware on PR context, fast.
   3. `scan_iac` if any IaC files exist (`vercel.json` / `netlify.toml` /
      `terraform/` / `Dockerfile` / `docker-compose.yml`). Cross-asset:
-     IaC misconfigs (CORS-credentials, open redirects) become DAST hypotheses
-     for the deployed URL.
-  4. `secrets_scan` (always cheap; gitleaks-driven).
+     IaC misconfigs (CORS-credentials, open redirects) become DAST
+     hypotheses for the deployed URL. Backed by checkov.
+  4. `secrets_scan` (gitleaks + trufflehog).
+  5. `build_code_map` + `taint_analysis` + `score_reachability` —
+     these are L1.5 reachability primitives, deterministic. Cheap.
+     Their output feeds R9 unreachable_high_downgrade in L2.
+  6. `lookup_known_cves` / `lookup_cve_by_id` for the fingerprinted
+     stack — pure threat-intel lookup, free.
 
-- **Web-application targets (HTML-rendering):**
-  Same API-target anchor sequence, PLUS `scan_xss` and `cors_deep_check` after
-  the nuclei pass. If the repo is co-located (vibe-coded SaaS), also run the
-  `scan_sca_lockfiles` + `scan_sast` + `scan_iac` triple from the repo path.
+- **Web-application targets (HTML-rendering) — full L1+L1.5+L1.7 sweep:**
+  Same API-target anchor sequence above PLUS the DOM-aware L1.5
+  specialists: `scan_xss`, `dom_xss_static_probe`,
+  `scan_cache_deception`, `scan_websocket_auth`,
+  `scan_prototype_pollution`. If the repo is co-located (vibe-coded
+  SaaS), also run the full repository sweep against the source path.
 
-- **Container-image targets:**
-  1. `scan_container_image` (trivy-driven, vuln + misconfig + secret scanners).
+- **Container-image targets — full L1+L1.5+L1.7 sweep:**
+  1. `scan_container_image` (trivy with vuln + misconfig + secret
+     scanners enabled). Emits Dependency nodes that arm MOAK feed-
+     trigger for future-CVE pipeline.
   2. `sbom_extract` for the dependency manifest.
+  3. `lookup_known_cves` / `lookup_cve_by_id` for any high-EPSS hits.
 
-- **IP-address / domain targets:**
-  No signature corpus to anchor on; fall through to Phase 1 (Rapid Orientation).
+- **Domain targets — full L1.5 recon sweep:**
+  No signature corpus for the asset root itself, but L1.5 attack-
+  surface mapping is deterministic and cheap: `subdomain_enum_tool`,
+  `domain_recon_pipeline`, `dns_hygiene_check`, `passive_dns_history`,
+  `reverse_ip`, `mail_recon`, `saas_leaks`, `well_known_harvest`,
+  `discover_cloud_assets`, `scan_subdomain_takeover_active`. Plus
+  threat-intel: `domain_rep`, `vt_reputation`, `hibp_breach`,
+  `greynoise_classify`. Discovered services drop into the
+  web_application / api anchor sequence above.
+
+- **IP-address targets:**
+  Lighter L1.5 set: nmap-based service discovery via
+  `terminal_execute`, `tls_audit`, `websocket_audit` on any discovered
+  TLS / WebSocket endpoints. Threat-intel: `vt_reputation`,
+  `greynoise_classify`.
 
 Skipping these anchors is the single largest recall regression in quick mode.
 The lead's tool catalog already exposes them (`strix/agents/lead_agent/tool_catalog.py`)
