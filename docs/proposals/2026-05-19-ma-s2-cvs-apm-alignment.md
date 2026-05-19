@@ -1,9 +1,37 @@
 # MA-S2 alignment — CVS + APM as defensible strengths
 
-**Status:** Proposal · 2026-05-19 · **Owner:** ClatTribe/strix
+**Status:** Proposal · 2026-05-19 · v2 amendment 2026-05-19
+**Owner:** ClatTribe/strix
 **Tracking:** masterroadmap §10–§11 · engine-wishlist (next refresh)
 **Related:** Palantir MA-S2 v1.0 (May 2026) — Mission Assurance Security Standard for Software
-**Paired:** webappsec/engine-wishlist.md (wrapper-side analysis)
+**Paired:** [`webappsec/ma-s2-proposal.md`](https://github.com/ClatTribe/webappsec/blob/main/ma-s2-proposal.md) — wrapper-side counterpart
+
+## v2 amendment — what changed
+
+The wrapper-side proposal landed at `webappsec/ma-s2-proposal.md`
+shortly after this doc was first written. Reviewing the two
+together surfaced three engine gaps the original doc didn't cover,
+plus two framing wins worth folding into the engine plan. This
+amendment:
+
+1. **Adds three new P1/P2 rows** to the proposed-changes section —
+   `dedup_key`, per-attempt `exploit.*` events, stable `artefact_id`
+   for evidence files. None block the MA-S2 P0 set; all
+   meaningfully improve auditor evidence + cross-scan correlation
+   on the wrapper side.
+2. **Adds a "Doctrine — signals preserved across the boundary"
+   subsection** ([§Doctrine](#doctrine--signals-preserved-across-the-strix--webappsec-boundary))
+   mirroring webappsec §4. Raw signals (`raw_cvss`, `raw_severity`,
+   `priority_tier`, `discovery_method.is_novel`) are immutable
+   across the integration; future engine PRs MUST NOT overwrite
+   them.
+3. **Replaces the coarse "Non-goals" section** with the granular
+   non-asks from webappsec §5 (5 specific items strix MUST NOT
+   absorb: tenant tagging, MTTR/SLA telemetry, cross-scan dedup,
+   feed-refresh cron, attestation bundling).
+
+The v1 plan (P0-CVS-A/B/C + P0-APM-A/B/C + P1-CVS-D + P1-APM-D)
+is unchanged. Sequencing + sizing are unchanged.
 
 ## Why this document exists
 
@@ -336,6 +364,123 @@ and writes the index to a known path that strix loads at scan start.
 **Effort:** M. **Impact:** APM-1.4 attestation + nudges specialist
 selection toward what adversaries actually use today.
 
+## Proposed strix changes — additions from wrapper review (v2 amendment)
+
+The three rows below were not in the original strix#338 draft but
+surfaced via [`webappsec/ma-s2-proposal.md`](https://github.com/ClatTribe/webappsec/blob/main/ma-s2-proposal.md)
+§3 ("Engine asks not covered by strix#338"). None block the MA-S2
+P0 attestation story — strix#338's P0 set is sufficient alone —
+but each meaningfully improves auditor evidence + cross-scan
+correlation on the wrapper side.
+
+### P1-AUX-A — `dedup_key` per finding
+
+The tracer today drives finding deduplication through an
+LLM-based `check_duplicate` call (`strix/llm/dedupe.py`). The
+wrapper has its own `cross_scan_dedup_ledger` and currently
+joins defensively by hashing. A strong upstream signal would
+let the wrapper trust the engine's verdict instead of
+re-deriving it.
+
+**Engine change:**
+- Add `dedup_key` to every finding emitted via
+  `add_vulnerability_report`. Stable hash of:
+  `(normalized_cwe, canonical_endpoint, canonical_sink)`.
+  Canonicalization rules:
+  - `canonical_endpoint` = post-FP-filter's `_request_signature`
+    helper output (already shipped in PR #336); strips numeric IDs
+    / UUIDs / hex hashes from path segments.
+  - `canonical_sink` = the most-specific structural identifier the
+    finding payload carries:
+    - For SAST: `<file>:<sink_function>` (drop line numbers).
+    - For SCA: `<package>@<vulnerable_version_range>`.
+    - For DAST: `<param_name>` (or `<request_signature>` when
+      param shape ambiguous).
+- The wrapper joins by `dedup_key` first; falls back to the
+  existing LLM dedupe path only when keys disagree across a
+  re-scan.
+
+**Recall-safety:** never affects what gets emitted — only how
+findings are correlated downstream. Two findings with the same
+`dedup_key` are still both emitted; the wrapper decides how to
+merge them.
+
+**Effort:** S. **Impact:** Wrapper-side cross-scan correlation
+becomes deterministic. LLM `check_duplicate` calls become a
+fallback rather than the primary path.
+
+### P1-AUX-B — Per-attempt `exploit.*` events
+
+strix#338's `simulation_run.json` exposes run-level counters
+(`chains_attempted`, `chains_confirmed`). The wrapper wants
+per-attempt granularity for the auditor evidence trail: "we
+tried these N payloads on this surface, this one worked, the
+rest failed because…"
+
+**Engine change:**
+- Add three new event types to `events.jsonl`:
+  ```json
+  {"event": "exploit.attempted",
+   "finding_id": "f-003", "technique": "T1190",
+   "target_endpoint": "/api/users/{id}",
+   "payload_or_command": "<truncated>",
+   "started_at": "...",
+   "request_artefact_id": "req-2026-05-19-001"}
+
+  {"event": "exploit.succeeded",
+   "finding_id": "f-003",
+   "response_artefact_id": "resp-2026-05-19-001",
+   "evidence": "<one-line evidence summary>"}
+
+  {"event": "exploit.failed",
+   "finding_id": "f-003",
+   "reason": "WAF blocked",
+   "response_artefact_id": "resp-2026-05-19-002"}
+  ```
+- Emitted by every probe-shaped tool (deterministic specialists +
+  the inner-LLM specialist's loop). The granular trail lets the
+  wrapper render a per-finding timeline AND lets auditors see
+  the negative space ("you probed these N things, here are the
+  N-1 you ruled out").
+
+**Recall-safety:** events are write-only; never change finding
+emission semantics. Each event references an `artefact_id`
+(see P2-AUX-C) so the wrapper can resolve to the captured
+request/response file.
+
+**Effort:** M. **Impact:** Richer attestation evidence than
+the run-level counters alone. Complementary to
+`simulation_run.json`, not a replacement.
+
+### P2-AUX-C — Stable `artefact_id` cross-reference for evidence files
+
+`attack_paths.jsonl` (P0-APM-A) references chain stages by
+`finding_id` — but the evidence files those stages depend on
+(screenshots, captured requests, captured responses, proof
+artifacts) are not referenced anywhere structurally. The
+wrapper has to glob the run dir to find them.
+
+**Engine change:**
+- Every evidence file the engine writes (`proof_artifact_path`
+  in findings, `request_artefact_id` / `response_artefact_id`
+  in exploit events, screenshots from browser probes) gets a
+  stable `artefact_id` of the shape
+  `<kind>-<run_id>-<sequence>` (e.g. `req-scan-2026-05-19-042-007`).
+- A new `<run_dir>/artefacts.jsonl` indexes
+  `{artefact_id, path_relative_to_run_dir, kind, mime_type,
+  size_bytes}` so the wrapper can resolve any structurally-
+  referenced ID to a known path in one lookup.
+- Existing fields that point at files (e.g. `findings[].proof_artifact_path`)
+  get an additional sibling `proof_artefact_id` for the
+  structural reference.
+
+**Recall-safety:** purely additive cross-reference; existing
+path fields stay.
+
+**Effort:** S (the IDs themselves) + M (back-fill across every
+evidence-emitting code path). Land in two PRs — IDs first,
+then per-emitter wiring.
+
 ## Prioritization
 
 **P0 — ship this quarter:** unblocks the MA-S2 attestation report.
@@ -353,10 +498,18 @@ selection toward what adversaries actually use today.
 
 7. **P1-CVS-D** — `novel_vuln` tag (S)
 8. **P1-APM-D** — Threat intel index (M)
+9. **P1-AUX-A** — `dedup_key` per finding (S) — v2 amendment
+10. **P1-AUX-B** — Per-attempt `exploit.*` events (M) — v2 amendment
+
+**P2 — opportunistic:**
+
+11. **P2-AUX-C** — Stable `artefact_id` cross-reference (S+M, two PRs) — v2 amendment
 
 **Sequence note:** P0-CVS-A is on the critical path for P0-CVS-B
 which feeds P0-APM-B. Land them in that order. P0-APM-A + P0-APM-C
-can ship in parallel.
+can ship in parallel. The v2 amendment items (P1-AUX-A/B + P2-AUX-C)
+are independent and can land any time without blocking the MA-S2
+attestation story.
 
 ## Interaction with the v2 cost-optimization arc
 
@@ -393,6 +546,58 @@ After all P0 lands, every scan produces (in `<run_dir>/`):
 Webappsec aggregates these across scans + time, layers SLA tracking
 on top, produces the customer-facing MA-S2 attestation bundle.
 
+## Doctrine — signals preserved across the strix ↔ webappsec boundary
+
+The proposed P0-CVS-B `contextual_priority` object rolls many
+signals into a single nested structure. Some of those signals
+are **the engine's authoritative output** — the wrapper layers
+its own decisions on top but must NEVER overwrite them. This
+section names the immutable signals + the storage shape they
+expect on the wrapper side.
+
+**Why this matters:** `contextual_priority` is the most-attractive
+target for future engine PRs that want to "improve" the
+recommendation by retroactively updating the raw inputs. That
+would silently corrupt the boundary contract. The wrapper's
+auditor view shows BOTH the engine's verdict and any wrapper-side
+override — both signals coexist; neither erases the other.
+
+| Field | Source of truth | Wrapper override pattern |
+|---|---|---|
+| `contextual_priority.raw_cvss` | Engine (CVSS calculator); set once at finding-emit time, never re-computed | Wrapper stores verbatim in `findings.raw_cvss`. NO override path. |
+| `contextual_priority.raw_severity` | Engine; derived from `raw_cvss` per CVSS v3 ranges | Wrapper stores verbatim in `findings.raw_severity`. NO override path. |
+| `contextual_priority.priority_tier` (engine's recommendation) | Engine; derived from EPSS + KEV + reachability + asset_context + attack-path membership | Wrapper stores verbatim in `findings.engine_priority_tier`. Wrapper's final decision (after SLA policy) lands in a **separate** `findings.wrapper_priority_tier` jsonb field. Auditor view shows both. |
+| `discovery_method.is_novel` (P1-CVS-D) | Engine; set ONLY when `discovery_method.primary == "ai_specialist"` AND no CVE matched | Wrapper surfaces as a UI chip + counts in attestation. NEVER derived from prose; NEVER inferred from category alone. |
+| `attack_paths.jsonl[]` (P0-APM-A) | Engine; the KG-derived chain enumeration is authoritative | Wrapper renders + compiles into attestation bundle. Doesn't synthesize paths from finding pairs. |
+| `simulation_run.json` (P0-APM-C) | Engine; per-run attestation counters | Wrapper aggregates across runs for trend dashboards. NEVER overwrites the per-run record. |
+
+**Engine-side commitments to preserve the doctrine:**
+
+- `add_vulnerability_report` MUST set `raw_cvss` + `raw_severity`
+  in `contextual_priority` exactly once at emit time. The FP filter
+  (PR #336) and CWE templates (PR #343) MUST NOT modify these.
+  R6 / R7 / R8 of the FP filter operate on `severity` (the
+  engine's *final* tier), not `raw_severity` (the immutable
+  CVSS-derived value).
+- The verification pipeline (PR #336) MUST NOT mutate finding
+  fields once emitted. It tracks stage + evidence in a separate
+  `verification.jsonl`; the finding's own `severity` /
+  `verification_status` is only updated through the existing
+  explicit code paths.
+- A unit test pinned in `tests/llm/test_fp_filter.py` enforces
+  that DOWNGRADE rules leave `raw_severity` unchanged (recall
+  canary). Adding new R-rules requires extending that canary.
+
+**Wrapper-side commitments to preserve the doctrine** (from
+`webappsec/ma-s2-proposal.md` §4):
+
+- Wrapper's AI urgency triage writes into `findings.urgency_triage`
+  jsonb — **never** over `contextual_priority.raw_*` or `.priority_tier`.
+- Customer-facing UI surfaces both `engine_priority_tier` and
+  `wrapper_priority_tier`. The auditor view labels them clearly.
+- The wrapper's RLHF feedback loop labels findings without
+  mutating them — the engine signal is the audit trail.
+
 ## Coordination with webappsec
 
 The matching webappsec-side proposal must commit to:
@@ -410,7 +615,7 @@ The matching webappsec-side proposal must commit to:
 5. **Recall + interim mitigation execution** — webappsec consumes
    `interim_mitigation_hint`s and routes to ARO actions.
 
-## Non-goals
+## Non-goals (control-domain level)
 
 - **Implementing INV inside strix.** SBOM at release, runtime
   reconciliation, supply chain visibility — these are inventory
@@ -425,6 +630,32 @@ The matching webappsec-side proposal must commit to:
   is a *recommendation* — webappsec is free to override based on
   customer SLA contracts.
 
+## Explicit non-asks (v2 amendment — granular guardrails)
+
+The control-domain-level non-goals above set the broad scope. The
+items below are the **granular wrapper-side guardrails** that
+must stay out of the engine even when an "improvement" seems
+within reach. Each one was flagged by `webappsec/ma-s2-proposal.md`
+§5 because past engine PRs have drifted toward absorbing
+tenant-shaped data.
+
+| | Item | Why wrapper-side |
+|---|---|---|
+| 🚫 | **EPSS / KEV / actor-TTP feed refresh** (the cron, not the lookup) | Public reference data with daily cadence, independent of any specific scan. The wrapper-side cron writes to a known path; the engine reads at scan start (P0-CVS-A, P1-APM-D). Engine code that hits external feed APIs directly is the anti-pattern. |
+| 🚫 | **Asset criticality / data sensitivity / blast-radius tagging** | Multi-tenant, customer-declared. Strix is single-tenant by design (per `CLAUDE.md` doctrine — tenant boundaries belong exclusively to the wrapper). The engine consumes via `target_metadata` plumbing (engine-wishlist §3); it must NOT have its own asset classification. |
+| 🚫 | **MTTR / SLA-compliance telemetry** | Org-level config + cross-scan, cross-time aggregation. Wrapper-shaped by every dimension. The engine emits per-run timings + per-finding `fix_time_estimate` (P0-CVS-C); the wrapper rolls them up. |
+| 🚫 | **Cross-scan / cross-time dedup** | The wrapper's existing `cross_scan_dedup_ledger` is the right place. The engine emits `dedup_key` per P1-AUX-A; the wrapper joins. Engine-side state across scans is the anti-pattern. |
+| 🚫 | **Attestation bundle compilation** | Tenant-scoped, signed, time-bounded auditor export. Wrapper-shaped (signing keys, tenant identity, retention). The engine emits per-run artifacts; the wrapper compiles + signs the deliverable. |
+| 🚫 | **Per-tenant feature flags / SLA contracts** | Customer-specific configuration. The engine's behaviour is driven by `scan_mode` + `target_metadata`; it must NOT look up tenant-specific flags directly. Anything tenant-shaped enters via `target_metadata`. |
+| 🚫 | **Auditor-portal authentication / authorization** | Identity + RBAC are wrapper-shaped end-to-end. The engine's events / artifacts are content; the wrapper decides who can see them. |
+
+**How to use this list:** when proposing a new engine change
+(any direction), if it touches a row above, propose it as a
+wrapper change instead OR add the rationale here for why this
+specific item is a structural exception. Drift into tenant-shaped
+state by silent feature-creep is the failure mode this list
+prevents.
+
 ## Validation plan
 
 - **Schema tests:** every new artifact has a JSONSchema in
@@ -435,6 +666,13 @@ The matching webappsec-side proposal must commit to:
   first-link-in-chain are correctly upgraded (and that
   must_find findings on reachable surfaces are never downgraded
   to "low" by R9).
+- **Boundary-doctrine canary (v2 amendment):** a unit test in
+  `tests/llm/test_fp_filter.py` (and a sibling in
+  `tests/tools/test_cwe_templates.py`) pins that DOWNGRADE /
+  template-fill paths leave `contextual_priority.raw_cvss` and
+  `.raw_severity` **byte-identical** to the value at emit time.
+  Adding any new rule that touches the priority object must
+  extend this canary.
 - **Benchmark sweep:** re-run the full per_target suite after
   each P0 lands; the `recall_must_find` floor remains ≥ 0.80
   per fixture.
@@ -442,6 +680,16 @@ The matching webappsec-side proposal must commit to:
   benchmark scan + walk it against the MA-S2 Appendix A2 procurement
   questions (page 20 of the standard). Every question maps to a
   named artifact field.
+- **dedup_key stability (v2 amendment):** unit test pins that
+  `dedup_key` is byte-stable across two re-emissions of the
+  same finding (same CWE + same canonical endpoint + same
+  canonical sink). The wrapper's cross-scan correlation depends
+  on this invariant.
+- **exploit.* event ordering (v2 amendment):** an integration
+  test pins that for every `exploit.succeeded` there is a
+  preceding `exploit.attempted` with the matching
+  `finding_id` + `request_artefact_id`. Required so the wrapper's
+  per-finding timeline can be rendered without holes.
 
 ## Appendix — MA-S2 procurement questions, strix coverage
 
