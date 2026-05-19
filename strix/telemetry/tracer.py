@@ -1069,6 +1069,26 @@ class Tracer:
             report["cwe"] = cwe.strip()
         if isinstance(rule_id, str) and rule_id.strip():
             report["rule_id"] = rule_id.strip()
+
+        # MA-S2 P0-CVS-A — EPSS enrichment on every emitted
+        # finding. The block is ALWAYS present (per the MA-S2
+        # attestation discipline that "we tried" must be
+        # explicit). When no CVE is attached / cache is stale /
+        # cache is unavailable, the `reason` field carries the
+        # explanation; the score is null. Best-effort: failures
+        # in the resolver fall through to a `cache_unavailable`
+        # block; the finding still lands.
+        try:
+            from strix.llm.epss_enrichment import resolve_epss_block
+            report["epss"] = resolve_epss_block(cve=cve)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("epss enrichment failed: %s", e)
+            report["epss"] = {
+                "score": None,
+                "percentile": None,
+                "last_updated": None,
+                "reason": "cache_unavailable",
+            }
         if code_locations:
             report["code_locations"] = code_locations
 
