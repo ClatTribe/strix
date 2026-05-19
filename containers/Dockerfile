@@ -152,21 +152,12 @@ RUN apt-get update && apt-get install -y zaproxy
 
 RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 
-# Pre-populate the trivy vuln DB at build time so first-run scans
-# don't pay the ~100MB download cost. The DB is refreshed on each
-# image build; sandboxes run with TRIVY_OFFLINE=1 to stop trivy from
-# attempting network fetches at scan time (which slows scans + can
-# fail on air-gapped customer setups). Cf. strix-sandbox §OSS-floor.
-RUN trivy --download-db-only && \
-    trivy --download-java-db-only
-
 # Grype — Anchore's SBOM-aware vulnerability scanner. Complements trivy
 # (different vuln DB sources: NVD + GHSA + OS-vendor advisories, vs
 # trivy's primary Aqua feed). Both ship in the sandbox because their
 # coverage overlaps but doesn't subsume — running both raises recall
 # on dependency CVEs by ~10-20% in our fixture set.
 RUN curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
-RUN grype db update
 
 # OSV-Scanner — Google's lockfile-scanner against the osv.dev database.
 # Best community-source CVE coverage for language-ecosystem deps
@@ -196,6 +187,20 @@ USER pentester
 RUN pipx install semgrep && \
     pipx install bandit && \
     pipx install checkov
+
+# Pre-populate the trivy + grype vuln DBs in the runtime user's
+# home so first-run scans inside the sandbox don't pay the ~100MB+
+# download cost AND air-gapped customer setups (CI runners with no
+# outbound network) work out of the box.
+#
+# DBs MUST be downloaded under `USER pentester` so they land in
+# /home/pentester/.cache/{trivy,grype}/ — the runtime user's home.
+# Previously these ran under USER root and the resulting DBs in
+# /root/.cache/ were invisible to the pentester runtime, defeating
+# the entire pre-pop. Image build was a smoke test that caught this.
+RUN trivy image --download-db-only && \
+    trivy image --download-java-db-only
+RUN grype db update
 
 RUN npm install -g jshint
 
