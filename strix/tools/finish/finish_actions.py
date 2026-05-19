@@ -420,6 +420,44 @@ def finish_scan(
     if open_hypotheses_error:
         return open_hypotheses_error
 
+    # V3-3 — templated quick-mode report. When the scan is in
+    # quick / initial mode and any of the four prose fields are
+    # blank, auto-fill from the deterministic renderer (zero LLM
+    # calls). Standard / deep modes are untouched. Kill switch:
+    # STRIX_QUICK_TEMPLATED_REPORT_DISABLED=1.
+    template_applied = False
+    template_fields_filled: list[str] = []
+    try:
+        from strix.tools.finish.quick_report_renderer import (
+            render_quick_report,
+            should_apply_template,
+        )
+        if should_apply_template():
+            from strix.telemetry.tracer import get_global_tracer
+            tracer = get_global_tracer()
+            findings = list(tracer.vulnerability_reports) if tracer else []
+            scan_config = (
+                getattr(tracer, "scan_config", None) if tracer else None
+            )
+            templated = render_quick_report(findings, scan_config)
+            if not executive_summary or not executive_summary.strip():
+                executive_summary = templated["executive_summary"]
+                template_fields_filled.append("executive_summary")
+            if not methodology or not methodology.strip():
+                methodology = templated["methodology"]
+                template_fields_filled.append("methodology")
+            if not technical_analysis or not technical_analysis.strip():
+                technical_analysis = templated["technical_analysis"]
+                template_fields_filled.append("technical_analysis")
+            if not recommendations or not recommendations.strip():
+                recommendations = templated["recommendations"]
+                template_fields_filled.append("recommendations")
+            template_applied = bool(template_fields_filled)
+    except Exception:  # noqa: BLE001
+        # Renderer failure is best-effort — fall through to the
+        # normal validation path. Never block finish_scan.
+        pass
+
     validation_errors = []
 
     if not executive_summary or not executive_summary.strip():
@@ -453,6 +491,9 @@ def finish_scan(
                 "message": "Scan completed successfully",
                 "vulnerabilities_found": vulnerability_count,
             }
+            if template_applied:
+                response["templated_report_applied"] = True
+                response["templated_fields"] = sorted(template_fields_filled)
             _annotate_success_response(response)
             return response
 
