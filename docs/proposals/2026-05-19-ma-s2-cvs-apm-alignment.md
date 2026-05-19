@@ -483,33 +483,58 @@ then per-emitter wiring.
 
 ## Prioritization
 
-**P0 — ship this quarter:** unblocks the MA-S2 attestation report.
+### Customer-applicability reorder (v3 — 2026-05-19)
 
-1. **P0-CVS-A** — EPSS enrichment (S) ← prereq for everything else
-2. **P0-CVS-B** — `contextual_priority` object (M) ← biggest single change
-3. **P0-APM-A** — `attack_paths.jsonl` artifact (M) ← feeds APM-1.3
-4. **P0-APM-B** — Contextual triage rules (R9 / R10) (M) ← the
-   downstream payoff of A + B above
-5. **P0-APM-C** — `simulation_run.json` (S) ← cheap, big attestation win
-6. **P0-CVS-C** — `interim_mitigation_hint` (M) ← per-specialist
-   incremental
+Mapping MA-S2 Appendix A2 questions to our actual customer base
+(SaaS shops, mid-market web/API security, vibe-coded apps, modern
+cloud-native deployments — **not** classified-government / DIB)
+sharpens the priority list:
 
-**P1 — ship next quarter:**
+| Q | Topic | Applicability | Why |
+|---|---|---|---|
+| Q0 | AI-novel discovery | 🟢 Universal | Differentiator for every customer |
+| Q1 | EPSS + KEV in prio | 🟢 Universal | Modern minimum for vuln-backlog triage |
+| Q2 | Real-time inventory | 🟡 Scale-dependent | Multi-env customers care; single-prod-env doesn't |
+| Q3 | Multi-stage attack-path sim | 🟢 Universal | The differentiator we lead with |
+| Q4 | Patch deployment orchestration | 🟡 Scale-dependent | One-prod-env shops have CI/CD already |
+| Q5 | MTTR + responsible person | 🟢 Universal (with reframing) | "Team owns it + MTTR" for SaaS shops |
+| Q6 | Air-gap | 🔴 **Not our customer** | Classified / DIB territory only |
 
-7. **P1-CVS-D** — `novel_vuln` tag (S)
-8. **P1-APM-D** — Threat intel index (M)
+**4 of 7 questions are universal** (Q0, Q1, Q3, Q5); **2 are
+scale-dependent** (Q2, Q4); **1 is explicitly out of scope** (Q6).
+This reshapes the implementation sequence.
+
+### Revised P0 — ship this quarter (answers all universal Qs)
+
+1. **P0-CVS-A** — EPSS enrichment (S) → **Q1** ← ✅ shipped ([#352](https://github.com/ClatTribe/strix/pull/352))
+2. **P0-CVS-B** — `contextual_priority` object (M) → **Q1 + Q3** ← biggest single change; reads P0-CVS-A
+3. **P0-APM-A** — `attack_paths.jsonl` artifact (M) → **Q3** ← feeds APM-1.3
+4. **P0-APM-C** — `simulation_run.json` (S) → **Q0 + Q3** ← cheap, big attestation win; parallel with #3
+5. **P0-CVS-D** — `novel_vuln` tag (S) → **Q0** ← **promoted from P1**: Q0 is universal + this is the literal attestation for it (one bit per finding)
+6. **P0-APM-B** — Contextual triage rules R9 / R10 (M) → **Q3** ← downstream of #2 + #3
+
+### P1 — ship next quarter (scale-dependent or auxiliary)
+
+7. **P1-CVS-C** — `interim_mitigation_hint` (M) → **Q4** ← **demoted from P0**: Q4 is scale-dependent. Ship when multi-env customers ask.
+8. **P1-APM-D** — Threat intel index (M) → **Q3 nuance** ← actor-TTP feed; nice-to-have
 9. **P1-AUX-A** — `dedup_key` per finding (S) — v2 amendment
 10. **P1-AUX-B** — Per-attempt `exploit.*` events (M) — v2 amendment
 
-**P2 — opportunistic:**
+### P2 — opportunistic
 
 11. **P2-AUX-C** — Stable `artefact_id` cross-reference (S+M, two PRs) — v2 amendment
 
-**Sequence note:** P0-CVS-A is on the critical path for P0-CVS-B
-which feeds P0-APM-B. Land them in that order. P0-APM-A + P0-APM-C
-can ship in parallel. The v2 amendment items (P1-AUX-A/B + P2-AUX-C)
-are independent and can land any time without blocking the MA-S2
-attestation story.
+### Explicitly out-of-scope for our customer base
+
+- **Q6 air-gap** — strix has no Q6-specific work today (correct). Webappsec's INV-2.5 + ARO-3.3 air-gap variants stay deferred indefinitely. When we have a federal-adjacent customer who needs it, we can add air-gap as a contained capability — but pursuing it now is a distraction from the universal Qs.
+
+### Sequence note
+
+P0-CVS-A → P0-CVS-B → P0-APM-B is the critical path (each reads
+the prior). P0-APM-A + P0-APM-C + P0-CVS-D ship in parallel —
+no cross-dependency. **After this revised P0 lands, strix answers
+4 of 4 universal MA-S2 procurement questions strongly**; webappsec
+carries the wrapper side of Q2 + Q4.
 
 ## Interaction with the v2 cost-optimization arc
 
