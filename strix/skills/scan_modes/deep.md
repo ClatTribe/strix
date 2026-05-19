@@ -19,6 +19,53 @@ Exhaustive security assessment. Maximum coverage, maximum depth. Finding what ot
 
 Thorough understanding before exploitation. Test every parameter, every endpoint, every edge case. Chain findings for maximum impact.
 
+## Phase 0: OSS signature anchor — **REQUIRED before any other phase**
+
+Same anchor pattern as quick + standard modes, but with **wider rule
+packs and looser severity gates** to maximize candidate-finding volume
+for the LLM's chain-building + ranking work in later phases. The OSS
+corpus is the floor strix's recall is measured against — never skip it.
+
+- **API targets:**
+  1. `fingerprint_tech_stack`
+  2. `scan_nuclei_templates(tags=['cve'], severity=['low', 'medium',
+     'high', 'critical'])` — deep mode widens the severity gate to
+     catch low/medium CVEs that quick/standard skip; they often
+     become first-link findings in a chain that has a critical max.
+  3. `openapi_spec_ingest` + the full OWASP-API-Top-10 deterministic
+     specialist sweep (`jwt_audit` → `scan_api_bola` → `scan_api_
+     mass_assignment` → `scan_api_bfla` → `scan_api_rate_limit` →
+     `graphql_introspection_deep` → `scan_api_grpc_reflection`).
+  4. Wider nuclei passes for each CWE class:
+     `scan_nuclei_templates(tags=['xss', 'cwe-79'], severity=['medium',
+     'high', 'critical'])`, same for sqli / ssrf / rce / xxe.
+
+- **Repository / local_code targets:**
+  1. `scan_sca_lockfiles` FIRST (KEV / EPSS / dependency CVE coverage).
+  2. `scan_sast` with the registry pack + the vibe-coded pack +
+     `--config p/security-audit` for the maximum rule surface.
+  3. `scan_iac` on every IaC file discovered, not just the obvious
+     `terraform/` directory.
+  4. `secrets_scan` (gitleaks + trufflehog, both invoked).
+
+- **Web-application targets:**
+  API anchor sequence + `scan_xss` + `cors_deep_check` + browser-driven
+  hunting in later phases. Co-located repo gets the full repository
+  anchor triple.
+
+- **Container-image targets:**
+  `scan_container_image` (trivy with vuln + misconfig + secret scanners
+  enabled — the full "give me everything" mode).
+
+- **IP-address / domain targets:**
+  Fall through to recon. No signature corpus directly applies; nmap +
+  subdomain enum are the equivalent breadth tools.
+
+After Phase 0 lands its findings into the report + KG, deep mode's
+`dispatch_specialist` budget is unbounded — spend it on chain-building
+and exploit-PoC synthesis on top of the signature-corpus floor, not
+on re-doing detection the OSS tools already covered.
+
 ## Phase 1: Exhaustive Reconnaissance
 
 **Whitebox (source available)**

@@ -18,6 +18,40 @@ Time-boxed assessment focused on high-impact vulnerabilities. Prioritize breadth
 - Reasoning effort is medium.
 - Wall-clock target: under 10 minutes per asset.
 
+## Detection model — what the LLM is *for* in quick mode
+
+Quick mode's primary detection layer is the **OSS signature corpus**
+(nuclei templates, semgrep registry, trivy vuln DB, grype DB,
+osv-scanner GHSA feed, checkov rule pack). All of these ship inside
+the strix-sandbox image with their signature databases pre-populated.
+
+Your job as the lead is **NOT to act as a scanner.** The OSS tools are
+already better at signature-matching than you are. Your job is the
+ranking/dedupe/triage layer on top:
+
+1. **Invoke** the deterministic-specialist wrappers (Phase 0 below)
+   that route to the OSS scanners with proper output structure and
+   KG emission.
+2. **Read** the findings they emit.
+3. **Dedupe** — when semgrep, nuclei, and trivy all flag the same
+   issue, collapse to one finding with `discovery_method` recording
+   each engine.
+4. **Rank** by `contextual_priority` (already populated by
+   `scan_*` wrappers via the MA-S2 P0 layer — KEV / EPSS≥0.7 →
+   p0_emergency; high+EPSS≥0.5 → p1_urgent; etc.).
+5. **Demote obvious false positives** — code that's clearly a test
+   fixture, a unit-test helper, a docstring example, an unreferenced
+   utility script.
+6. **Emit** the final report. Maybe 5-10 LLM reasoning calls total —
+   if you're doing more, you're doing exploratory detection that
+   belongs in standard mode.
+
+If your `scan_*` wrapper returns `status="partial"` because a backend
+isn't installed, **surface that explicitly in the report**. Don't
+silently move on — a missing backend is a recall regression that
+the operator needs to know about (e.g. "semgrep not on PATH;
+SAST-class findings will be incomplete").
+
 ## Approach
 
 Optimize for fast feedback on critical security issues. Skip exhaustive enumeration in favor of targeted testing on high-value attack surfaces.
