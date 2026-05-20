@@ -396,11 +396,97 @@ async def _run_one_tool(
         )
 
 
+def _katana_crawl(target_url: str, *, max_endpoints: int = 50,
+                  depth: int = 3, timeout_s: int = 60) -> list[dict[str, Any]]:
+    """Host-runnable web crawl via katana. Returns a list of endpoint
+    dicts in the same shape as openapi_spec_ingest emits.
+
+    Used by phase-2 when the target is a web_application + no
+    OpenAPI spec was discovered. Without this, vibe-app / juiceshop
+    style HTML targets have no per-endpoint surface for the scan_*
+    specialists to iterate.
+
+    Best-effort: any failure (katana not on PATH, target unreachable,
+    timeout, parse error) returns empty list. The phase-2 caller
+    treats empty as "no endpoint scanning to do."
+
+    Configuration:
+      * `-jc` + `-jsl` — JavaScript crawling + jsluice JS-AST parsing
+        to extract REST/API endpoints from bundled SPAs (Angular /
+        React / Vue). Without these, juiceshop returns ~6 static
+        asset URLs and nothing else.
+      * `-kf all` — known-file probing (robots.txt, sitemap.xml).
+        Catches deprecated-interface-style endpoints that the SPA
+        doesn't link from its main bundle.
+      * `-d 3` — crawl depth. Default 3 balances spec-rich SPAs
+        against runaway crawls.
+      * Common endpoint-discovery wordlist patterns excluded via
+        the binary-asset filter (don't probe .js / .css / image
+        files as endpoints).
+    """
+    import shutil as _shutil
+    import subprocess as _subprocess
+    if not _shutil.which("katana"):
+        return []
+    cmd = [
+        "katana", "-u", target_url,
+        "-d", str(depth),
+        "-silent", "-nc",
+        "-jc", "-jsl",          # JS crawl + jsluice AST parsing
+        "-kf", "all",           # known files (robots, sitemap)
+        "-rl", "50",            # 50 req/s rate-limit
+        "-c", "10",             # 10 concurrency
+        "-timeout", "10",
+        # Exclude binary assets from results — they're not endpoints.
+        "-ef", "css,js,png,jpg,jpeg,gif,svg,woff,woff2,ttf,ico,map",
+    ]
+    try:
+        r = _subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout_s,
+        )
+    except (_subprocess.TimeoutExpired, OSError):
+        return []
+    urls: list[str] = []
+    for line in (r.stdout or "").splitlines():
+        line = line.strip()
+        if line and line.startswith("http"):
+            urls.append(line)
+            if len(urls) >= max_endpoints:
+                break
+    # Deduplicate URL paths so we don't re-scan ?foo=1 vs ?foo=2.
+    seen_paths: set[str] = set()
+    endpoints: list[dict[str, Any]] = []
+    for u in urls:
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(u)
+            key = f"{p.scheme}://{p.netloc}{p.path}"
+        except Exception:  # noqa: BLE001
+            key = u
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
+        endpoints.append({
+            "url": u,
+            "path": (
+                u.split("//", 1)[-1].split("/", 1)[-1]
+                if "/" in u.split("//", 1)[-1]
+                else "/"
+            ),
+            "method": "GET",
+            "params": [],
+            "source": "katana_crawl",
+        })
+    return endpoints
+
+
 async def _run_dependent_api_tools(
     summary: PrepassSummary,
     *,
     agent_state: Any,
     timeout_s: int,
+    target_value: str = "",
+    target_type: str = "",
     max_endpoints_for_rate_limit: int = 20,
 ) -> None:
     """Phase 2 of the API/web-target prepass — runs scanners that
@@ -430,9 +516,31 @@ async def _run_dependent_api_tools(
         if r.tool_name == "openapi_spec_ingest" and r.status in ("ok", "partial"):
             openapi_result = r.raw_result
             break
-    if not isinstance(openapi_result, dict):
-        return
-    endpoints = openapi_result.get("endpoints")
+    endpoints: list[Any] | None = None
+    if isinstance(openapi_result, dict):
+        endpoints = openapi_result.get("endpoints")
+    # Fallback for web_application targets that have no OpenAPI spec:
+    # crawl the target with katana to emit an endpoint list. Without
+    # this, vibe-app / juiceshop / similar HTML-rendering apps have
+    # no per-endpoint surface for phase-2 to iterate. The lead's L2
+    # layer would also handle this via webapp_recon_pipeline, but
+    # that's sandbox_execution=True and unavailable here.
+    if (not endpoints) and target_type == "web_application" and target_value:
+        crawled = _katana_crawl(target_value, max_endpoints=30, depth=2)
+        if crawled:
+            endpoints = crawled
+            # Record a synthetic tool result so the breakdown shows
+            # the katana crawl happened.
+            summary.tools_run.append("katana_crawl")
+            summary.tools_succeeded.append("katana_crawl")
+            summary.tool_results.append(ToolResult(
+                tool_name="katana_crawl",
+                status="ok",
+                findings_count=len(crawled),
+                error_reason=None,
+                wall_time_s=0.0,
+                raw_result={"endpoints": crawled},
+            ))
     if not isinstance(endpoints, list) or not endpoints:
         return
 
@@ -564,6 +672,7 @@ async def run_oss_anchor_prepass(
     if target_type in ("api", "web_application"):
         await _run_dependent_api_tools(
             summary, agent_state=agent_state, timeout_s=timeout_s,
+            target_value=target_value, target_type=target_type,
         )
 
     summary.wall_time_s = _t.monotonic() - overall_start
