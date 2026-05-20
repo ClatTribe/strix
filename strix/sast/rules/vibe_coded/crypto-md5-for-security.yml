@@ -1,6 +1,17 @@
+# Split into per-language rules — 2026-05-21 — because the
+# original single-rule form with `languages: [javascript, typescript,
+# python]` carried Python patterns (`hashlib.md5(...).hexdigest()`,
+# `def $FN(...)`) alongside JS patterns (`crypto.createHash("md5")`,
+# `function $FN(...)`). semgrep tries to parse EVERY pattern against
+# EVERY declared language and the cross-syntax mix produced
+# `Pattern parse error in rule strix-crypto-md5-for-security:
+# Invalid pattern for JavaScript: def $FN(...):`. When a rule fails
+# to parse, semgrep silently drops the entire rule from the run —
+# so this rule never fired at all in practice.
+
 rules:
-  - id: strix-crypto-md5-for-security
-    languages: [javascript, typescript, python]
+  - id: strix-crypto-md5-for-security-js
+    languages: [javascript, typescript]
     severity: WARNING
     message: >-
       MD5 used in a security context (password hashing, signature,
@@ -23,16 +34,32 @@ rules:
               function $FN(...) {
                 ...
               }
+      - pattern: |
+          $X.password = crypto.createHash("md5").update($PWD).digest("hex")
+
+  - id: strix-crypto-md5-for-security-python
+    languages: [python]
+    severity: WARNING
+    message: >-
+      MD5 used in a security context (password hashing, signature,
+      content integrity). MD5 is broken — collisions are trivially
+      generated. Switch to SHA-256 for integrity, bcrypt/argon2 for
+      passwords. MD5 for non-security uses (cache keys, dedup IDs)
+      is fine, but rename so the intent is clear.
+    metadata:
+      cwe: "CWE-327"
+      owasp: "A02:2021"
+      category: crypto
+      confidence: MEDIUM
+      vibe_pattern: true
+    pattern-either:
       - patterns:
           - pattern: |
               hashlib.md5($X).hexdigest()
           - pattern-inside: |
               def $FN(...):
                   ...
-      - patterns:
-          - pattern: |
-              hashlib.md5($X).digest()
       - pattern: |
-          $X.password = crypto.createHash("md5").update($PWD).digest("hex")
+          hashlib.md5($X).digest()
       - pattern: |
           $USER.password = hashlib.md5($PWD).hexdigest()

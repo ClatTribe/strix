@@ -1,6 +1,12 @@
+# Split into per-language rules — 2026-05-21 — because the original
+# multi-language form combined `function $FN($ARGS) { ... exec(...) }`
+# (JS) with `def $FN($ARGS): ... subprocess.run(..., shell=True)`
+# (Python). semgrep tried to parse the `def` pattern as JavaScript
+# and errored. Whole rule was silently dropped.
+
 rules:
-  - id: strix-llm-tool-call-shell
-    languages: [javascript, typescript, python]
+  - id: strix-llm-tool-call-shell-js
+    languages: [javascript, typescript]
     severity: ERROR
     message: >-
       LLM tool / function definition passes the model's output
@@ -29,6 +35,23 @@ rules:
             exec($ARGS.cmd, ...)
             ...
           }
+
+  - id: strix-llm-tool-call-shell-python
+    languages: [python]
+    severity: ERROR
+    message: >-
+      LLM tool / function definition passes the model's output
+      to a shell. The model can be coerced (via prompt injection)
+      to construct an arbitrary shell command; that becomes RCE.
+      Strip the tool from the tool set, OR validate the command
+      against an allowlist of whitelisted binaries before exec.
+    metadata:
+      cwe: "CWE-78"
+      owasp: "A03:2021"
+      category: cmd_injection
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
       - pattern: |
           def $FN($ARGS):
               ...
