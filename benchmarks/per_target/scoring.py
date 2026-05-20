@@ -103,6 +103,20 @@ def _categories_match(a: str | None, b: str | None) -> bool:
         "missing_authorization": "authz",
         "missing_auth": "authz",
         "open-redirect": "open_redirect",
+        # scan_api_rate_limit emits category="api_rate_limit"; vampi
+        # and crapi manifests use "rate_limit". Caught 2026-05-20 via
+        # the L1-only bench harness — without this alias, every per-
+        # endpoint rate-limit finding shows up as an FP.
+        "api_rate_limit": "rate_limit",
+        "rate-limit": "rate_limit",
+        # scan_api_bola / scan_api_bfla / scan_api_mass_assignment emit
+        # api_*-prefixed categories when they DO fire (currently they
+        # need owner_ids from L2 auth setup — out of L1 scope).
+        # Adding the aliases now so the L2 specialist emissions match
+        # the manifests when they do happen.
+        "api_bola": "bola",
+        "api_bfla": "bfla",
+        "api_mass_assignment": "mass_assignment",
         # JWT findings often emit category="auth" with CWE-287 even
         # when the manifest expects category="jwt" (CWE-347). Without
         # this alias, every JWT-handling finding shows up as an FP.
