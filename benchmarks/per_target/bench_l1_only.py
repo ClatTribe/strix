@@ -392,7 +392,19 @@ async def run_one_fixture(
             docker_down(fixture_dir, manifest)
 
 
-_DEFAULT_FIXTURES = [
+# Default fixture list. Two tiers:
+#   * _FAST_FIXTURES — original 6 used during iter-11..iter-15
+#     iteration. ~10 min total wall, one fixture per asset type.
+#   * _ALL_FIXTURES  — every fixture under fixtures/ that has an
+#     expected.yaml. Triggered via `--full`.
+#
+# Why two tiers (caught 2026-05-21): iter-15 surfaced that 5+
+# fixtures with expected.yaml had NEVER been measured because they
+# weren't in the default list (code/sast-vibe, code/iac-vibe,
+# code/sca-*, api/crapi). The selection bias meant new probes /
+# rules were tuned to the 6, not to the breadth. `--full` makes
+# "forgot to measure a fixture" structurally impossible.
+_FAST_FIXTURES = [
     "code/flask-vuln",
     "api/vampi",
     "web+code/vibe-app",
@@ -401,14 +413,45 @@ _DEFAULT_FIXTURES = [
     "container/nginx-vuln",
 ]
 
+# Heavy; ~30-45 min when all containers come up cleanly. Order is
+# asset-type-grouped so a partial run still gives you per-type signal.
+_ALL_FIXTURES = [
+    # code / repository targets — host execution, fastest
+    "code/flask-vuln",
+    "code/sast-vibe",
+    "code/iac-vibe",
+    "code/sca-vuln-deps",
+    "code/sca-reachability",
+    "code/sca-supply-chain",
+    # api targets
+    "api/vampi",
+    "api/crapi",
+    # web_application targets (some heavy)
+    "web+code/vibe-app",
+    "web/juiceshop",
+    "web/webgoat",
+    "web/apache-cve-2021-41773",
+    # ip_address
+    "ip/vulnerable-services",
+    # container_image
+    "container/nginx-vuln",
+]
+
+# Backwards-compatible name for any caller that referenced this
+# directly. Fast set is still the default for `python -m
+# benchmarks.per_target.bench_l1_only` with no flags.
+_DEFAULT_FIXTURES = _FAST_FIXTURES
+
 
 async def amain(args: argparse.Namespace) -> int:
     _ensure_tracer()
     fixtures_root = REPO_ROOT / "benchmarks" / "per_target" / "fixtures"
     if args.fixture:
         targets = [fixtures_root / args.fixture]
+    elif args.full:
+        targets = [fixtures_root / f for f in _ALL_FIXTURES]
     else:
-        targets = [fixtures_root / f for f in _DEFAULT_FIXTURES]
+        targets = [fixtures_root / f for f in _FAST_FIXTURES]
 
     results: list[dict[str, Any]] = []
     for fx in targets:
@@ -480,7 +523,16 @@ def main() -> int:
     parser.add_argument(
         "--fixture", default=None,
         help="single fixture relative path (e.g. 'code/flask-vuln'). "
-             "Default: runs all 5 representatives.",
+             "Default: runs the FAST tier (6 fixtures, ~10 min). Use "
+             "`--full` for every fixture with an expected.yaml.",
+    )
+    parser.add_argument(
+        "--full", action="store_true",
+        help="run the full fixture set instead of the fast tier. ~30-45 min "
+             "when all containers come up cleanly. Covers every fixture under "
+             "fixtures/ that has an expected.yaml — added 2026-05-21 after "
+             "iter-15 surfaced that the fast tier had been silently missing "
+             "5+ measurable fixtures (sast-vibe, iac-vibe, sca-*, crapi).",
     )
     parser.add_argument(
         "--output", default=None,
