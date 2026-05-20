@@ -96,15 +96,61 @@ Update cadence: every time a new architectural PR lands that changes detection-l
 
 ## L1-only measurements (2026-05-20)
 
-The OSS-first pre-pass (PRs #364–#369) gives a deterministic L1-only recall per fixture, no LLM cost. Use `benchmarks/per_target/bench_l1_only.py` to reproduce.
+The OSS-first pre-pass (PRs #364–#373) gives a deterministic L1-only recall per fixture, no LLM cost. Use `benchmarks/per_target/bench_l1_only.py` to reproduce.
 
-| Fixture | target_type | Competitor bar | **Strix L1** | matched | Notes |
+### Current state (post iter-10)
+
+| Fixture | target_type | Competitor bar | **Strix L1** | matched | At bar? |
 |---|---|---|---:|---|---|
-| code/flask-vuln | local_code | Semgrep p/python: 80-100% | **0.700** | 7/10 | At semgrep parity. Missing 3: `hardcoded-secret` (needs secrets_scan in real sandbox), `idor-users` (SAST can't), `path-traversal-files` (semgrep coverage gap on `os.path.join(BASE_DIR, request.args[...])`). |
-| api/vampi | api | Burp Pro: 50-70% / ZAP: 25-40% | **0.125** | 1/8 | Caught `rate-limit-login` via per-endpoint `scan_api_rate_limit` (PR #368). 7 missing must_finds need L2 prereqs (cross-session auth for BOLA/BFLA/MA, JWT extraction, parameter discovery for SQLi). |
-| web+code/vibe-app | web+code | Snyk + DAST: 50-70% | 0.000 | 0/5 | Phase-2 routing requires `openapi_spec_ingest` to emit endpoints, but web apps typically have no OpenAPI spec. Needs `webapp_recon_pipeline` (crawl-based endpoint emission) + same per-endpoint routing as vampi. Iter-7 work. |
-| ip/vulnerable-services | ip_address | nmap+nuclei+Tenable: 80-95% | 0.000 | 0/3 | Empty L1 anchor list for `ip_address`. Needs nmap → service discovery → per-service nuclei + tls_audit. Iter-6 work. |
-| web/juiceshop | web_application | Burp Pro Active: 30-50% / ZAP: 15-25% | 0.000 | 0/9 | Same as vibe-app — needs crawl-based endpoint discovery. Many must_finds are business-logic-only catchable by L2 reasoning. |
+| code/flask-vuln | local_code | Semgrep p/python: 80-100% | **0.900** | 9/10 | ✅ |
+| container/nginx-vuln | container_image | Trivy: 95-100% | **1.000** | 4/4 | ✅ |
+| api/vampi | api | Burp Pro: 50-70% / ZAP: 25-40% | 0.125 | 1/8 | ❌ |
+| web+code/vibe-app | web+code | Snyk + DAST: 50-70% | 0.000 | 0/5 | ❌ |
+| ip/vulnerable-services | ip_address | nmap+nuclei+Tenable: 80-95% | 0.000 | 0/3 | ❌ |
+| web/juiceshop | web_application | Burp Pro Active: 30-50% | 0.000 | 0/9 | ❌ |
+
+**2 of 6 fixtures meet the competitor bar.** Of the 4 user-focused asset types (api / repository / web_application / container_image), **2 are at bar (repository ✅, container_image ✅)**.
+
+### Iteration log (full)
+
+| PR | What | Asset type | Δ |
+|---|---|---|---:|
+| #364 | OSS-first prepass scaffolding | all | infrastructure |
+| #365 | host vs sandbox path routing | repository | flask-vuln 0.0→0.5 |
+| #366 | API anchor kwarg correctness v1 | api | (no measurable Δ) |
+| #367 | scan_sast ruleset expansion + CWE mapping | repository | flask-vuln 0.5→0.7 |
+| #368 | phase-2 per-endpoint scan_api_rate_limit | api | vampi 0.0→0.125 |
+| #369 | L1-only bench harness + scoring aliases | infra | (validates) |
+| #370 | iter log in benchmark.md | docs | — |
+| #371 | path-traversal taint + hardcoded-credential SAST rules | repository | flask-vuln 0.7→**0.9** ✅ |
+| #372 | host-runnable katana crawl fallback | web_application | (no Δ on SPA targets; infra for non-SPA) |
+| #373 | container_image fixture (nginx:1.18) + tracer-aware L1 harness + sca alias | container_image | nginx-vuln 0.0→**1.0** ✅ |
+
+### Why the 4 below-bar fixtures stay below bar
+
+**vampi (api, gap: 0.375-0.575)**
+- 7 must_finds need L2 prereqs the deterministic prepass can't synthesize:
+  - BOLA / BFLA / mass_assignment need `owner_ids` from cross-session auth setup
+  - jwt-none-alg / jwt-weak-secret need a JWT extracted from `/users/v1/login` response
+  - sqli-books needs param-aware injection (current scan_sqli on bare URL returns `partial`)
+  - openapi-spec-exposed needs `openapi_spec_ingest` to emit a finding when the spec was reachable without auth (it currently just ingests)
+- Iter-11 work: auth-flow specialist that registers/logs in + extracts JWT, then feeds tokens to `jwt_audit` and `endpoints` to `scan_api_bola/bfla/mass_assignment`.
+
+**juiceshop + vibe-app (web_application, gap: 0.30-0.70)**
+- katana fallback (PR #372) only catches static asset URLs on heavily client-side SPAs. Juiceshop's Angular bundle builds routes at runtime; without headless browser execution they're invisible to L1 crawl.
+- Iter-12 work: either add `katana -system-chrome` integration (requires Chrome on host) OR execute the standing proposal `2026-05-19-route-oss-wrappers-through-sandbox.md` to make `webapp_recon_pipeline` (playwright-backed) reachable from L1.
+
+**ip-vulnerable (ip_address, gap: 0.80-0.95)**
+- L1 has empty anchor list for ip_address. Needs host-runnable nmap wrapper → per-service nuclei probes against discovered ports.
+- Iter-13 work: thin Python wrapper around `nmap -sV --version-intensity 5` + `naabu`; then iterate nuclei against each `http://target:port/` URL.
+
+### Where L1 architecturally cannot reach
+
+`idor-users` on flask-vuln (1/10 remaining) is a runtime authorization concept. SAST literally cannot detect cross-session authz issues without sending requests as multiple users. The L2 `scan_idor` specialist covers this.
+
+The fundamental rule from the architecture (docs/detection-layering-by-asset-and-phase.md):
+- **L1 catches** signature-class issues (CWE-mapped patterns in source / known-CVE in deps / known-template-match in HTTP).
+- **L2 catches** business-logic + runtime-authz + chain-construction issues. L1 cannot.
 
 ### Iteration log
 
