@@ -79,6 +79,16 @@ _CWE_TO_CATEGORY: dict[str, str] = {
     "CWE-327": "crypto",
     "CWE-338": "crypto",
     "CWE-345": "ssrf",
+    # Canonical SSRF CWE; was missing — caused dynamic-urllib-use
+    # findings on flask-vuln to be categorized as "sast" instead of
+    # "ssrf". 2026-05-20.
+    "CWE-918": "ssrf",
+    # CWE-939 (Improper URL Handler Authz) is what semgrep's
+    # `python.lang.security.audit.dynamic-urllib-use-detected` rule
+    # reports — treat as ssrf for category-routing purposes since
+    # the rule fires on the exact urllib.urlopen(user_input) shape
+    # that's classic SSRF.
+    "CWE-939": "ssrf",
     "CWE-347": "jwt",
     "CWE-352": "csrf",
     "CWE-400": "misconfig",
@@ -185,14 +195,30 @@ def is_semgrep_available(*, run: Callable[..., Any] | None = None) -> bool:
 def _resolve_configs(configs: list[str | Path] | None) -> list[str]:
     """Resolve config arguments into Semgrep `--config` values.
 
-    Defaults: run our bundled vibe-coded rules + Semgrep's hosted
-    `p/owasp-top-ten` registry pack (the latter requires internet
-    + Semgrep's auth-by-default behaviour).
+    Defaults: bundled vibe-coded rules + `p/owasp-top-ten` (the
+    CWE-mapped injection-class rule pack) + `p/security-audit` (the
+    defence-in-depth pack that catches deserialization / SSRF /
+    open-redirect / pickle / dynamic-urllib patterns owasp-top-ten
+    misses).
+
+    Live measurement on 2026-05-20 (flask-vuln fixture):
+      * `p/owasp-top-ten` alone: 11 findings — caught sqli /
+        cmd_injection / xss / crypto must_finds (4/10 recall).
+      * `p/security-audit` alone: 6 findings — caught the OTHER
+        must_find categories: ssrf (`dynamic-urllib-use-detected`),
+        deserialization (`insecure-deserialization` + `avoid-pickle`),
+        open_redirect (`open-redirect`).
+      * Adding both should give ~all 10 must_find categories on a
+        single scan_sast invocation.
+
+    Registry packs require internet + Semgrep's auth-by-default
+    behaviour on first use; cached after that.
     """
     if configs is None:
         return [
             str(VIBE_CODED_RULES_DIR),
             "p/owasp-top-ten",
+            "p/security-audit",
         ]
     out: list[str] = []
     for c in configs:
