@@ -1,0 +1,60 @@
+target_type: container_image
+target: nginx:1.18
+description: |
+  nginx 1.18 base image (Debian buster) with known HIGH+CRITICAL CVEs
+  across curl / openssl / glibc / nginx-core. Used to baseline
+  container_image target coverage — pure trivy scan via
+  scan_container_image, no LLM cost.
+
+  Trivy reliably finds ~190 HIGH+CRITICAL CVEs on this image. The
+  must_finds below are 5 well-known representative CVEs across the
+  major package classes (curl / openssl / glibc / nginx / pcre).
+  Reproducible: `trivy image --severity HIGH,CRITICAL nginx:1.18`.
+
+expected_findings:
+  # curl — broadest CVE surface
+  - id: cve-2022-32221-curl
+    category: vulnerable_dependency
+    cwe: CWE-787
+    cve: CVE-2022-32221
+    severity: critical
+    must_find: true
+    description: curl POST-after-PUT data-confusion vulnerability.
+
+  - id: cve-2023-38545-curl
+    category: vulnerable_dependency
+    cwe: CWE-122
+    cve: CVE-2023-38545
+    severity: high
+    must_find: true
+    description: curl SOCKS5 heap buffer overflow.
+
+  # openssl
+  - id: cve-2022-0778-openssl
+    category: vulnerable_dependency
+    cwe: CWE-835
+    cve: CVE-2022-0778
+    severity: high
+    must_find: true
+    description: openssl infinite loop in BN_mod_sqrt() — DoS.
+
+  # glibc
+  - id: cve-2024-2961-glibc
+    category: vulnerable_dependency
+    cwe: CWE-787
+    cve: CVE-2024-2961
+    severity: high
+    must_find: true
+    description: glibc iconv buffer overflow in ISO-2022-CN-EXT.
+
+  # nginx core
+  - id: cve-2021-23017-nginx
+    category: vulnerable_dependency
+    cwe: CWE-193
+    cve: CVE-2021-23017
+    severity: critical
+    must_find: false
+    description: |
+      nginx DNS resolver off-by-one buffer overflow. Marked
+      `must_find: false` because trivy doesn't always pin nginx-core
+      CVEs depending on Debian backport state.

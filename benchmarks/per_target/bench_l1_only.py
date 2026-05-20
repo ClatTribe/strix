@@ -100,6 +100,32 @@ class _FakeAgentState:
     findings: list = []
 
 
+def _ensure_tracer() -> None:
+    """Set up a minimal global tracer so tools that emit via
+    `get_global_tracer()` (scan_container_image, scan_sast, etc.)
+    can actually persist findings.
+
+    Without this, scan_container_image silently no-ops on the L1
+    bench harness — trivy finds 400+ CVEs in nginx:1.18 but
+    `_emit_image_finding` returns None because tracer is None,
+    so 0 findings make it into the result dict.
+
+    The tracer writes events to a tempdir; not used by the bench
+    but required by the emission layer.
+    """
+    try:
+        from strix.telemetry import tracer as tracer_module
+        if getattr(tracer_module, "_global_tracer", None) is not None:
+            return
+        from strix.telemetry.tracer import Tracer, set_global_tracer
+        t = Tracer("l1-bench")
+        set_global_tracer(t)
+    except Exception:  # noqa: BLE001
+        # Don't crash the bench on tracer setup failure — some tools
+        # still emit findings without a tracer.
+        pass
+
+
 def parse_expected(fixture_dir: Path) -> tuple[dict[str, Any], list[Expected]]:
     yaml = _require_yaml()
     manifest = yaml.safe_load((fixture_dir / "expected.yaml").read_text())
@@ -314,10 +340,12 @@ _DEFAULT_FIXTURES = [
     "web+code/vibe-app",
     "ip/vulnerable-services",
     "web/juiceshop",
+    "container/nginx-vuln",
 ]
 
 
 async def amain(args: argparse.Namespace) -> int:
+    _ensure_tracer()
     fixtures_root = REPO_ROOT / "benchmarks" / "per_target" / "fixtures"
     if args.fixture:
         targets = [fixtures_root / args.fixture]

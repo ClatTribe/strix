@@ -109,6 +109,12 @@ def _categories_match(a: str | None, b: str | None) -> bool:
         # endpoint rate-limit finding shows up as an FP.
         "api_rate_limit": "rate_limit",
         "rate-limit": "rate_limit",
+        # scan_container_image emits category="sca" for each CVE
+        # found in a container image (one finding per vulnerable
+        # package). The container_image fixture manifests use
+        # `vulnerable_dependency` consistent with SCA-on-lockfile.
+        # Caught 2026-05-20 while adding the nginx:1.18 fixture.
+        "sca": "vulnerable_dependency",
         # scan_api_bola / scan_api_bfla / scan_api_mass_assignment emit
         # api_*-prefixed categories when they DO fire (currently they
         # need owner_ids from L2 auth setup — out of L1 scope).
