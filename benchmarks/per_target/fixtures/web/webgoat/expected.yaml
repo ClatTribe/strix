@@ -1,0 +1,113 @@
+target_type: web_application
+target: http://localhost:8082
+description: |
+  OWASP WebGoat 2023.8 — Java vulnerability-training app, served by
+  embedded Tomcat. Tougher web_application benchmark than juiceshop
+  because the *majority* of WebGoat's bugs are inside post-login
+  lessons (sequential lesson UI, lots of per-lesson auth state).
+
+  This fixture's must_finds are restricted to the L1-reachable
+  surface — unauth banner / header / framework disclosure, exposed
+  admin endpoints, the login form being detectable for default-
+  credential probing. The auth-walled lesson surface (SQLi-mitigation
+  lesson, JWT lesson, CSRF lesson) is L2 territory and is NOT in this
+  manifest's recall denominator.
+
+  Why this fixture exists: most production Java webapps DO have
+  auth-walled surfaces. WebGoat is the canonical structure for
+  measuring whether strix's L1 detects the pre-auth signals — Server
+  header, X-Powered-By, exposed actuator paths, login-form-no-rate-
+  limit — without going deeper than auth.
+
+  Pin: webgoat/webgoat:2023.8. Re-baseline on tag bump.
+
+docker:
+  compose_file: docker-compose.yml
+  wait_url: http://127.0.0.1:8082/WebGoat/login
+  wait_timeout_seconds: 120
+
+expected_findings:
+  # ---- pre-auth detectable signals (L1-reachable) ----
+
+  - id: tomcat-version-disclosure
+    category: info_disclosure
+    cwe: CWE-200
+    port: 8082
+    endpoint: /WebGoat/login
+    severity: low
+    must_find: true
+    description: |
+      The Server response header includes the embedded Tomcat
+      version. Disclosed by default in the WebGoat distribution
+      build. Mitigated via Tomcat's `Server` attribute on the
+      `Connector` element.
+      Catch path: probe_http_port → Server header version regex.
+
+  - id: x-powered-by-disclosure
+    category: info_disclosure
+    cwe: CWE-200
+    port: 8082
+    endpoint: /WebGoat/login
+    severity: low
+    must_find: false   # not always present; depends on build profile
+    description: |
+      X-Powered-By header may include Servlet / framework version.
+      Catch path: probe_http_port → X-Powered-By header.
+
+  - id: login-no-rate-limit
+    category: rate_limit
+    cwe: CWE-307
+    endpoint: /WebGoat/login
+    severity: medium
+    must_find: true
+    description: |
+      The login endpoint accepts unlimited unauthenticated POST
+      submissions (no 429 / Retry-After). Enables brute-force
+      against weak credentials.
+      Catch path: scan_api_rate_limit on /WebGoat/login.
+
+  # ---- advisory / build-dependent (must_find: false) ----
+
+  - id: spring-actuator-exposed
+    category: misconfig
+    cwe: CWE-200
+    endpoint: /actuator
+    severity: medium
+    must_find: false
+    description: |
+      Spring Actuator endpoints may be reachable unauthenticated
+      when WebGoat is built with the dev profile. Some builds
+      expose /actuator/env / /actuator/health publicly.
+      Catch path: probe_unauth_debug_paths includes /actuator and
+      /actuator/health.
+
+  - id: h2-console-exposed
+    category: misconfig
+    cwe: CWE-200
+    endpoint: /WebGoat/H2Console
+    severity: high
+    must_find: false
+    description: |
+      H2 in-memory DB console exposed without authentication on
+      some WebGoat profiles. RCE via JDBC URL CREATE ALIAS.
+      Catch path: probe_unauth_debug_paths static list (would
+      need /H2Console added; advisory for now).
+
+  - id: webgoat-default-credentials
+    category: misconfig
+    cwe: CWE-521
+    endpoint: /WebGoat/login
+    severity: high
+    must_find: false
+    description: |
+      WebGoat ships with a registration flow; some demos document
+      a known guest:guest credential. nuclei `default-login`
+      templates probe for this if a matching template exists for
+      this app.
+      Catch path: scan_nuclei_templates with default-login tag.
+
+  # ---- deep / post-auth — NOT in this fixture's recall ----
+  # The dozens of lesson-driven bugs (SQLi in lesson 5, XSS in
+  # lesson 7, JWT in lesson 13, CSRF in lesson 11) require auth
+  # state + lesson-progression. They're L2 territory and listed
+  # here only as documentation — not as expected_findings.
