@@ -211,6 +211,17 @@ def _resolve_configs(configs: list[str | Path] | None) -> list[str]:
       * Adding both should give ~all 10 must_find categories on a
         single scan_sast invocation.
 
+    Iter-15-late (2026-05-21) — added `p/javascript` after measuring
+    the `code/sast-vibe` fixture: handler.js `db.query(\`SELECT ...
+    ${req.params.id}\`)` SQLi via template literal AND
+    `Math.random().toString(36).slice(2)` insecure-random for token
+    were both missed by owasp-top-ten + security-audit. p/javascript
+    contains the matching rules
+    (`javascript.lang.security.detect-non-literal-fs-filename`,
+    `javascript.lang.security.audit.detect-math-random`,
+    template-literal sqli rules, etc.). +2 catches on sast-vibe;
+    expected uplift on any JS/Node target.
+
     Registry packs require internet + Semgrep's auth-by-default
     behaviour on first use; cached after that.
     """
@@ -219,6 +230,7 @@ def _resolve_configs(configs: list[str | Path] | None) -> list[str]:
             str(VIBE_CODED_RULES_DIR),
             "p/owasp-top-ten",
             "p/security-audit",
+            "p/javascript",
         ]
     out: list[str] = []
     for c in configs:
