@@ -1277,6 +1277,390 @@ async def _run_per_endpoint_sqli(
         n += 1
 
 
+# ---------------------------------------------------------------------------
+# Iter-13 — ip_address probes (network surface mapping)
+# ---------------------------------------------------------------------------
+#
+# ip_address targets have no signature corpus that takes a bare IP as
+# input — the existing scan_* specialists want a URL (http://x/...).
+# This bundle of host-runnable TCP probes closes the gap for the three
+# canonical L1 findings on a network target:
+#
+#   * unauthenticated service exposure (Redis, MongoDB, memcached…)
+#     — direct TCP send + parse the protocol's "are you authenticated"
+#     response. No third-party deps.
+#   * HTTP service discovery — connect_ex over the well-known web
+#     ports; for each open one, run HTTP-probe class probes (autoindex,
+#     server-version header).
+#   * Anonymous-friendly FTP — connect, USER anonymous, parse banner.
+#
+# Coverage targets: ip/vulnerable-services fixture's must_finds
+# (redis-no-auth, nginx-autoindex, nginx-version-disclosure). Without
+# this, ip_address recall is structurally 0.
+
+# Conservative port set — top-25 service ports that map to concrete
+# probes below. Adding more bloats the scan time without changing
+# what we can actually CHECK in code. nmap-style full /24 sweeps
+# are out of scope for L1; iter-13 is "stuff the per-target prepass
+# can actually act on."
+_IP_COMMON_PORTS: list[int] = [
+    21,    # FTP
+    22,    # SSH
+    25,    # SMTP
+    53,    # DNS
+    80,    # HTTP
+    110,   # POP3
+    143,   # IMAP
+    443,   # HTTPS
+    993,   # IMAPS
+    995,   # POP3S
+    1521,  # Oracle
+    3306,  # MySQL
+    3389,  # RDP
+    5432,  # Postgres
+    5984,  # CouchDB
+    6379,  # Redis
+    8000,  # HTTP alt
+    8080,  # HTTP alt
+    8443,  # HTTPS alt
+    8888,  # HTTP alt
+    9200,  # Elasticsearch
+    9300,  # Elasticsearch internal
+    11211, # memcached
+    27017, # MongoDB
+]
+_IP_HTTP_PORTS = {80, 443, 8000, 8080, 8443, 8888}
+
+
+def probe_open_tcp_ports(
+    target_ip: str, ports: list[int] | None = None, timeout: float = 1.0,
+) -> list[int]:
+    """Return the subset of `ports` that accept a TCP connection on
+    `target_ip` within `timeout`. Used to gate the per-service probes
+    so we don't waste time on closed ports."""
+    import socket
+    ports = ports or list(_IP_COMMON_PORTS)
+    open_ports: list[int] = []
+    for port in ports:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            if s.connect_ex((target_ip, port)) == 0:
+                open_ports.append(port)
+        except (OSError, socket.gaierror):
+            pass
+        finally:
+            try:
+                s.close()
+            except OSError:
+                pass
+    return open_ports
+
+
+def probe_redis_no_auth(
+    target_ip: str, port: int = 6379, timeout: float = 2.0,
+) -> list[dict[str, Any]]:
+    """Send `INFO\\r\\n` to Redis on `port`. A clean response means
+    auth is OFF. A NOAUTH error means auth is on (safe).
+
+    Catches `ip/vulnerable-services` redis-no-auth must_find.
+    """
+    import socket
+    try:
+        with socket.create_connection((target_ip, port), timeout=timeout) as s:
+            s.sendall(b"INFO\r\n")
+            data = s.recv(4096)
+    except (OSError, socket.timeout):
+        return []
+    if not data:
+        return []
+    text = data.decode("utf-8", errors="replace")
+    # `-NOAUTH Authentication required` → auth IS configured (safe)
+    if "NOAUTH" in text or "authentication required" in text.lower():
+        return []
+    # Real INFO response starts with `$<len>\r\n# Server\r\nredis_version:...`
+    # or `+OK` for some commands. Any `redis_version:` substring
+    # confirms we're talking to redis AND we got past auth.
+    if "redis_version:" not in text and not text.startswith("$"):
+        return []
+    return [{
+        "title": f"Redis on port {port} accepts INFO without authentication",
+        "category": "misconfig",
+        "cwe": "CWE-306",
+        "port": port,
+        "endpoint": f"redis://{target_ip}:{port}/",
+        "severity": "critical",
+        "description": (
+            f"The Redis instance on {target_ip}:{port} accepts the "
+            f"INFO command without authentication. An attacker can "
+            f"read configuration, dump keys, and (with FLUSHALL / "
+            f"CONFIG SET dir + SAVE) achieve RCE on most stock "
+            f"setups. Set `requirepass` in redis.conf, or restrict "
+            f"the port to localhost / authenticated peers."
+        ),
+        "verification_status": "verified",
+        "confidence": 0.95,
+    }]
+
+
+def probe_http_port(
+    target_ip: str, port: int, *, scheme: str = "http", timeout: float = 3.0,
+) -> list[dict[str, Any]]:
+    """Probe one HTTP port for:
+      * autoindex / directory-listing at common upload-paths
+      * Server: header version disclosure
+      * X-Powered-By disclosure
+
+    Returns one finding per detected issue. Each finding carries the
+    `port` field so the scorer can match against IP-target expecteds.
+    """
+    import urllib.request
+    import urllib.error
+    base = f"{scheme}://{target_ip}:{port}"
+    out: list[dict[str, Any]] = []
+
+    # ----- Server-header disclosure -----
+    try:
+        req = urllib.request.Request(base + "/", method="HEAD")
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        headers = dict(resp.headers)
+    except urllib.error.HTTPError as e:
+        try:
+            headers = dict(e.headers)
+        except AttributeError:
+            headers = {}
+    except (OSError, urllib.error.URLError):
+        return out
+    # Server header — flag when it includes a version digit.
+    import re
+    server_header = (
+        headers.get("Server") or headers.get("server") or ""
+    )
+    has_version = bool(re.search(r"\d+\.\d+", server_header))
+    if server_header and has_version:
+        out.append({
+            "title": f"Server header discloses version: {server_header}",
+            "category": "info_disclosure",
+            "cwe": "CWE-200",
+            "port": port,
+            "endpoint": base + "/",
+            "severity": "low",
+            "description": (
+                f"The HTTP response from {base}/ includes a Server "
+                f"header containing version information: "
+                f"`{server_header}`. An attacker can correlate the "
+                f"version with public CVEs. For nginx, set "
+                f"`server_tokens off;`. For Apache, "
+                f"`ServerTokens Prod`. For node/express, override "
+                f"the X-Powered-By + Server headers explicitly."
+            ),
+            "verification_status": "verified",
+            "confidence": 0.9,
+        })
+    # X-Powered-By disclosure
+    xpb = headers.get("X-Powered-By") or headers.get("x-powered-by") or ""
+    if xpb:
+        out.append({
+            "title": f"X-Powered-By header discloses framework: {xpb}",
+            "category": "info_disclosure",
+            "cwe": "CWE-200",
+            "port": port,
+            "endpoint": base + "/",
+            "severity": "low",
+            "description": (
+                f"The HTTP response from {base}/ includes an "
+                f"X-Powered-By header: `{xpb}`. Strip this header "
+                f"from the response — it gives attackers free "
+                f"reconnaissance with no functional benefit."
+            ),
+            "verification_status": "verified",
+            "confidence": 0.95,
+        })
+
+    # ----- Directory listing on common paths -----
+    autoindex_paths = [
+        "/uploads/", "/files/", "/backup/", "/downloads/",
+        "/static/", "/data/", "/ftp/", "/",
+    ]
+    for path in autoindex_paths:
+        try:
+            req = urllib.request.Request(base + path)
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            body = resp.read(8192)
+        except urllib.error.HTTPError:
+            continue
+        except (OSError, urllib.error.URLError):
+            continue
+        body_l = body.lower()
+        is_autoindex = (
+            b"index of /" in body_l
+            or b"<title>index of" in body_l
+            or (b"parent directory" in body_l and b"<a href=" in body_l)
+        )
+        if is_autoindex:
+            out.append({
+                "title": f"Directory listing exposed at {path} on port {port}",
+                "category": "misconfig",
+                "cwe": "CWE-548",
+                "port": port,
+                "endpoint": base + path,
+                "severity": "medium",
+                "description": (
+                    f"The path `{path}` on {base} returns a directory "
+                    f"listing. Attackers can enumerate uploaded files "
+                    f"and discover sensitive content. Disable autoindex "
+                    f"(nginx: `autoindex off;`, Apache: "
+                    f"`Options -Indexes`)."
+                ),
+                "verification_status": "verified",
+                "confidence": 0.95,
+            })
+            break  # one autoindex finding per port; don't double-flag
+    return out
+
+
+def probe_ftp_anonymous(
+    target_ip: str, port: int = 21, timeout: float = 3.0,
+) -> list[dict[str, Any]]:
+    """Connect to FTP on `port` and try anonymous login.
+
+    Returns a finding when USER anonymous + PASS anonymous yields a
+    230 response (login OK).
+    """
+    import socket
+    try:
+        with socket.create_connection((target_ip, port), timeout=timeout) as s:
+            banner = s.recv(2048)
+            if not banner.startswith(b"220"):
+                return []
+            s.sendall(b"USER anonymous\r\n")
+            user_resp = s.recv(2048)
+            # `331` = need password. Accept either 230 (no pw needed)
+            # or 331 (then we send password).
+            if user_resp.startswith(b"230"):
+                # Already logged in — anonymous accepted, no pw.
+                pass
+            elif user_resp.startswith(b"331"):
+                s.sendall(b"PASS anonymous@example.com\r\n")
+                pass_resp = s.recv(2048)
+                if not pass_resp.startswith(b"230"):
+                    return []
+            else:
+                return []
+    except (OSError, socket.timeout):
+        return []
+
+    return [{
+        "title": f"FTP anonymous login accepted on port {port}",
+        "category": "misconfig",
+        "cwe": "CWE-732",
+        "port": port,
+        "endpoint": f"ftp://{target_ip}:{port}/",
+        "severity": "medium",
+        "description": (
+            f"The FTP server on {target_ip}:{port} accepts the "
+            f"anonymous user with no real password. Attackers can "
+            f"download anything the FTP root user can read. Disable "
+            f"anonymous access in the FTP daemon config, or restrict "
+            f"the port to authenticated users only."
+        ),
+        "verification_status": "verified",
+        "confidence": 0.9,
+    }]
+
+
+async def _run_dependent_ip_tools(
+    summary: PrepassSummary,
+    *,
+    target_value: str,
+) -> None:
+    """Phase-2 dispatcher for ip_address targets.
+
+    Runs:
+      1. probe_open_tcp_ports — discovers open ports from the
+         _IP_COMMON_PORTS set
+      2. For each open port: targeted per-service probe
+         (Redis INFO, HTTP autoindex+banner, FTP anon)
+
+    Mutates `summary` in place. Never raises.
+    """
+    # Step 1: port discovery.
+    open_ports: list[int] = []
+    try:
+        open_ports = probe_open_tcp_ports(target_value)
+    except Exception:  # noqa: BLE001
+        pass
+    summary.tools_run.append("probe_open_tcp_ports")
+    summary.tools_succeeded.append("probe_open_tcp_ports")
+    summary.tool_results.append(ToolResult(
+        tool_name="probe_open_tcp_ports",
+        status="ok",
+        findings_count=0,  # not a finding-emitting probe
+        error_reason=(
+            f"open ports: {','.join(str(p) for p in open_ports)}"
+            if open_ports else "no open ports in common set"
+        ),
+        wall_time_s=0.0,
+        raw_result={"open_ports": open_ports, "findings": []},
+    ))
+    if not open_ports:
+        return
+
+    # Step 2: per-port probes. Each entry is (predicate, label, callable).
+    # Predicate decides whether the probe runs for a given port; the
+    # callable returns list[dict] findings.
+    _emissions: list[tuple[str, list[dict[str, Any]]]] = []
+
+    # 2a — Redis (port 6379 typical; also probe other ports if open
+    # and Redis returns a banner — rare; skip the cross-port heuristic
+    # to keep latency low).
+    if 6379 in open_ports:
+        try:
+            _emissions.append((
+                "probe_redis_no_auth",
+                probe_redis_no_auth(target_value, port=6379),
+            ))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 2b — HTTP ports. Try both http and https schemes.
+    for port in open_ports:
+        if port not in _IP_HTTP_PORTS:
+            continue
+        scheme = "https" if port in {443, 8443} else "http"
+        try:
+            _emissions.append((
+                f"probe_http_port[{port}]",
+                probe_http_port(target_value, port, scheme=scheme),
+            ))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 2c — FTP (port 21).
+    if 21 in open_ports:
+        try:
+            _emissions.append((
+                "probe_ftp_anonymous",
+                probe_ftp_anonymous(target_value, port=21),
+            ))
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Record emissions as tool results.
+    for probe_name, findings in _emissions:
+        summary.tools_run.append(probe_name)
+        summary.tools_succeeded.append(probe_name)
+        summary.tool_results.append(ToolResult(
+            tool_name=probe_name,
+            status="ok",
+            findings_count=len(findings),
+            error_reason=None,
+            wall_time_s=0.0,
+            raw_result={"findings": findings, "status": "ok"},
+        ))
+        summary.total_findings += len(findings)
+
+
 async def _run_dependent_api_tools(
     summary: PrepassSummary,
     *,
@@ -1544,7 +1928,12 @@ async def run_oss_anchor_prepass(
             f"target_type={target_type!r} not in anchor lookup"
         )
         return summary
-    if not anchors:
+    # Target types with empty phase-1 anchor lists still get phase-2
+    # dispatch (e.g. ip_address — no scan_* tool takes a bare IP, but
+    # iter-13 added a TCP-probe phase-2). Without this allowance, the
+    # prepass early-returns and ip_address recall stays at 0.
+    _HAS_PHASE_2_DISPATCH = {"ip_address"}
+    if not anchors and target_type not in _HAS_PHASE_2_DISPATCH:
         summary.skipped_reason = (
             f"target_type={target_type!r} has no L1 signature corpus"
         )
@@ -1587,6 +1976,15 @@ async def run_oss_anchor_prepass(
         await _run_dependent_api_tools(
             summary, agent_state=agent_state, timeout_s=timeout_s,
             target_value=target_value, target_type=target_type,
+        )
+
+    # ip_address phase-2 — TCP port discovery + per-service probes.
+    # No phase-1 anchors exist for ip_address (the existing scan_*
+    # tools require a URL), so this is the entire L1 surface for
+    # network targets.
+    if target_type == "ip_address" and target_value:
+        await _run_dependent_ip_tools(
+            summary, target_value=target_value,
         )
 
     summary.wall_time_s = _t.monotonic() - overall_start
