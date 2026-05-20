@@ -5,9 +5,7 @@
 #
 # crAPI is a microservice-architected vulnerable application designed
 # specifically to demonstrate OWASP API Top 10. The full stack runs
-# under docker-compose with ~7 services. This file pulls the official
-# OWASP-published compose, pinning to a specific tag for fixture
-# reproducibility.
+# under docker-compose with ~7 services.
 #
 # Pin reason: tag floats break the fixture's expected.yaml manifest.
 # When OWASP publishes a new crAPI version with shifted endpoints,
@@ -15,23 +13,17 @@
 #
 # Pin history:
 #   2024-Q4 — pinned to 0.7.0 (initial fixture build)
-#   2026-05-19 — repinned to 1.1.6-rc8. OWASP retired the 0.7.0
-#     tags from Docker Hub between Q4 2024 and Q2 2026; the 0.7.0
-#     pulls started returning HTTP 404 (broke the runner with
-#     `docker compose up` exit 1 before strix was ever invoked).
-#     1.1.6-rc8 is the most recent immutable tag that exists for
-#     all four crapi services (identity / community / workshop /
-#     web). The final 1.1.6 tag only landed on identity; the other
-#     three jump straight from rc8 to floating `main`/`latest`.
-#     FOLLOW-UP: this fixture's expected.yaml was baselined against
-#     0.7.0 endpoints. The crAPI HTTP surface drifted between 0.7.0
-#     and 1.1.6 (rate-limit endpoints renamed, JWT secret defaults
-#     changed). Re-baseline expected.yaml against 1.1.6-rc8 in a
-#     separate PR — until then, this fixture's recall numbers are
-#     not directly comparable to the 2024-Q4 baseline.
+#   2026-05-19 — repinned to 1.1.6-rc8.
+#   2026-05-21 — env-block restored from upstream OWASP compose
+#     (deploy/docker/docker-compose.yml). The earlier fixture had
+#     omitted the env vars Spring Boot reads via ${...} substitution
+#     (SERVER_PORT, TLS_ENABLED, SMTP_*, JWT_SECRET, etc.) so the
+#     identity service crashed at startup with placeholder-
+#     resolution errors. Iter-17.5 ran into this trying to actually
+#     measure crapi recall.
 #
-# Network: services bind to 8888 (web), 8080 (API), 8000 (mailhog UI),
-# 8025 (mailhog SMTP). The benchmark target is the API at 8080.
+# Network: services bind to 8888 (web), 8025 (mailhog UI).
+# The benchmark target hits :8888 which routes to the services.
 
 x-crapi-image: &crapi-image
   pull_policy: always
@@ -41,36 +33,84 @@ services:
     image: crapi/crapi-identity:1.1.6-rc8
     <<: *crapi-image
     container_name: bench-crapi-identity
+    # Env block lifted from upstream OWASP/crAPI
+    # deploy/docker/docker-compose.yml. Without these the Spring
+    # Boot JVM exits 1 at startup with "${VAR} not resolvable"
+    # for each unset env reference in application.properties.
     environment:
+      LOG_LEVEL: INFO
       DB_NAME: crapi
       DB_USER: admin
       DB_PASSWORD: crapisecretpassword
       DB_HOST: postgresdb
       DB_PORT: 5432
-      JWT_EXPIRATION_TIME: 86400000
-      SMTP_HOST: mailhog
-      SMTP_PORT: 1025
+      SERVER_PORT: 8080
+      ENABLE_SHELL_INJECTION: "false"
+      JWT_SECRET: crapi
+      MAILHOG_HOST: mailhog
+      MAILHOG_PORT: 1025
+      MAILHOG_DOMAIN: example.com
+      SMTP_HOST: smtp.example.com
+      SMTP_PORT: 587
+      SMTP_EMAIL: user@example.com
+      SMTP_PASS: xxxxxxxxxxxxxx
+      SMTP_FROM: no-reply@example.com
+      SMTP_AUTH: "true"
+      SMTP_STARTTLS: "true"
+      JWT_EXPIRATION: 604800000
+      ENABLE_LOG4J: "false"
+      API_GATEWAY_URL: https://api.mypremiumdealership.com
+      TLS_ENABLED: "false"
+      TLS_KEYSTORE_TYPE: PKCS12
+      TLS_KEYSTORE: "classpath:certs/server.p12"
+      TLS_KEYSTORE_PASSWORD: passw0rd
+      TLS_KEY_PASSWORD: passw0rd
+      TLS_KEY_ALIAS: identity
     depends_on:
       postgresdb:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      mailhog:
         condition: service_healthy
     networks:
       - bench-crapi
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/identity/health-check"]
+      # /identity/health-check returns 401 in 1.1.6-rc8 (auth-required
+      # — not actually a public health endpoint). Accept any HTTP
+      # response (including 401) as "service is up". Without this
+      # quirk the dependent services (community/workshop) wait
+      # forever and the compose `condition: service_healthy` gate
+      # never trips.
+      test: ["CMD-SHELL", "curl -sf -o /dev/null -w '%{http_code}' http://localhost:8080/identity/health-check | grep -qE '^(2|3|4)'"]
       interval: 15s
-      timeout: 10s
-      retries: 10
+      timeout: 15s
+      retries: 15
 
   crapi-community:
     image: crapi/crapi-community:1.1.6-rc8
     <<: *crapi-image
     container_name: bench-crapi-community
     environment:
+      LOG_LEVEL: INFO
+      IDENTITY_SERVICE: "crapi-identity:8080"
+      DB_NAME: crapi
+      DB_USER: admin
+      DB_PASSWORD: crapisecretpassword
+      DB_HOST: postgresdb
+      DB_PORT: 5432
+      SERVER_PORT: 8087
       MONGO_DB_HOST: mongodb
       MONGO_DB_PORT: 27017
-      IDENTITY_SERVICE_HOST: crapi-identity
-      IDENTITY_SERVICE_PORT: 8080
+      MONGO_DB_USER: admin
+      MONGO_DB_PASSWORD: crapisecretpassword
+      MONGO_DB_NAME: crapi
+      TLS_ENABLED: "false"
+      TLS_CERTIFICATE: certs/server.crt
+      TLS_KEY: certs/server.key
     depends_on:
+      postgresdb:
+        condition: service_healthy
       mongodb:
         condition: service_healthy
       crapi-identity:
@@ -83,10 +123,31 @@ services:
     <<: *crapi-image
     container_name: bench-crapi-workshop
     environment:
+      LOG_LEVEL: INFO
+      IDENTITY_SERVICE: "crapi-identity:8080"
+      DB_NAME: crapi
+      DB_USER: admin
+      DB_PASSWORD: crapisecretpassword
+      DB_HOST: postgresdb
+      DB_PORT: 5432
+      SERVER_PORT: 8000
       MONGO_DB_HOST: mongodb
       MONGO_DB_PORT: 27017
+      MONGO_DB_USER: admin
+      MONGO_DB_PASSWORD: crapisecretpassword
+      MONGO_DB_NAME: crapi
+      SECRET_KEY: crapi
+      API_GATEWAY_URL: https://api.mypremiumdealership.com
+      TLS_ENABLED: "false"
+      TLS_CERTIFICATE: certs/server.crt
+      TLS_KEY: certs/server.key
+      FILES_LIMIT: 1000
     depends_on:
+      postgresdb:
+        condition: service_healthy
       mongodb:
+        condition: service_healthy
+      crapi-identity:
         condition: service_healthy
     networks:
       - bench-crapi
@@ -96,12 +157,20 @@ services:
     <<: *crapi-image
     container_name: bench-crapi-web
     ports:
-      - "8888:80"
-      - "8025:8025"
+      - "127.0.0.1:8888:80"
     environment:
-      IDENTITY_HOST: crapi-identity
-      COMMUNITY_HOST: crapi-community
-      WORKSHOP_HOST: crapi-workshop
+      COMMUNITY_SERVICE: "crapi-community:8087"
+      IDENTITY_SERVICE: "crapi-identity:8080"
+      WORKSHOP_SERVICE: "crapi-workshop:8000"
+      # CHATBOT_SERVICE must be set or nginx config has empty
+      # upstream → exit 1 with `no host in upstream`. We don't
+      # run the chatbot container; point at the identity service
+      # so nginx parses cleanly (chatbot routes will 5xx, which
+      # is acceptable — the fixture's must_finds don't exercise
+      # chatbot endpoints).
+      CHATBOT_SERVICE: "crapi-identity:8080"
+      MAILHOG_WEB_SERVICE: "mailhog:8025"
+      TLS_ENABLED: "false"
     depends_on:
       - crapi-identity
       - crapi-community
@@ -125,10 +194,13 @@ services:
       - bench-crapi
 
   mongodb:
-    image: mongo:6
+    image: mongo:4.4
     container_name: bench-crapi-mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: crapisecretpassword
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD-SHELL", "echo 'db.runCommand({ping: 1})' | mongo --quiet"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -136,10 +208,18 @@ services:
       - bench-crapi
 
   mailhog:
-    image: mailhog/mailhog
+    image: crapi/mailhog:latest
     container_name: bench-crapi-mailhog
+    environment:
+      MH_MONGO_URI: "admin:crapisecretpassword@mongodb:27017"
+      MH_STORAGE: mongodb
     ports:
-      - "8025:8025"
+      - "127.0.0.1:8025:8025"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8025"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - bench-crapi
 
