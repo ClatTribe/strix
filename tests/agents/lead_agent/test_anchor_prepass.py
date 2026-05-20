@@ -376,6 +376,95 @@ def test_code_kwargs_falls_back_to_host_path_when_no_workspace() -> None:
     assert kw == {"repo_path": host_path}
 
 
+def test_phase_2_iterates_rate_limit_per_endpoint() -> None:
+    """Phase 2 of the API prepass: when openapi_spec_ingest succeeds
+    and emits an endpoints list, scan_api_rate_limit is invoked
+    PER-ENDPOINT (not just on the base URL).
+
+    Without per-endpoint iteration we'd miss endpoint-specific
+    rate-limit must_finds (e.g. vampi's `/users/v1/login` rate-limit).
+    """
+
+    async def fake_execute(tool_name: str, agent_state: Any = None, **kwargs: Any) -> Any:
+        if tool_name == "openapi_spec_ingest":
+            return {
+                "status": "ok",
+                "success": True,
+                "endpoints": [
+                    {"path": "/login", "method": "POST",
+                     "url": "http://example/login"},
+                    {"path": "/api/users", "method": "GET",
+                     "url": "http://example/api/users"},
+                    {"path": "/api/orders", "method": "POST",
+                     "url": "http://example/api/orders"},
+                ],
+                "endpoint_count": 3,
+            }
+        if tool_name == "scan_api_rate_limit":
+            # Synthesize finding for /login only (mimics vampi's shape).
+            url = kwargs.get("url", "")
+            findings = [{"id": "rate-limit"}] if "/login" in url else []
+            return {"status": "ok", "findings": findings}
+        # Default: no-op success.
+        return {"status": "ok", "findings": []}
+
+    with mock.patch("strix.tools.executor.execute_tool", new=fake_execute):
+        summary = asyncio.run(run_oss_anchor_prepass(
+            target_type="api",
+            target_value="http://example",
+            workspace_path="",
+            agent_state=mock.Mock(),
+        ))
+
+    # Phase-2 entries are labeled with `scan_api_rate_limit[METHOD PATH]`.
+    p2_entries = [
+        r for r in summary.tool_results
+        if r.tool_name.startswith("scan_api_rate_limit[")
+    ]
+    assert len(p2_entries) == 3, (
+        f"phase-2 must iterate per endpoint (3 endpoints expected); "
+        f"got {len(p2_entries)} entries: {[r.tool_name for r in p2_entries]}"
+    )
+    # The /login endpoint should produce a finding (per the fake).
+    login_entries = [r for r in p2_entries if "/login" in r.tool_name]
+    assert login_entries and login_entries[0].findings_count == 1, (
+        "phase-2 /login rate-limit hit must surface as a finding"
+    )
+    # The other 2 endpoints produced 0 findings — still tracked.
+    other_entries = [r for r in p2_entries if "/login" not in r.tool_name]
+    assert all(r.findings_count == 0 for r in other_entries)
+
+
+def test_phase_2_skipped_when_openapi_ingest_fails() -> None:
+    """If openapi_spec_ingest didn't emit endpoints (target has no
+    spec, or the tool errored), phase-2 must skip gracefully without
+    invoking per-endpoint scanners."""
+
+    async def fake_execute(tool_name: str, agent_state: Any = None, **kwargs: Any) -> Any:
+        if tool_name == "openapi_spec_ingest":
+            # Failure shape — no `endpoints` key.
+            return {"status": "error", "error": "no spec found"}
+        return {"status": "ok", "findings": []}
+
+    with mock.patch("strix.tools.executor.execute_tool", new=fake_execute):
+        summary = asyncio.run(run_oss_anchor_prepass(
+            target_type="api",
+            target_value="http://example",
+            workspace_path="",
+            agent_state=mock.Mock(),
+        ))
+
+    # NO phase-2 per-endpoint entries.
+    p2_entries = [
+        r for r in summary.tool_results
+        if r.tool_name.startswith("scan_api_rate_limit[")
+    ]
+    assert p2_entries == [], (
+        f"phase-2 must not run when openapi_spec_ingest fails; "
+        f"got {[r.tool_name for r in p2_entries]}"
+    )
+
+
 def test_findings_count_uses_findings_or_vulnerabilities_key() -> None:
     """The strix SpecialistResult shape uses either `findings` or
     `vulnerabilities` for the finding list. Both should count."""
