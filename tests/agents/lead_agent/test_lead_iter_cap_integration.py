@@ -56,7 +56,10 @@ def test_quick_mode_caps_pre_supplied_state(
 ) -> None:
     monkeypatch.setenv("STRIX_SCAN_MODE", "quick")
     agent = LeadAgent(_config_with_state(max_iter=300))
-    assert agent.state.max_iterations == 12
+    # 2026-05-20 — quick mode cap reduced from 12 → 4 after the
+    # OSS-first anchor pre-pass landed. The lead's post-prepass role
+    # is L2 ranking / dedup / FP demote / report — fits in ~4 iter.
+    assert agent.state.max_iterations == 4
 
 
 def test_standard_mode_caps_pre_supplied_state(
@@ -64,7 +67,12 @@ def test_standard_mode_caps_pre_supplied_state(
 ) -> None:
     monkeypatch.setenv("STRIX_SCAN_MODE", "standard")
     agent = LeadAgent(_config_with_state(max_iter=300))
-    assert agent.state.max_iterations == 60
+    # 2026-05-20 — standard mode cap reduced from 60 → 15 after the
+    # OSS-first anchor pre-pass landed. The lead delegates specialist
+    # dispatch via dispatch_specialist (cap=8) which is its own
+    # fresh-context loop — the lead's iter budget shouldn't be the
+    # work multiplier.
+    assert agent.state.max_iterations == 15
 
 
 def test_deep_mode_does_not_cap_pre_supplied_state(
@@ -86,11 +94,11 @@ def test_cap_does_not_raise_already_tighter_max_iter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Recall canary — if the caller explicitly passed
-    max_iterations=5, the quick-mode cap of 12 MUST NOT raise it.
+    max_iterations=3, the quick-mode cap of 4 MUST NOT raise it.
     The cap is a ceiling."""
     monkeypatch.setenv("STRIX_SCAN_MODE", "quick")
-    agent = LeadAgent(_config_with_state(max_iter=5))
-    assert agent.state.max_iterations == 5
+    agent = LeadAgent(_config_with_state(max_iter=3))
+    assert agent.state.max_iterations == 3
 
 
 def test_kill_switch_disables_cap_on_pre_supplied_state(
@@ -122,7 +130,8 @@ def test_quick_mode_caps_default_state_path(
     one itself — the cap must apply there too."""
     monkeypatch.setenv("STRIX_SCAN_MODE", "quick")
     agent = LeadAgent({"max_iterations": 300})
-    assert agent.state.max_iterations == 12
+    # 2026-05-20 — quick cap is now 4 (post-OSS-anchor-prepass).
+    assert agent.state.max_iterations == 4
 
 
 def test_deep_mode_default_state_path(
@@ -142,15 +151,22 @@ def test_deep_mode_default_state_path(
 def test_quick_cap_leaves_minimum_iterations_for_recall(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Recall safeguard: quick mode caps must leave AT LEAST 10
-    iterations available. Anything tighter risks the lead being
-    unable to: boot + recon + 3-4 probes + emit findings + report.
+    """Recall safeguard: quick mode caps must leave AT LEAST 3
+    iterations available for the post-prepass lead.
+
+    The OSS-first anchor pre-pass (2026-05-20) runs the L1 detection
+    layer BEFORE the lead's first LLM call. The lead's remaining role
+    is L2 ranking / dedup / FP demote / report — which fits in ~3-4
+    iterations. Anything tighter risks the lead being unable to:
+    boot + dedup + emit + report.
+
     If this canary breaks, the cap is too tight and reverts —
     NOT the canary."""
     monkeypatch.setenv("STRIX_SCAN_MODE", "quick")
     agent = LeadAgent(_config_with_state(max_iter=300))
-    assert agent.state.max_iterations >= 10, (
+    assert agent.state.max_iterations >= 3, (
         f"quick mode cap {agent.state.max_iterations} is too "
-        "tight; min floor is 10 iterations for the deterministic "
-        "happy path. Loosen the cap rather than this canary."
+        "tight; min floor is 3 iterations for the deterministic "
+        "happy path (post-prepass: boot + dedup + emit + report). "
+        "Loosen the cap rather than this canary."
     )

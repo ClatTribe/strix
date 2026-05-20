@@ -59,10 +59,26 @@ logger = logging.getLogger(__name__)
 
 
 # Per-mode lead iteration cap. None = unbounded (deep-mode behavior).
+#
+# 2026-05-20 — caps tightened after the OSS-first anchor pre-pass
+# landed (docs/proposals/2026-05-20-quick-mode-oss-first-architecture.md).
+# The prepass runs the L1 deterministic anchors BEFORE the lead loop;
+# the lead's role collapses to L2 ranking / dedup / FP demote / novel-
+# vuln tagging. That fits in far fewer iterations than the previous
+# LLM-drives-tool-selection design assumed.
+#
+# Iteration roles by mode (post-prepass):
+#   * quick:    1 boot + 2-3 rank/dedup/FP + 1 report                = 4
+#   * standard: 1 boot + 4-6 reasoning + 2-3 chain hypothesis + 1    = ~10-15
+#               (down from 60 — specialist dispatch is the work, not
+#                lead iterations)
+#   * deep:     unbounded — depth + chain enumeration + PoC synthesis
+#
+# Kill switch: STRIX_LEAD_ITER_CAP_DISABLED=1
 _SCAN_MODE_LEAD_ITER_CAP: dict[str, int | None] = {
     "initial": 6,
-    "quick": 12,
-    "standard": 60,
+    "quick": 4,
+    "standard": 15,
     "deep": None,
 }
 
