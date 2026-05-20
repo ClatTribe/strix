@@ -148,6 +148,40 @@ def parse_expected(fixture_dir: Path) -> tuple[dict[str, Any], list[Expected]]:
     return manifest, expected
 
 
+def resolve_all_targets(
+    fixture_dir: Path, manifest: dict[str, Any],
+) -> list[tuple[str, str]]:
+    """Returns a list of (target_type, target_value) the prepass
+    should scan. Handles primary + `additional_targets` (paired-asset
+    fixtures like vibe-app where the same app is scanned as web URL
+    AND local source tree).
+
+    The primary target comes first; additional targets follow in
+    manifest order. Each target gets its own prepass invocation; the
+    bench unions the findings across all targets before scoring.
+    """
+    out: list[tuple[str, str]] = []
+    # Primary target via the single-target resolver.
+    primary = resolve_target(fixture_dir, manifest)
+    if primary[0] and primary[1]:
+        out.append(primary)
+
+    # Additional targets: each has its own {type, target} pair.
+    for entry in (manifest.get("additional_targets") or []):
+        if not isinstance(entry, dict):
+            continue
+        tt = (entry.get("type") or "").strip()
+        tg = entry.get("target")
+        if not tt or tg is None:
+            continue
+        if tt in ("local_code", "repository"):
+            full = (fixture_dir / tg).resolve()
+            out.append((tt, str(full)))
+        else:
+            out.append((tt, str(tg)))
+    return out
+
+
 def resolve_target(fixture_dir: Path, manifest: dict[str, Any]) -> tuple[str, str]:
     """Pick (target_type, target_value) the prepass should scan.
 
@@ -164,16 +198,31 @@ def resolve_target(fixture_dir: Path, manifest: dict[str, Any]) -> tuple[str, st
         full = (fixture_dir / rel).resolve()
         return target_type, str(full)
     if target_type in ("web_application", "api"):
-        # Prefer the host-accessible wait_url. Fall back to target.
+        # Prefer the manifest's `target` field (with host.docker.internal
+        # → localhost rewrite). Fall back to wait_url if no target.
+        #
+        # We deliberately DON'T use docker.wait_url as the primary —
+        # wait_url is a health-check endpoint that may point deep into
+        # the app (juiceshop's wait_url is /rest/admin/application-version,
+        # not the app root). Probes appended to that URL would all go to
+        # the wrong place.
+        target = manifest.get("target", "")
+        target = (target or "").replace("host.docker.internal", "localhost")
+        if target:
+            return target_type, target.rstrip("/")
+        # Last-ditch: take scheme://netloc from wait_url (strip the path).
         docker_cfg = manifest.get("docker") or {}
         wait_url = docker_cfg.get("wait_url")
         if isinstance(wait_url, str) and wait_url:
+            try:
+                from urllib.parse import urlparse
+                p = urlparse(wait_url)
+                if p.scheme and p.netloc:
+                    return target_type, f"{p.scheme}://{p.netloc}"
+            except Exception:  # noqa: BLE001
+                pass
             return target_type, wait_url.rstrip("/")
-        target = manifest.get("target", "")
-        # Last-ditch: rewrite host.docker.internal → localhost so
-        # the host harness can reach a sandbox-style URL.
-        target = (target or "").replace("host.docker.internal", "localhost")
-        return target_type, target
+        return target_type, ""
     if target_type == "ip_address":
         # Same host-rewrite logic.
         target = manifest.get("target", "")
@@ -266,42 +315,59 @@ async def run_one_fixture(
 ) -> dict[str, Any]:
     """Run L1 prepass against one fixture; return scored result dict."""
     manifest, expected = parse_expected(fixture_dir)
-    target_type, target_value = resolve_target(fixture_dir, manifest)
+    targets = resolve_all_targets(fixture_dir, manifest)
     rel = fixture_dir.relative_to(REPO_ROOT) if str(fixture_dir).startswith(str(REPO_ROOT)) else fixture_dir
-    print(f"\n=== {rel} ({target_type}) ===", flush=True)
-    print(f"  target: {target_value}", flush=True)
+    primary_type, primary_value = targets[0] if targets else ("", "")
+    print(f"\n=== {rel} ({primary_type}) ===", flush=True)
+    for tt, tv in targets:
+        print(f"  target: [{tt}] {tv}", flush=True)
 
     docker_up_ok = False
     try:
         if not skip_docker:
             docker_up_ok = docker_up(fixture_dir, manifest)
-        # Run the L1 prepass.
         agent_state = _FakeAgentState()
-        start = time.monotonic()
-        summary = await run_oss_anchor_prepass(
-            target_type=target_type,
-            target_value=target_value,
-            workspace_path="",
-            agent_state=agent_state,
-        )
-        wall = time.monotonic() - start
 
-        # Flatten all findings from all tool results into a single list.
+        # Run the L1 prepass against EACH target and union findings.
+        # Paired-asset fixtures (vibe-app) need this so SCA / SAST
+        # against the source tree run alongside DAST against the
+        # web URL.
+        start = time.monotonic()
         all_findings: list[Found] = []
-        for r in summary.tool_results:
-            raw = r.raw_result
-            if not isinstance(raw, dict):
-                continue
-            for f in (raw.get("findings") or raw.get("vulnerabilities") or []):
-                if isinstance(f, dict):
-                    all_findings.append(_finding_to_found(f))
+        merged_tool_results: list[dict[str, Any]] = []
+        total_tools_run = 0
+        total_tools_succeeded = 0
+        total_tools_failed = 0
+        for tt, tv in targets:
+            summary = await run_oss_anchor_prepass(
+                target_type=tt,
+                target_value=tv,
+                workspace_path="",
+                agent_state=agent_state,
+            )
+            for r in summary.tool_results:
+                raw = r.raw_result
+                if isinstance(raw, dict):
+                    for f in (raw.get("findings") or raw.get("vulnerabilities") or []):
+                        if isinstance(f, dict):
+                            all_findings.append(_finding_to_found(f))
+                merged_tool_results.append({
+                    "tool": f"[{tt}] {r.tool_name}",
+                    "status": r.status,
+                    "findings": r.findings_count,
+                    "note": (r.error_reason or "")[:120],
+                })
+            total_tools_run += len(summary.tools_run)
+            total_tools_succeeded += len(summary.tools_succeeded)
+            total_tools_failed += len(summary.tools_failed)
+        wall = time.monotonic() - start
 
         score_result = score(expected, all_findings)
 
         result = {
             "fixture": str(rel),
-            "target_type": target_type,
-            "target_value": target_value,
+            "target_type": primary_type,
+            "target_value": primary_value,
             "wall_seconds": round(wall, 2),
             "expected_count": score_result.expected_count,
             "found_count": score_result.found_count,
@@ -310,18 +376,10 @@ async def run_one_fixture(
             "precision": score_result.precision,
             "matched": list(score_result.matches),
             "missed": list(score_result.missed),
-            "tools_run": len(summary.tools_run),
-            "tools_succeeded": len(summary.tools_succeeded),
-            "tools_failed": len(summary.tools_failed),
-            "tool_breakdown": [
-                {
-                    "tool": r.tool_name,
-                    "status": r.status,
-                    "findings": r.findings_count,
-                    "note": (r.error_reason or "")[:120],
-                }
-                for r in summary.tool_results
-            ],
+            "tools_run": total_tools_run,
+            "tools_succeeded": total_tools_succeeded,
+            "tools_failed": total_tools_failed,
+            "tool_breakdown": merged_tool_results,
         }
         print(
             f"  recall={result['recall']:.3f} ({result['matched_count']}/{result['expected_count']}) "
