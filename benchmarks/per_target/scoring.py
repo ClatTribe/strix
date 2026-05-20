@@ -289,20 +289,56 @@ def _is_match(expected: Expected, found: Found) -> bool:
 
 
 def score(expected_list: list[Expected], found_list: list[Found]) -> ScoreResult:
+    """Score `found_list` against `expected_list`. Returns recall +
+    precision + per-finding match attribution.
+
+    Match-routing precedence (iter-17.7, 2026-05-21): when multiple
+    `expected` entries would match a single `found`, prefer the one
+    whose CWE EXACTLY matches the found's CWE over any that match
+    only by category. This closes the iter-17 vampi scoring artifact
+    where the JWT-brute finding (CWE-326) was routed to
+    `jwt-none-alg` (CWE-347) by iteration order, leaving the
+    `jwt-weak-secret` (CWE-326 — exact match) slot unfilled.
+
+    Algorithm: for each found, iterate ALL still-unmatched expecteds
+    that pass `_is_match`. Score each candidate by:
+      * CWE exact match → 2
+      * category match → 1
+      * neither (defensive — shouldn't happen since _is_match
+        required one of them) → 0
+    Pick highest-scoring candidate; break ties by iteration order.
+    """
     expected_must = [e for e in expected_list if e.must_find]
     matched: list[tuple[str, str]] = []
     matched_expected: set[str] = set()
     matched_found: set[int] = set()
 
     for i, found in enumerate(found_list):
-        for expected in expected_must:
+        # Collect all candidate matches, score, pick best.
+        candidates: list[tuple[int, int, Expected]] = []
+        for idx, expected in enumerate(expected_must):
             if expected.id in matched_expected:
                 continue
-            if _is_match(expected, found):
-                matched.append((expected.id, found.title))
-                matched_expected.add(expected.id)
-                matched_found.add(i)
-                break
+            if not _is_match(expected, found):
+                continue
+            score_val = 0
+            if _cwe_match(expected.cwe, found.cwe):
+                score_val += 2
+            if _categories_match(expected.category, found.category):
+                score_val += 1
+            # Tie-break by iteration order (lower idx wins) — keeps
+            # backwards-compat with the prior first-match-wins
+            # behaviour when scores are equal.
+            candidates.append((score_val, -idx, expected))
+        if not candidates:
+            continue
+        # Highest score, then earliest idx (idx stored negated so
+        # max() picks lowest absolute idx)
+        candidates.sort(reverse=True)
+        _, _, best = candidates[0]
+        matched.append((best.id, found.title))
+        matched_expected.add(best.id)
+        matched_found.add(i)
 
     found_count = len(found_list)
     matched_count = len(matched)

@@ -87,16 +87,27 @@ expected_findings:
       Debug endpoint reachable without admin role. Returns all
       registered users incl. password hashes.
 
-  # SQLi (planted in books endpoint when vulnerable mode is on)
-  - id: sqli-books
+  # SQLi (planted in user lookup endpoint when vulnerable mode is on)
+  # Fixture-correction 2026-05-21: this used to list /books/v1/{title}
+  # but inspecting `vampi/models/user_model.py` shows the actual raw-
+  # SQL execution is in `get_user(username)`:
+  #     query = f"SELECT * FROM users WHERE username = '{username}'"
+  #     db.session.execute(text(query))
+  # The books endpoint uses parameterized SQLAlchemy ORM
+  # (`Book.query.filter_by(book_title=str(book_title))`) which is
+  # NOT injectable. Earlier vampi versions may have had SQLi in books
+  # but 0.4.3 moved it to users. Updated to match actual behavior.
+  - id: sqli-users-by-username
     category: sqli
     cwe: CWE-89
-    endpoint: /books/v1/{title}
+    endpoint: /users/v1/{username}
     severity: critical
     must_find: true
     description: |
-      `/books/v1/<title>` is SQLi-vulnerable; classic `' OR 1=1--`
-      yields all rows.
+      `/users/v1/<username>` is SQLi-vulnerable via raw
+      `SELECT ... WHERE username = '<input>'` interpolation in
+      `vampi/models/user_model.py::get_user`. Classic `' OR '1'='1`
+      / UNION SELECT payloads work.
 
   # API discovery
   - id: openapi-spec-exposed

