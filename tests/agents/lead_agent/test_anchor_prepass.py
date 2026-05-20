@@ -280,6 +280,75 @@ def test_tool_timeout_surfaces_as_timeout_status() -> None:
     )
 
 
+def test_code_kwargs_uses_host_path_for_host_tools() -> None:
+    """scan_sast / scan_sca_lockfiles / scan_iac all have
+    sandbox_execution=False (they shell to host subprocess running
+    semgrep/trivy/osv-scanner). When the prepass passes them
+    workspace_path (`/workspace/src` — a path that only exists
+    inside the sandbox container), they fail with "not a directory".
+
+    The fix: pick the path based on the tool's sandbox_execution
+    registration. Host-executing tools must get the HOST path
+    (target_value); sandbox-executing tools get the WORKSPACE path.
+
+    Caught live on 2026-05-20 when the bench's strix subprocess
+    reported `note='not a directory: /workspace/src'` on every code
+    target — pinning this here so the regression can't slip back.
+    """
+    from strix.agents.lead_agent.anchor_prepass import _code_kwargs
+
+    host_path = "/Users/ashish/repo/src"
+    workspace_path = "/workspace/src"
+
+    # scan_sast is host-executing (sandbox_execution=False).
+    kw = _code_kwargs(host_path, workspace_path, "scan_sast")
+    assert kw == {"repo_path": host_path}, (
+        f"scan_sast must get host path; got {kw}"
+    )
+
+    kw = _code_kwargs(host_path, workspace_path, "scan_sca_lockfiles")
+    assert kw == {"repo_path": host_path}, (
+        f"scan_sca_lockfiles must get host path; got {kw}"
+    )
+
+    kw = _code_kwargs(host_path, workspace_path, "scan_iac")
+    assert kw == {"repo_path": host_path}, (
+        f"scan_iac must get host path; got {kw}"
+    )
+
+
+def test_code_kwargs_uses_workspace_path_for_sandbox_tools() -> None:
+    """secrets_scan has sandbox_execution=True (runs inside the
+    sandbox container, talks to gitleaks/trufflehog via the tool-
+    server). When it runs, it needs the WORKSPACE path that's
+    actually mounted inside the container."""
+    from strix.agents.lead_agent.anchor_prepass import _code_kwargs
+
+    host_path = "/Users/ashish/repo/src"
+    workspace_path = "/workspace/src"
+
+    kw = _code_kwargs(host_path, workspace_path, "secrets_scan")
+    assert kw == {"repo_path": workspace_path}, (
+        f"secrets_scan (sandbox tool) must get workspace path; got {kw}"
+    )
+
+
+def test_code_kwargs_falls_back_to_host_path_when_no_workspace() -> None:
+    """When workspace_path is empty (native-execution runs without
+    a sandbox), every tool gets the host path — there's nothing
+    else to fall back to."""
+    from strix.agents.lead_agent.anchor_prepass import _code_kwargs
+
+    host_path = "/Users/ashish/repo/src"
+
+    # Both host-tool and sandbox-tool fall back to host_path.
+    kw = _code_kwargs(host_path, "", "scan_sast")
+    assert kw == {"repo_path": host_path}
+
+    kw = _code_kwargs(host_path, "", "secrets_scan")
+    assert kw == {"repo_path": host_path}
+
+
 def test_findings_count_uses_findings_or_vulnerabilities_key() -> None:
     """The strix SpecialistResult shape uses either `findings` or
     `vulnerabilities` for the finding list. Both should count."""
