@@ -152,6 +152,21 @@ def _api_url_with_severity_kwargs(
         "tags": ["cve", "default-login", "exposure", "misconfig",
                  "authenticated", "jwt", "oauth", "api", "intrusive"],
         "severity": ["medium", "high", "critical"],
+        # Default `max_templates=200` only reaches the first ~200
+        # templates in corpus walk order — many high-impact CVE
+        # templates (CVE-2021-41773 is at cves/2021/CVE-2021-41773.yaml,
+        # deep in the tree) get silently dropped. Iter-16 native
+        # raw-HTTP support unblocked these templates at the
+        # interpreter level — raise the cap so they actually get
+        # iterated.
+        #
+        # Empirical (2026-05-21): with the broad tag set above
+        # (9 tags) + severity ≥ medium, CVE-2021-41773 is at
+        # iteration #2057. 3000 covers it with margin.
+        # Wall cost: ~250-300s for a clean-port target. Pure-Python
+        # interpreter is fast for templates that miss; only matching
+        # templates and slow targets dominate wall time.
+        "max_templates": 3000,
     }
 
 

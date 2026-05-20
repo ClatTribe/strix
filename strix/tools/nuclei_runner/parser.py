@@ -43,9 +43,19 @@ logger = logging.getLogger(__name__)
 
 # Top-level template fields we DON'T support (yet) — presence makes
 # the template "skip + count."
+#
+# `flow:` was added 2026-05-21: nuclei's flow-control DSL composes
+# multi-step HTTP probes (`flow: http(1) && http(2)`); without
+# implementing the DSL, a template like CVE-2025-24016 has http(1)
+# as an `internal: true` precondition matcher with `negative: true`
+# (i.e. "if NameError isn't in body — keep going") and http(2) as
+# the real exploit probe. Our interpreter would fire on http(1)
+# alone, producing a false positive on ANY 200-OK page. Mark
+# `flow:` as unsupported so these templates are skipped cleanly.
 _UNSUPPORTED_TOP_KEYS = frozenset({
     "workflows", "network", "dns", "file", "code", "javascript",
     "headless", "websocket", "whois", "ssl", "tcp",
+    "flow",
 })
 
 
@@ -77,6 +87,37 @@ class Matcher:
 
 
 @dataclass
+class RawHttpRequest:
+    """One raw-HTTP probe parsed from a nuclei template's `raw:`
+    block. The block looks like:
+
+        - |
+          GET /icons/.%2e/.%2e/etc/passwd HTTP/1.1
+          Host: {{Hostname}}
+          User-Agent: ...
+
+          (optional body bytes)
+
+    Iter-16 (2026-05-21) — strix's pure-Python interpreter
+    previously skipped raw-HTTP probes entirely. Measured: 2260/4000
+    (≈56%) of CVE templates use this shape, including canonical
+    ones like CVE-2021-41773. Now parsed into structured form so
+    the interpreter can execute them without shelling to the nuclei
+    binary."""
+    method: str = "GET"
+    # Path-with-querystring as it appears in the raw request-line.
+    # Will still contain nuclei interpolation placeholders
+    # (`{{Hostname}}`, `{{BaseURL}}`, `{{interactsh-url}}`) — the
+    # interpreter resolves these before sending.
+    path: str = "/"
+    headers: dict[str, str] = field(default_factory=dict)
+    body: str = ""
+    # Raw original text — kept for debugging and to let the
+    # interpreter re-parse if our structured form drops detail.
+    raw_text: str = ""
+
+
+@dataclass
 class HttpRequest:
     """One HTTP probe in a template's `http:` list."""
     method: str = "GET"
@@ -86,7 +127,11 @@ class HttpRequest:
     matchers_condition: str = "or"   # or | and (across matchers)
     matchers: list[Matcher] = field(default_factory=list)
     stop_at_first_match: bool = True
-    raw: list[str] = field(default_factory=list)  # raw HTTP requests (skipped)
+    raw: list[str] = field(default_factory=list)   # raw text — preserved
+    raw_requests: list[RawHttpRequest] = field(default_factory=list)
+    # When True, treat this request entry as raw-HTTP-driven
+    # (interpreter iterates raw_requests instead of paths).
+    is_raw: bool = False
 
 
 @dataclass
@@ -156,8 +201,21 @@ def _coerce_int_list(v: Any) -> list[int]:
 
 
 def _parse_matcher(d: dict[str, Any]) -> Matcher | None:
-    """Parse one matcher dict; return None when type is unsupported."""
+    """Parse one matcher dict; return None when type is unsupported
+    OR when the matcher is internal-only (`internal: true`).
+
+    `internal: true` matchers are precondition signals used by nuclei's
+    `flow:` DSL — they don't represent a real vuln hit, they just gate
+    whether the next HTTP step runs. We strip them at parse time so
+    the interpreter never fires on them. Added 2026-05-21 after
+    measuring iter-16: CVE-2025-24016 (Wazuh) was firing as a false
+    positive on ANY 200-OK page because its internal precondition
+    matcher (`negative: NameError not in body`) was treated as a real
+    match signal.
+    """
     if not isinstance(d, dict):
+        return None
+    if bool(d.get("internal")):
         return None
     mtype = (d.get("type") or "").lower()
     if mtype not in {"word", "regex", "status", "size", "binary"}:
@@ -178,16 +236,130 @@ def _parse_matcher(d: dict[str, Any]) -> Matcher | None:
     )
 
 
+def _parse_raw_http_block(raw_text: str) -> RawHttpRequest | None:
+    """Parse one multi-line raw-HTTP block into structured form.
+
+    A raw block looks like:
+
+        GET /icons/.%2e/.%2e/etc/passwd HTTP/1.1
+        Host: {{Hostname}}
+        User-Agent: ...
+        Content-Type: application/x-www-form-urlencoded
+
+        body bytes here
+
+    Returns None when the request-line is unparseable (malformed
+    block). The caller's loop tolerates per-block None and skips.
+
+    Nuclei interpolation placeholders (`{{Hostname}}`,
+    `{{BaseURL}}`, `{{interactsh-url}}`) are left in-place — the
+    interpreter resolves them at send time.
+    """
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        return None
+
+    # Split on first blank line — everything before is request-
+    # line + headers; everything after is body. Match either
+    # CRLF or LF blank-line conventions (nuclei templates author
+    # by hand; both forms appear).
+    text = raw_text.replace("\r\n", "\n")
+    header_section, _, body = text.partition("\n\n")
+    header_lines = [ln for ln in header_section.split("\n") if ln.strip()]
+    if not header_lines:
+        return None
+
+    # Request line: METHOD SP PATH SP HTTP/X.X
+    parts = header_lines[0].strip().split(" ", 2)
+    if len(parts) < 2:
+        return None
+    method = parts[0].upper()
+    path = parts[1]
+    # We ignore the HTTP version; we always send HTTP/1.1.
+
+    headers: dict[str, str] = {}
+    for hl in header_lines[1:]:
+        if ":" not in hl:
+            continue
+        k, v = hl.split(":", 1)
+        k = k.strip()
+        v = v.strip()
+        if k:
+            headers[k] = v
+
+    return RawHttpRequest(
+        method=method,
+        path=path,
+        headers=headers,
+        body=body,
+        raw_text=raw_text,
+    )
+
+
 def _parse_http_request(d: dict[str, Any]) -> HttpRequest | None:
-    """Parse one HTTP probe dict."""
+    """Parse one HTTP probe dict.
+
+    Supports both:
+      * `path:` + `method:` + `headers:` + `body:` (structured form)
+      * `raw:` list of multi-line HTTP request strings (raw form)
+
+    Iter-16 (2026-05-21) — raw form was previously skipped at the
+    interpreter level. Now parsed into RawHttpRequest objects and
+    executed by the interpreter loop alongside structured-form
+    probes.
+    """
     if not isinstance(d, dict):
         return None
-    # Skip raw-HTTP probes for now (multi-line raw HTTP is its own
-    # parsing nightmare).
+
+    matchers: list[Matcher] = []
+    raw_matchers = d.get("matchers") or []
+    matchers_condition = (d.get("matchers-condition") or "or").lower()
+    dropped_matcher_count = 0
+    for m in raw_matchers:
+        parsed = _parse_matcher(m)
+        if parsed is not None:
+            matchers.append(parsed)
+        else:
+            dropped_matcher_count += 1
+    # Fail-closed on `matchers-condition: and` when we couldn't
+    # evaluate every matcher in the original list. Otherwise we'd
+    # fire on the kept-matcher subset alone — which produces FPs
+    # like CVE-2024-5230 (FleetCart): the template has a `dsl`
+    # matcher gated on `contains_all(body, "razorpayKeyId:", ...)`
+    # AND a `negative word` matcher for `razorpayKeyId: ''`. We
+    # can't evaluate the dsl, but the negative word matcher fires
+    # on any body lacking the razorpay string — i.e. anything that
+    # isn't FleetCart. Without this gate we'd emit FleetCart vuln
+    # findings against any 200-OK target. Added 2026-05-21.
+    if (
+        matchers_condition == "and"
+        and dropped_matcher_count > 0
+    ):
+        return None
+    stop_at_first_match = bool(d.get("stop-at-first-match", True))
+
+    # Raw-HTTP form
     raw = d.get("raw")
     if isinstance(raw, list) and raw:
-        return HttpRequest(raw=[str(r) for r in raw])
+        raw_requests: list[RawHttpRequest] = []
+        for entry in raw:
+            parsed = _parse_raw_http_block(str(entry))
+            if parsed is not None:
+                raw_requests.append(parsed)
+        if not raw_requests:
+            return None
+        if not matchers:
+            # raw probes without matchers can't decide a hit — drop.
+            return None
+        return HttpRequest(
+            raw=[str(r) for r in raw],
+            raw_requests=raw_requests,
+            is_raw=True,
+            matchers=matchers,
+            matchers_condition=matchers_condition,
+            stop_at_first_match=stop_at_first_match,
+        )
 
+    # Structured form
     paths = _coerce_list(d.get("path"))
     if not paths:
         return None
@@ -198,11 +370,6 @@ def _parse_http_request(d: dict[str, Any]) -> HttpRequest | None:
         for k, v in h.items():
             headers[str(k)] = str(v)
 
-    matchers: list[Matcher] = []
-    for m in (d.get("matchers") or []):
-        parsed = _parse_matcher(m)
-        if parsed is not None:
-            matchers.append(parsed)
     if not matchers:
         return None
 
@@ -211,9 +378,9 @@ def _parse_http_request(d: dict[str, Any]) -> HttpRequest | None:
         paths=paths,
         headers=headers,
         body=d.get("body"),
-        matchers_condition=(d.get("matchers-condition") or "or").lower(),
+        matchers_condition=matchers_condition,
         matchers=matchers,
-        stop_at_first_match=bool(d.get("stop-at-first-match", True)),
+        stop_at_first_match=stop_at_first_match,
     )
 
 
@@ -323,8 +490,17 @@ def parse_template_dir(
     tags_lower = {t.lower() for t in (tags or [])}
     severity_lower = {s.lower() for s in (severity or [])}
     ids_set = {tid.strip() for tid in (template_ids or []) if tid}
+    # Reverse-sort dirs so newer CVE-year dirs (cves/2025/, 2024/,
+    # 2023/, ...) walk before older. Matters when max_templates
+    # caps iteration — without this, a `tags=[cve]` filter exhausts
+    # the budget on 2014-2020 templates and never reaches recent
+    # high-impact CVEs. Iter-16 catch: CVE-2021-41773 was unreachable
+    # in the default tag-set under the 200-template cap because the
+    # bench iterates cves/2014/ → 2015/ → ... → 2020/ first and
+    # accumulates ~200 hits before reaching cves/2021/.
     for root, _dirs, files in os.walk(p):
-        for fname in files:
+        _dirs.sort(reverse=True)
+        for fname in sorted(files, reverse=True):
             if not fname.endswith((".yaml", ".yml")):
                 continue
             full = Path(root) / fname

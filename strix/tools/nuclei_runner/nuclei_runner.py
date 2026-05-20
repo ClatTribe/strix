@@ -253,15 +253,30 @@ def _emit_finding(
             )
         tags_block = ", ".join(template.info.tags[:8])
 
+        # Use the matched_path (the URL that actually triggered the
+        # matcher) as the canonical endpoint when available. This
+        # makes the finding traceable to a specific exploit URL,
+        # and matters for downstream scoring — expected.yaml
+        # entries with specific paths (e.g. `/icons/`) match
+        # via the title / endpoint when the matched_path is
+        # in-scope. Iter-16 fix: previously emit_finding always
+        # used the base URL, which broke scoring on raw-HTTP
+        # templates whose target is a specific path.
+        emission_endpoint = (
+            getattr(result, "matched_path", None) or url
+        )
+        # Title gets the matched URL too so `_title_mentions_endpoint`
+        # in the scorer can match against expected entries that
+        # reference a path (e.g. `/icons/`).
         title = (
             template.info.name
             or f"Nuclei template {template.id}"
-        ) + f" — confirmed at `{url}`"
+        ) + f" at `{emission_endpoint}`"
         report_id = tracer.add_vulnerability_report(
             title=title,
             severity=sev,
             cwe=cwe,
-            endpoint=url,
+            endpoint=emission_endpoint,
             target=url,
             category="nuclei",
             verification_status="verified",
@@ -462,14 +477,18 @@ def scan_nuclei_templates(
             emitted_count += 1
         sev = _SEV_MAP.get(tpl.info.severity, "medium")
         cwe = tpl.info.cwe_id[0] if tpl.info.cwe_id else None
+        # Use matched_path for the draft too — same rationale as in
+        # _emit_finding (iter-16). Without this the bench scorer
+        # can't tie the finding to a specific-path expected entry.
+        draft_endpoint = result.matched_path or url
         drafts.append(FindingDraft(
             title=(
                 (tpl.info.name or f"Nuclei template {tpl.id}")
-                + f" at `{url}`"
+                + f" at `{draft_endpoint}`"
             )[:480],
             severity=sev,
             cwe=cwe,
-            endpoint=url,
+            endpoint=draft_endpoint,
             category="nuclei",
             verification_status="verified",
             confidence=0.92,
