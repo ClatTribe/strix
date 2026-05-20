@@ -396,6 +396,96 @@ async def _run_one_tool(
         )
 
 
+async def _run_dependent_api_tools(
+    summary: PrepassSummary,
+    *,
+    agent_state: Any,
+    timeout_s: int,
+    max_endpoints_for_rate_limit: int = 20,
+) -> None:
+    """Phase 2 of the API/web-target prepass — runs scanners that
+    need endpoints emitted by phase 1's openapi_spec_ingest.
+
+    Looks for a successful openapi_spec_ingest result in the
+    summary, extracts its `endpoints: list[dict]` field, and
+    invokes:
+      * `scan_api_bola(endpoints=...)` — OWASP API1
+      * `scan_api_bfla(endpoints=...)` — OWASP API5
+      * `scan_api_mass_assignment(endpoints=...)` — OWASP API3
+      * `scan_api_rate_limit(url=..., method=...)` per endpoint,
+        capped at `max_endpoints_for_rate_limit` (default 20) to
+        bound wall time and request volume.
+
+    Mutates `summary` in place — adds tools_run / tools_succeeded /
+    tools_failed / tool_results / total_findings entries. Never
+    raises; per-tool errors are captured in ToolResult shape.
+
+    No-op when openapi_spec_ingest didn't succeed or returned no
+    endpoints (e.g. target has no spec). The prepass falls back to
+    the lead loop for endpoint inventory.
+    """
+    # Find the openapi_spec_ingest result.
+    openapi_result = None
+    for r in summary.tool_results:
+        if r.tool_name == "openapi_spec_ingest" and r.status in ("ok", "partial"):
+            openapi_result = r.raw_result
+            break
+    if not isinstance(openapi_result, dict):
+        return
+    endpoints = openapi_result.get("endpoints")
+    if not isinstance(endpoints, list) or not endpoints:
+        return
+
+    # NOTE: scan_api_bola / scan_api_bfla / scan_api_mass_assignment
+    # are NOT included here in the deterministic L1 phase, despite
+    # taking the endpoints list. The reason: they require additional
+    # prereqs that L1 can't synthesize from a bare endpoint list:
+    #   * scan_api_bola needs `owner_ids: dict[str, str]` — the map
+    #     of path-param-name → owner-resource-value (the "user A's
+    #     resource" half of the cross-session BOLA probe).
+    #     Discovering this requires authenticating as 2 users +
+    #     enumerating each one's resources, which is L2 work.
+    #   * scan_api_bfla needs `path_ids` for the same reason.
+    #   * scan_api_mass_assignment needs `path_ids` for the target
+    #     user's record IDs.
+    # The lead's L2 layer picks these up after AuthFlow specialist
+    # produces credentials, then invokes with proper kwargs. They're
+    # in the lead's tool_catalog for that reason.
+    #
+    # The phase-2 prepass focuses on tools that genuinely work with
+    # just the openapi-emitted endpoint list (no auth needed).
+
+    # Per-endpoint rate-limit probes. Without this we'd only hit the
+    # base URL — missing per-endpoint rate-limit must_finds (e.g.
+    # vampi's /login rate-limit).
+    capped = endpoints[:max_endpoints_for_rate_limit]
+    for ep in capped:
+        if not isinstance(ep, dict):
+            continue
+        url = ep.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        method = ep.get("method", "GET") or "GET"
+        path = ep.get("path", url)
+        # Use a per-endpoint tool_name in the summary so we can
+        # distinguish each invocation in the breakdown.
+        endpoint_tool_name = f"scan_api_rate_limit[{method} {path}]"
+        summary.tools_run.append(endpoint_tool_name)
+        result = await _run_one_tool(
+            "scan_api_rate_limit",
+            {"url": url, "method": method},
+            agent_state=agent_state, timeout_s=timeout_s,
+        )
+        # Re-label the ToolResult so the breakdown is searchable.
+        result.tool_name = endpoint_tool_name
+        summary.tool_results.append(result)
+        summary.total_findings += result.findings_count
+        if result.status in ("ok", "partial"):
+            summary.tools_succeeded.append(endpoint_tool_name)
+        else:
+            summary.tools_failed.append(endpoint_tool_name)
+
+
 async def run_oss_anchor_prepass(
     *,
     target_type: str,
@@ -454,6 +544,27 @@ async def run_oss_anchor_prepass(
             summary.tools_succeeded.append(tool_name)
         else:
             summary.tools_failed.append(tool_name)
+
+    # ------------------------------------------------------------------
+    # Phase 2 — dependent-tool stage. Consumes data emitted by phase-1
+    # tools to run scanners that need richer kwargs than a bare URL.
+    #
+    # Right now only the API target type uses this: openapi_spec_ingest
+    # in phase 1 emits an `endpoints` list, which the OWASP API Top 10
+    # specialists need as input (scan_api_bola / scan_api_bfla /
+    # scan_api_mass_assignment). Without this stage they CAN'T run from
+    # the prepass — they'd TypeError on missing `endpoints=` kwarg.
+    #
+    # Also iterates scan_api_rate_limit per discovered endpoint instead
+    # of just hitting the base URL — needed to catch e.g. vampi's
+    # `rate-limit-login` must_find (the /login endpoint specifically).
+    #
+    # Out of scope (iter-5+): JWT extraction → jwt_audit per-token,
+    # per-endpoint scan_sqli/ssrf with discovered params.
+    if target_type in ("api", "web_application"):
+        await _run_dependent_api_tools(
+            summary, agent_state=agent_state, timeout_s=timeout_s,
+        )
 
     summary.wall_time_s = _t.monotonic() - overall_start
     logger.info(
