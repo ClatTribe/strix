@@ -15,8 +15,11 @@ rules:
       category: misconfig
       confidence: HIGH
       vibe_pattern: true
-    patterns:
-      - pattern: |
-          DEBUG = True
-      - pattern-inside: |
-          $...
+    # The original form had `pattern-inside: $...` which is invalid
+    # Python — `$...` doesn't match anything in semgrep's grammar.
+    # That made the whole rule fail to parse (and silently drop).
+    # `DEBUG = True` alone is what we want — module-level Django
+    # settings file pattern is captured by Python's natural top-
+    # level scoping anyway.
+    pattern: |
+      DEBUG = True

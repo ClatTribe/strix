@@ -1,6 +1,18 @@
+# Split into per-language rules — 2026-05-21 — because the original
+# multi-language form (`languages: [javascript, typescript, python]`)
+# mixed JS template-literal patterns with Python f-string patterns.
+# semgrep parses every pattern against every declared language; the
+# Python f-string `$DB.execute(f"...{$REQ.$X}...")` failed to parse
+# as JavaScript and dropped the whole rule.
+#
+# Caught 2026-05-21. Pre-existing bug — the rule has been silently
+# inert since it was first written. The js-sql-template-literal.yml
+# rule added in iter-15 was the workaround. This split lets the
+# original patterns participate again.
+
 rules:
-  - id: strix-sql-string-concat-user-input
-    languages: [javascript, typescript, python]
+  - id: strix-sql-string-concat-user-input-js
+    languages: [javascript, typescript]
     severity: ERROR
     message: >-
       SQL query built by string concatenation / template-literal
@@ -25,6 +37,21 @@ rules:
           $DB.query("..." + $REQ.body.$X + "...")
       - pattern: |
           $DB.query("..." + $REQ.query.$X + "...")
+
+  - id: strix-sql-string-concat-user-input-python
+    languages: [python]
+    severity: ERROR
+    message: >-
+      SQL query built by string concatenation / f-string with
+      user input — classic SQL injection. Use parameterised
+      queries with `?` placeholders or an ORM's safe builder.
+    metadata:
+      cwe: "CWE-89"
+      owasp: "A03:2021"
+      category: sqli
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
       - pattern: |
           $DB.execute(f"...{$REQ.$X}...")
       - pattern: |
