@@ -2466,10 +2466,44 @@ def probe_mass_assignment_followup(
     #     matching `username` / `userId` / `user_id` / `uid` and
     #     a GET method
     candidate_get_paths: list[str] = []
-    base = target_value.rstrip("/")
-    # Static path candidates
-    for p in ("/me", "/users/me", "/api/me", "/profile", "/user/me"):
-        candidate_get_paths.append(base + p)
+    # Strip any path from the target so we build URLs against the
+    # base host only (handles crapi-style targets like
+    # `http://localhost:8888/identity/api/v2`).
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(target_value)
+        base = (
+            f"{parsed.scheme}://{parsed.netloc}"
+            if parsed.scheme and parsed.netloc
+            else target_value.rstrip("/")
+        )
+    except Exception:  # noqa: BLE001
+        base = target_value.rstrip("/")
+    # Static path candidates — generic + service-prefixed.
+    # crapi uses `/identity/api/v2/user/dashboard`; vampi uses
+    # `/users/v1/{username}`; many generic apps use `/me`.
+    # Add canonical patterns from multiple ecosystems.
+    static_get_paths = (
+        # Generic
+        "/me", "/users/me", "/api/me", "/profile", "/user/me",
+        "/api/users/me", "/api/v1/me", "/api/v1/users/me",
+        # crapi-style microservice prefixes
+        "/identity/api/v2/user/dashboard",
+        "/identity/api/user/dashboard",
+        "/identity/api/v2/user",
+        "/identity/api/user",
+        "/community/api/v2/user/dashboard",
+        # Other common shapes
+        "/api/v2/user/dashboard",
+        "/users/v1/me",
+        "/users/v1/{username}",
+        "/account/profile",
+        "/api/account/profile",
+    )
+    for p in static_get_paths:
+        # Substitute {username} placeholder if present
+        full_path = p.replace("{username}", username)
+        candidate_get_paths.append(base + full_path)
     # Spec-discovered user-by-id GET endpoints
     for ep in endpoints:
         if not isinstance(ep, dict):
@@ -2830,20 +2864,56 @@ def probe_password_reset_otp_space(
     Targeted at crapi's `/identity/api/auth/v3/check-otp` and
     similar.
     """
-    if not endpoints:
-        return []
-    # Find /check-otp / /verify-otp / similar.
+    # Find /check-otp / /verify-otp / similar from the openapi
+    # spec OR from a curated static-path list when no spec.
     OTP_KW = ("check-otp", "check_otp", "verify-otp", "verify_otp",
-              "otp/verify", "otp/check", "reset-password", "reset_password")
+              "otp/verify", "otp/check", "reset-password",
+              "reset_password", "v3/check-otp", "v3/check_otp",
+              "v2/check-otp", "v2/check_otp", "auth/forget-password",
+              "auth/forgot-password", "auth/reset")
     otp_eps: list[dict[str, Any]] = []
-    for ep in endpoints:
-        if not isinstance(ep, dict):
-            continue
-        path = (ep.get("path") or "").lower()
-        if any(k in path for k in OTP_KW):
-            otp_eps.append(ep)
+    if endpoints:
+        for ep in endpoints:
+            if not isinstance(ep, dict):
+                continue
+            path = (ep.get("path") or "").lower()
+            if any(k in path for k in OTP_KW):
+                otp_eps.append(ep)
+    # Static fallback: probe well-known OTP endpoints even when
+    # the openapi spec didn't yield any. crapi's
+    # /identity/api/auth/v3/check-otp is the canonical target.
     if not otp_eps:
-        return []
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(target_value)
+            base = (
+                f"{parsed.scheme}://{parsed.netloc}"
+                if parsed.scheme and parsed.netloc
+                else target_value.rstrip("/")
+            )
+        except Exception:  # noqa: BLE001
+            base = target_value.rstrip("/")
+        STATIC_OTP_PATHS = (
+            "/identity/api/auth/v3/check-otp",
+            "/identity/api/auth/v2/check-otp",
+            "/identity/api/auth/check-otp",
+            "/api/auth/v3/check-otp",
+            "/api/auth/check-otp",
+            "/api/auth/verify-otp",
+            "/auth/check-otp",
+            "/auth/verify-otp",
+            "/api/v1/auth/reset-password",
+            "/api/v1/users/reset-password",
+        )
+        for p in STATIC_OTP_PATHS:
+            otp_eps.append({
+                "url": base + p,
+                "path": p,
+                "method": "POST",
+                "params": [],
+                "request_body_schema": None,
+                "source": "static_path_discovery_otp",
+            })
     out: list[dict[str, Any]] = []
     for ep in otp_eps:
         url = ep.get("url")
