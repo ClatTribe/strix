@@ -231,6 +231,26 @@ class StrixAgent(BaseAgent):
             format_summary_for_lead_context = None  # type: ignore[assignment]
             prepass_is_disabled = lambda: True  # noqa: E731
 
+        # Diagnostic breadcrumbs for the OSS prepass — gated behind
+        # STRIX_OSS_PREPASS_DEBUG=1 so they don't pollute production
+        # runs. Useful when investigating why scan_sast / scan_sca /
+        # scan_iac return status=error on a customer's setup (e.g.
+        # missing host binaries, sandbox/workspace path mismatch, or
+        # silent timeout). Was the diagnostic that caught the
+        # `/workspace/src` host-vs-sandbox path bug on 2026-05-20.
+        import os as _prepass_os
+        import sys as _prepass_sys
+        _prepass_debug = _prepass_os.environ.get(
+            "STRIX_OSS_PREPASS_DEBUG", "",
+        ).lower() in ("1", "true", "yes", "on")
+        if _prepass_debug:
+            _prepass_sys.stderr.write(
+                f"[oss-prepass] hook reached; "
+                f"runnable={run_oss_anchor_prepass is not None} "
+                f"disabled={prepass_is_disabled()} "
+                f"targets_count={len(targets)}\n"
+            )
+            _prepass_sys.stderr.flush()
         if (
             run_oss_anchor_prepass is not None
             and not prepass_is_disabled()
@@ -272,7 +292,30 @@ class StrixAgent(BaseAgent):
                         "through to LLM-driven path", target_type,
                         value, e,
                     )
+                    if _prepass_debug:
+                        _prepass_sys.stderr.write(
+                            f"[oss-prepass] EXCEPTION on {target_type}/"
+                            f"{value}: {type(e).__name__}: {e}\n"
+                        )
+                        _prepass_sys.stderr.flush()
                     continue
+                if _prepass_debug:
+                    _prepass_sys.stderr.write(
+                        f"[oss-prepass] {target_type} done: "
+                        f"tools_run={len(summary.tools_run)} "
+                        f"succeeded={len(summary.tools_succeeded)} "
+                        f"failed={len(summary.tools_failed)} "
+                        f"findings={summary.total_findings} "
+                        f"skipped={summary.skipped_reason!r}\n"
+                    )
+                    for r in summary.tool_results:
+                        _prepass_sys.stderr.write(
+                            f"[oss-prepass]   - {r.tool_name}: "
+                            f"status={r.status} "
+                            f"findings={r.findings_count} "
+                            f"note={(r.error_reason or '')[:120]!r}\n"
+                        )
+                    _prepass_sys.stderr.flush()
                 prepass_summaries.append(summary.to_dict())
                 block = format_summary_for_lead_context(summary)
                 if block:

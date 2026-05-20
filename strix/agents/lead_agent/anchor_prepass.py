@@ -73,23 +73,43 @@ logger = logging.getLogger(__name__)
 #
 # Tool names match the strix tool registry. Failures of any single
 # tool are isolated — the prepass logs and continues with the rest.
-def _code_kwargs(target_value: str, workspace_path: str) -> dict[str, Any]:
+#
+# Kwarg-builder signature: `(target_value, workspace_path, tool_name)`.
+# Builders inspect the tool's `sandbox_execution` registration to pick
+# the right filesystem path: tools that run on the host (semgrep, trivy,
+# osv-scanner, gitleaks via scan_sast/scan_sca/scan_iac) need the HOST
+# path (`target_value`); tools that run inside the sandbox container
+# (secrets_scan, scan_container_image, etc.) need the SANDBOX path
+# (`workspace_path` — `/workspace/...`).
+#
+# Without this distinction the prepass passed `/workspace/src` to
+# host-running tools, which immediately errored "not a directory".
+def _code_kwargs(target_value: str, workspace_path: str, tool_name: str) -> dict[str, Any]:
     """Kwargs for code-target anchor tools (scan_sast,
     scan_sca_lockfiles, scan_iac, secrets_scan). All take
-    `repo_path` pointing at the source tree."""
-    # Prefer workspace_path inside the sandbox; fall back to the
-    # raw target_value (host path) for native-execution runs.
-    return {"repo_path": workspace_path or target_value}
+    `repo_path` pointing at the source tree — but which path
+    depends on whether the tool executes on host or in sandbox."""
+    try:
+        from strix.tools.registry import should_execute_in_sandbox
+        in_sandbox = should_execute_in_sandbox(tool_name)
+    except Exception:  # noqa: BLE001
+        in_sandbox = False
+    # Sandbox-running tool → workspace_path (visible inside container).
+    # Host-running tool → host path (target_value, what the local
+    # subprocess can actually open).
+    if in_sandbox and workspace_path:
+        return {"repo_path": workspace_path}
+    return {"repo_path": target_value}
 
 
-def _api_url_kwargs(target_value: str, workspace_path: str) -> dict[str, Any]:
+def _api_url_kwargs(target_value: str, workspace_path: str, tool_name: str) -> dict[str, Any]:
     """Kwargs for API/web-target anchor tools (scan_nuclei_templates,
     jwt_audit, scan_api_bola, etc.). All take `url`."""
     return {"url": target_value}
 
 
 def _api_url_with_severity_kwargs(
-    target_value: str, workspace_path: str,
+    target_value: str, workspace_path: str, tool_name: str,
 ) -> dict[str, Any]:
     """nuclei scans with cve tag + high/critical severity gate."""
     return {
@@ -99,7 +119,7 @@ def _api_url_with_severity_kwargs(
     }
 
 
-def _container_kwargs(target_value: str, workspace_path: str) -> dict[str, Any]:
+def _container_kwargs(target_value: str, workspace_path: str, tool_name: str) -> dict[str, Any]:
     """Kwargs for container_image scan."""
     return {"image_ref": target_value}
 
@@ -293,16 +313,32 @@ async def _run_one_tool(
         elapsed = _t.monotonic() - start
         count = _count_findings(raw)
         # The strix SpecialistResult includes a `status` field —
-        # surface that into our ToolResult shape.
+        # surface that into our ToolResult shape, AND extract any
+        # reason field the wrapper used to explain a non-ok status.
+        # Without this, status="error" results show up downstream with
+        # an empty error_reason and the operator can't see why.
         status_str = "ok"
-        if isinstance(raw, dict) and raw.get("status"):
-            status_str = str(raw["status"])
+        error_reason = None
+        if isinstance(raw, dict):
+            if raw.get("status"):
+                status_str = str(raw["status"])
+            for k in ("error_reason", "reason", "error", "hint", "message"):
+                v = raw.get(k)
+                if v:
+                    error_reason = str(v)[:300]
+                    break
         elif hasattr(raw, "status") and raw.status:
             status_str = str(raw.status)
+            for k in ("error_reason", "reason", "error", "hint", "message"):
+                v = getattr(raw, k, None)
+                if v:
+                    error_reason = str(v)[:300]
+                    break
         return ToolResult(
             tool_name=tool_name,
             status=status_str,
             findings_count=count,
+            error_reason=error_reason,
             wall_time_s=elapsed,
             raw_result=raw,
         )
@@ -378,7 +414,7 @@ async def run_oss_anchor_prepass(
 
     for tool_name, kwarg_builder in anchors:
         summary.tools_run.append(tool_name)
-        kwargs = kwarg_builder(target_value, workspace_path)
+        kwargs = kwarg_builder(target_value, workspace_path, tool_name)
         result = await _run_one_tool(
             tool_name, kwargs,
             agent_state=agent_state, timeout_s=timeout_s,
