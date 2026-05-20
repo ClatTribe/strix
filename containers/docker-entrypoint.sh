@@ -9,6 +9,49 @@ if [ ! -f /app/certs/ca.p12 ]; then
   exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# Lazy-init scanner data (Phase 1 / A4)
+# ---------------------------------------------------------------------------
+#
+# Nuclei templates, trivy vuln DB, and grype DB are no longer baked into the
+# image at build time — they go stale within days and shed ~300 MB from the
+# image. The wrapper's recommended setup is to mount /var/strix-cache from
+# a host volume and refresh it nightly via cron, in which case the checks
+# below see existing data and skip the download.
+#
+# When no volume is mounted (operator-direct `strix` CLI invocation), the
+# first scan in a fresh container pays a 30-60 s init cost. Subsequent
+# tools in the same container reuse the cached data. The wall-clock hit
+# only happens once per container lifetime.
+#
+# Kill switch: `STRIX_SKIP_CACHE_INIT=1` disables all three fetches (useful
+# for air-gapped runs, CI tests, or when a custom cache layout is wired in).
+# ---------------------------------------------------------------------------
+
+if [ "${STRIX_SKIP_CACHE_INIT:-0}" != "1" ]; then
+  NUCLEI_TEMPLATES_DIR="${HOME}/nuclei-templates"
+  if [ ! -d "$NUCLEI_TEMPLATES_DIR" ] || [ -z "$(ls -A "$NUCLEI_TEMPLATES_DIR" 2>/dev/null)" ]; then
+    echo "Lazy-init: fetching nuclei templates (one-time, ~30s)..."
+    nuclei -update-templates -silent 2>&1 | tail -3 || \
+      echo "WARNING: nuclei template fetch failed; signature scans will be empty."
+  fi
+
+  TRIVY_DB_PATH="${HOME}/.cache/trivy/db/trivy.db"
+  if [ ! -f "$TRIVY_DB_PATH" ]; then
+    echo "Lazy-init: fetching trivy vuln DB (one-time, ~10s)..."
+    trivy image --download-db-only --quiet 2>&1 | tail -3 || \
+      echo "WARNING: trivy DB fetch failed; container CVE scans may be slow or empty."
+  fi
+
+  GRYPE_DB_DIR="${HOME}/.cache/grype/db"
+  if [ ! -d "$GRYPE_DB_DIR" ] || [ -z "$(ls -A "$GRYPE_DB_DIR" 2>/dev/null)" ]; then
+    echo "Lazy-init: fetching grype vuln DB (one-time, ~10s)..."
+    grype db update 2>&1 | tail -3 || \
+      echo "WARNING: grype DB fetch failed; reachability-filtered SCA may be incomplete."
+  fi
+fi
+
+
 caido-cli --listen 0.0.0.0:${CAIDO_PORT} \
           --allow-guests \
           --no-logging \
