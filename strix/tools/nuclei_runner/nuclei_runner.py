@@ -360,7 +360,7 @@ def _emit_finding(
     category="nuclei-runner",
     llm=False,
     default_budget={"cost_usd": 0.0, "max_wall_seconds": 600},
-    sandbox_execution=False,
+    sandbox_execution=True,
     provenance="framework",
     mitre_techniques=["T1190", "T1592"],
 )

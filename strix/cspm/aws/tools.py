@@ -97,7 +97,7 @@ def _emit_finding(*, finding, account_id: str | None) -> str | None:
     category="cspm-aws-specialist",
     llm=False,
     default_budget={"cost_usd": 0.0, "max_wall_seconds": 600},
-    sandbox_execution=False,
+    sandbox_execution=True,
     provenance="framework",
     mitre_techniques=["T1190", "T1078.004"],
 )

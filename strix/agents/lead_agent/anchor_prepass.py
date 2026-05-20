@@ -75,29 +75,18 @@ logger = logging.getLogger(__name__)
 # tool are isolated — the prepass logs and continues with the rest.
 #
 # Kwarg-builder signature: `(target_value, workspace_path, tool_name)`.
-# Builders inspect the tool's `sandbox_execution` registration to pick
-# the right filesystem path: tools that run on the host (semgrep, trivy,
-# osv-scanner, gitleaks via scan_sast/scan_sca/scan_iac) need the HOST
-# path (`target_value`); tools that run inside the sandbox container
-# (secrets_scan, scan_container_image, etc.) need the SANDBOX path
-# (`workspace_path` — `/workspace/...`).
-#
-# Without this distinction the prepass passed `/workspace/src` to
-# host-running tools, which immediately errored "not a directory".
+# All code-shape anchor tools (scan_sast, scan_sca_lockfiles, scan_iac,
+# secrets_scan) now execute inside the sandbox container, so they always
+# receive the in-sandbox workspace path (`/workspace/<subdir>`). The
+# `target_value` fallback only fires when the caller failed to mount
+# a workspace subdir (operator-direct CLI invocation against an ad-hoc
+# path) — left in place so the tool returns a clean "not a directory"
+# error instead of a NoneType crash.
 def _code_kwargs(target_value: str, workspace_path: str, tool_name: str) -> dict[str, Any]:
     """Kwargs for code-target anchor tools (scan_sast,
-    scan_sca_lockfiles, scan_iac, secrets_scan). All take
-    `repo_path` pointing at the source tree — but which path
-    depends on whether the tool executes on host or in sandbox."""
-    try:
-        from strix.tools.registry import should_execute_in_sandbox
-        in_sandbox = should_execute_in_sandbox(tool_name)
-    except Exception:  # noqa: BLE001
-        in_sandbox = False
-    # Sandbox-running tool → workspace_path (visible inside container).
-    # Host-running tool → host path (target_value, what the local
-    # subprocess can actually open).
-    if in_sandbox and workspace_path:
+    scan_sca_lockfiles, scan_iac, secrets_scan). All take `repo_path`
+    pointing at the source tree inside the sandbox container."""
+    if workspace_path:
         return {"repo_path": workspace_path}
     return {"repo_path": target_value}
 
