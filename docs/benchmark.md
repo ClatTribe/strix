@@ -91,3 +91,53 @@ When a container fixture lands, the strix delta will be in **MOAK feed-trigger**
 Recall data from the post-PR #364 (OSS-first prepass) runs lands in `benchmarks/per_target/baseline/asset_type_quick_*_summary.md` as they complete. This document tracks the bar; the summary tracks the score.
 
 Update cadence: every time a new architectural PR lands that changes detection-layer behaviour, re-run the per-asset-type bench and update both this doc's `Top competitor recall` (if industry numbers shift) and the linked summary file.
+
+---
+
+## L1-only measurements (2026-05-20)
+
+The OSS-first pre-pass (PRs #364–#369) gives a deterministic L1-only recall per fixture, no LLM cost. Use `benchmarks/per_target/bench_l1_only.py` to reproduce.
+
+| Fixture | target_type | Competitor bar | **Strix L1** | matched | Notes |
+|---|---|---|---:|---|---|
+| code/flask-vuln | local_code | Semgrep p/python: 80-100% | **0.700** | 7/10 | At semgrep parity. Missing 3: `hardcoded-secret` (needs secrets_scan in real sandbox), `idor-users` (SAST can't), `path-traversal-files` (semgrep coverage gap on `os.path.join(BASE_DIR, request.args[...])`). |
+| api/vampi | api | Burp Pro: 50-70% / ZAP: 25-40% | **0.125** | 1/8 | Caught `rate-limit-login` via per-endpoint `scan_api_rate_limit` (PR #368). 7 missing must_finds need L2 prereqs (cross-session auth for BOLA/BFLA/MA, JWT extraction, parameter discovery for SQLi). |
+| web+code/vibe-app | web+code | Snyk + DAST: 50-70% | 0.000 | 0/5 | Phase-2 routing requires `openapi_spec_ingest` to emit endpoints, but web apps typically have no OpenAPI spec. Needs `webapp_recon_pipeline` (crawl-based endpoint emission) + same per-endpoint routing as vampi. Iter-7 work. |
+| ip/vulnerable-services | ip_address | nmap+nuclei+Tenable: 80-95% | 0.000 | 0/3 | Empty L1 anchor list for `ip_address`. Needs nmap → service discovery → per-service nuclei + tls_audit. Iter-6 work. |
+| web/juiceshop | web_application | Burp Pro Active: 30-50% / ZAP: 15-25% | 0.000 | 0/9 | Same as vibe-app — needs crawl-based endpoint discovery. Many must_finds are business-logic-only catchable by L2 reasoning. |
+
+### Iteration log
+
+| PR | What | flask-vuln Δ | vampi Δ |
+|---|---|---:|---:|
+| #364 | OSS-first prepass (`StrixAgent.execute_scan` calls `run_oss_anchor_prepass` before lead loop) | 0.0 → 0.0 (path bug) | 0.0 → 0.0 |
+| #365 | Route host vs sandbox paths correctly to anchor tools (was passing `/workspace/src` to host-executing semgrep) | 0.0 → **0.5** | 0.0 |
+| #366 | API anchor kwarg correctness v1 (fingerprint_tech_stack `target=` not `url=`, drop BOLA/BFLA/MA/jwt_audit from v1) | 0.5 | 0.0 (still no per-endpoint) |
+| #367 | scan_sast ruleset expansion (+`p/security-audit`) + CWE-918/939 → ssrf mapping | 0.5 → **0.7** | 0.0 |
+| #368 | Phase-2 dependent-tool stage: per-endpoint `scan_api_rate_limit` after `openapi_spec_ingest` | 0.7 | 0.0 → **0.125** (1/8) |
+| #369 | L1-only bench harness + scoring aliases (`api_rate_limit` → `rate_limit`, etc.) + host-URL translation | 0.7 (validated) | 0.125 (validated) |
+
+### What's still gap-to-bar
+
+**flask-vuln (gap: 0.10 from 80% bar)**
+- `hardcoded-secret` — needs `secrets_scan` to work outside the sandbox (gitleaks+trufflehog), or a semgrep rule for `os.environ['SECRET'] = "..."` pattern
+- `idor-users` — fundamentally a runtime authz concept; SAST can't reliably catch it
+- `path-traversal-files` — no semgrep registry rule catches `os.path.join(USER_FILES_DIR, request.args[...])`. Custom strix rule would close this.
+
+**vampi (gap: 0.375 from 50% bar)**
+- BOLA / BFLA / mass_assignment — need `owner_ids: dict` (cross-session resource enumeration). L2 work after auth-flow specialist produces credentials.
+- `jwt-none-alg` / `jwt-weak-secret` — `jwt_audit` needs an extracted JWT token. L2 work.
+- `sqli-books` — `scan_sqli` runs but returns `partial` because no params discoverable from bare URL; needs the openapi endpoints' param schema feeding into scan_sqli.
+- `openapi-spec-exposed` — `openapi_spec_ingest` ingests the spec but doesn't currently emit a finding for the "spec is unauthenticated-exposed" case. Either: (a) emit finding when `spec_url` was accessible without auth, OR (b) custom nuclei template.
+
+**ip/vulnerable-services (gap: 0.80 from 80% bar)**
+- `ip_address` has empty L1 anchor list. Need: nmap → service-discovery → per-service nuclei + tls_audit + protocol-specific probes (Redis no-auth, nginx version disclosure). Iter-6 work.
+
+**vibe-app + juiceshop (gap: 0.40-0.50 from competitor bar)**
+- `web_application` anchors rely on `openapi_spec_ingest` for endpoint emission. Web apps typically have no spec. Need `webapp_recon_pipeline` (crawl-based) integrated into phase-2 routing. Iter-7 work.
+
+### Where strix's L1 architecture is solid
+
+flask-vuln demonstrates the L1-first architecture works as designed for local_code targets: 7/10 must_finds caught deterministically in ~5 seconds with no LLM cost. The remaining 3 are inherent SAST limitations or need a real sandbox for secrets_scan. **At semgrep parity, which is the competitor floor for code targets.**
+
+For API/web/IP, the L1 layer has structural completeness gaps. Closing them needs either (a) more sophisticated phase-2 routing (crawl-based endpoint emission, JWT extraction, auth-flow prereqs) or (b) the L2 lead's reasoning. Iter-6+ tracks closing (a) in deterministic L1 where possible.
