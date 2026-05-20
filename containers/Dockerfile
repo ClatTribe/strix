@@ -51,7 +51,7 @@
 # CGO=1 + libpcap headers to build the SYN scanner; we install libpcap-dev
 # only in this stage and ship only the resulting static-stripped binaries.
 
-FROM golang:1.22-bookworm AS go-builder
+FROM golang:1.25-bookworm AS go-builder
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -176,6 +176,64 @@ RUN mkdir -p "$TS_PARSER_DIR" \
  && find "$TS_PARSER_DIR" -name '.git' -type d -exec rm -rf {} + 2>/dev/null || true
 
 # =============================================================================
+# Stage: venv-builder
+# =============================================================================
+#
+# Builds the strix Python venv with all transitive deps that need source
+# compilation. Several pinned deps (libcst via openhands-aci, uvloop via
+# litellm[proxy], cryptography, etc.) ship without manylinux_aarch64
+# wheels for cp312 and fall back to source build, which pulls in Rust +
+# autotools + ssl/ffi headers. We confine that toolchain to this stage
+# and COPY only the resulting `/app/.venv` into runtime.
+#
+# Two important env knobs:
+#   - UV_LINK_MODE=copy makes the venv self-contained (no symlinks into
+#     /root/.cache that would break across stages).
+#   - PLAYWRIGHT_BROWSERS_PATH puts the chromium download under a known
+#     /opt path that we then relocate into the runtime user's cache dir.
+
+FROM python:3.12-slim-bookworm AS venv-builder
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates curl git \
+        build-essential gcc g++ make \
+        autoconf automake libtool pkg-config \
+        rustc cargo \
+        libssl-dev libffi-dev libpcap-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
+
+WORKDIR /app
+
+ENV UV_LINK_MODE=copy \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers \
+    PIP_NO_CACHE_DIR=1
+
+COPY pyproject.toml uv.lock ./
+RUN echo "# stub" > README.md \
+ && mkdir -p strix \
+ && touch strix/__init__.py
+
+# Resolves uv.lock against the system python:3.12 (no auto-download of a
+# managed Python — keeps the venv linked to /usr/local/bin/python3 which
+# the runtime stage (also python:3.12-slim-bookworm) will provide.
+RUN uv sync --frozen --no-dev --extra sandbox
+
+# Pull jwt_tool's small Python deps into the same venv so the runtime
+# doesn't need uv at all. jwt_tool itself is a shell-invokable script;
+# only its dependencies (pyjwt, termcolor, requests, etc.) are needed
+# from the venv side.
+RUN git clone --depth 1 https://github.com/ticarpi/jwt_tool.git /tmp/jwt_tool \
+ && uv pip install --no-cache-dir -r /tmp/jwt_tool/requirements.txt \
+ && rm -rf /tmp/jwt_tool
+
+# Playwright chromium (~300 MB). Installed under /opt/playwright-browsers
+# so the runtime stage can drop it into /home/pentester/.cache/ms-playwright.
+RUN /app/.venv/bin/python -m playwright install chromium
+
+# =============================================================================
 # Stage: ca-builder
 # =============================================================================
 #
@@ -210,8 +268,14 @@ RUN openssl ecparam -name prime256v1 -genkey -noout -out ca.key \
 # =============================================================================
 # Stage: runtime
 # =============================================================================
+#
+# Base is python:3.12-slim-bookworm rather than plain debian:bookworm-slim
+# because the venv built in venv-builder targets cpython 3.12, and Debian
+# bookworm's apt-installed python is 3.11. python:3.12-slim-bookworm is
+# debian:bookworm-slim + the cpython 3.12 install — same Debian
+# everywhere, just with the matching Python.
 
-FROM debian:bookworm-slim AS runtime
+FROM python:3.12-slim-bookworm AS runtime
 
 LABEL description="AI Agent Penetration Testing Environment with Comprehensive Automated Tools"
 
@@ -243,7 +307,9 @@ EOF
 #   - gcc + libc6-dev for tree-sitter's lazy parser.c compile path
 #     (~80 MB, vs ~600 MB if we kept full build-essential)
 #   - net / dns / shell utilities used by both the agent and tools
-#   - debian-main security tools (nmap, sqlmap, zaproxy)
+#   - debian-main security tools (nmap, sqlmap). ZAP is NOT in Debian
+#     (Kali-only); installed below via the GitHub release tarball.
+#   - default-jre-headless powers ZAP's Java runtime
 #   - libcap2-bin for setcap; libnss3-tools for certutil
 #   - chromium runtime .so deps (for playwright-installed chrome)
 #   - fonts (chrome rendering + screenshot tooling)
@@ -252,14 +318,13 @@ RUN apt-get update \
         ca-certificates curl wget git sudo \
         unzip tar vim nano less \
         apt-transport-https gnupg \
-        libpcap0.8 libssl3 \
-        python3 python3-venv pipx \
+        libpcap0.8 libssl3 libffi8 \
         nodejs \
         gcc libc6-dev \
         net-tools dnsutils whois iproute2 iputils-ping netcat-traditional \
         jq parallel ripgrep procps htop tmux gdb \
         nmap ncat ndiff sqlmap \
-        zaproxy \
+        default-jre-headless \
         libcap2-bin libnss3-tools \
         libnss3 libnspr4 libdbus-1-3 \
         libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libatspi2.0-0 \
@@ -270,6 +335,20 @@ RUN apt-get update \
  && apt-get autoremove -y \
  && apt-get autoclean \
  && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# OWASP ZAP — not packaged in Debian (Kali-only). Download the Linux
+# tarball from the upstream GitHub release; the Java app is arch-neutral
+# so the same tarball serves amd64 + arm64. Adds ~300 MB to the runtime
+# stage; the JRE installed above adds ~150 MB. Same footprint as the
+# pre-Phase-1 Kali apt install of zaproxy.
+ARG ZAP_VERSION=2.17.0
+RUN curl -fsSLo /tmp/zap.tar.gz \
+        "https://github.com/zaproxy/zaproxy/releases/download/v${ZAP_VERSION}/ZAP_${ZAP_VERSION}_Linux.tar.gz" \
+ && mkdir -p /opt/zap \
+ && tar -xzf /tmp/zap.tar.gz -C /opt/zap --strip-components=1 \
+ && rm /tmp/zap.tar.gz \
+ && ln -sf /opt/zap/zap.sh /usr/local/bin/zaproxy \
+ && ln -sf /opt/zap/zap.sh /usr/local/bin/zap.sh
 
 # nmap needs raw-socket + admin caps for SYN scans / OS detection.
 RUN setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip $(which nmap)
@@ -298,22 +377,24 @@ RUN useradd -m -s /bin/bash pentester \
 # Go binaries → /usr/local/bin (system path so all users see them).
 COPY --from=go-builder /go/bin/* /usr/local/bin/
 
-# npm globals — node-builder lays them out at /usr/lib/node_modules; we
-# copy that tree across and re-create the launcher symlinks under
-# /usr/local/bin. NOT copying /usr/local/bin from the node-builder image
-# wholesale because that would clobber `node` / `npm` from the runtime
-# apt package; we pick exactly the launchers each package installs.
-COPY --from=node-builder /usr/lib/node_modules /usr/lib/node_modules
+# npm globals — node-builder (official node:20 image) lays them out at
+# /usr/local/lib/node_modules. We copy that tree across to /usr/local/lib
+# so the runtime's debian-packaged `nodejs` (which looks at /usr/lib and
+# /usr/local/lib) can resolve them; then re-create launcher symlinks
+# under /usr/local/bin. NOT copying /usr/local/bin from the node-builder
+# image wholesale because that would clobber `node` / `npm` from the
+# runtime apt package; we pick exactly the launchers each package installs.
+COPY --from=node-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN set -eux; \
-    ln -sf /usr/lib/node_modules/retire/lib/retire.js          /usr/local/bin/retire    || true; \
-    ln -sf /usr/lib/node_modules/eslint/bin/eslint.js          /usr/local/bin/eslint    || true; \
-    ln -sf /usr/lib/node_modules/js-beautify/js/bin/js-beautify.js   /usr/local/bin/js-beautify    || true; \
-    ln -sf /usr/lib/node_modules/js-beautify/js/bin/css-beautify.js  /usr/local/bin/css-beautify   || true; \
-    ln -sf /usr/lib/node_modules/js-beautify/js/bin/html-beautify.js /usr/local/bin/html-beautify  || true; \
-    ln -sf /usr/lib/node_modules/jshint/bin/jshint             /usr/local/bin/jshint    || true; \
-    ln -sf /usr/lib/node_modules/tree-sitter-cli/cli.js        /usr/local/bin/tree-sitter || true; \
-    if [ -d /usr/lib/node_modules/@ast-grep/cli ]; then \
-        ASG_BIN="$(find /usr/lib/node_modules/@ast-grep/cli -maxdepth 2 -type f -name 'ast-grep' | head -1)"; \
+    ln -sf /usr/local/lib/node_modules/retire/lib/retire.js              /usr/local/bin/retire        || true; \
+    ln -sf /usr/local/lib/node_modules/eslint/bin/eslint.js              /usr/local/bin/eslint        || true; \
+    ln -sf /usr/local/lib/node_modules/js-beautify/js/bin/js-beautify.js  /usr/local/bin/js-beautify   || true; \
+    ln -sf /usr/local/lib/node_modules/js-beautify/js/bin/css-beautify.js /usr/local/bin/css-beautify  || true; \
+    ln -sf /usr/local/lib/node_modules/js-beautify/js/bin/html-beautify.js /usr/local/bin/html-beautify || true; \
+    ln -sf /usr/local/lib/node_modules/jshint/bin/jshint                 /usr/local/bin/jshint        || true; \
+    ln -sf /usr/local/lib/node_modules/tree-sitter-cli/cli.js            /usr/local/bin/tree-sitter   || true; \
+    if [ -d /usr/local/lib/node_modules/@ast-grep/cli ]; then \
+        ASG_BIN="$(find /usr/local/lib/node_modules/@ast-grep/cli -maxdepth 3 -type f -name 'ast-grep' | head -1)"; \
         if [ -n "${ASG_BIN}" ]; then \
             ln -sf "${ASG_BIN}" /usr/local/bin/ast-grep; \
             ln -sf "${ASG_BIN}" /usr/local/bin/sg; \
@@ -324,10 +405,10 @@ RUN set -eux; \
 COPY --from=py-builder /opt/pipx /opt/pipx
 ENV PATH="/opt/pipx/bin:${PATH}"
 
-# Static clones (tools shipped as raw scripts).
-COPY --from=clone-builder /opt/clones /home/pentester/tools
-COPY --from=clone-builder /opt/tree-sitter /home/pentester/.tree-sitter
-RUN chown -R pentester:pentester /home/pentester/tools /home/pentester/.tree-sitter
+# Static clones (tools shipped as raw scripts). `--chown` set during COPY
+# to skip the follow-up `RUN chown` layer-duplication trap.
+COPY --from=clone-builder --chown=pentester:pentester /opt/clones /home/pentester/tools
+COPY --from=clone-builder --chown=pentester:pentester /opt/tree-sitter /home/pentester/.tree-sitter
 
 # tree-sitter parser-directory config (matches the prior Kali-era setup so
 # `tree-sitter parse foo.py` finds the cloned grammars on first invocation).
@@ -428,18 +509,29 @@ WORKDIR /app
 RUN mkdir -p /workspace \
  && chown -R pentester:pentester /workspace /app
 
+# Pre-built venv from venv-builder. Self-contained (UV_LINK_MODE=copy in
+# the builder) and linked against python:3.12-slim-bookworm's
+# /usr/local/bin/python3, which is also our base here — so the
+# /app/.venv/bin/python symlink resolves cleanly.
+#
+# `--chown=pentester:pentester` sets ownership during the COPY itself
+# rather than spawning a follow-up RUN chown, which would duplicate every
+# file into a fresh layer (a 2.3 GB chown layer was observed on the first
+# build of this Dockerfile — same files written twice in OverlayFS).
+COPY --from=venv-builder --chown=pentester:pentester /app/.venv /app/.venv
+
+# Playwright chromium pre-downloaded in venv-builder under
+# /opt/playwright-browsers; relocate to the runtime user's standard
+# cache path so playwright finds it without a re-download.
+COPY --from=venv-builder --chown=pentester:pentester /opt/playwright-browsers /home/pentester/.cache/ms-playwright
+
+# Stub pyproject.toml / uv.lock + the editable-install marker files so any
+# `python -m strix` invocation that walks back through the project root
+# still resolves. The full source is COPY'd below.
 COPY pyproject.toml uv.lock ./
 RUN echo "# Sandbox Environment" > README.md \
  && mkdir -p strix \
  && touch strix/__init__.py
-
-USER pentester
-RUN uv sync --frozen --no-dev --extra sandbox \
- && uv pip install --no-cache-dir -r /home/pentester/tools/jwt_tool/requirements.txt
-
-# Playwright chromium download (~300 MB). Wired through the proxy via the
-# Caido CA cert installed above, so MITM works out of the box.
-RUN /app/.venv/bin/python -m playwright install chromium
 
 # Copy the full strix package source into /app/strix/. Required because
 # strix/tools/__init__.py + strix/runtime/* import from many strix.*
