@@ -1763,6 +1763,28 @@ async def _run_dependent_api_tools(
             )
         except Exception:  # noqa: BLE001
             pass
+        # iter-15: HTTP-port banner probe — catches Server-header
+        # version disclosure + X-Powered-By + autoindex on common
+        # upload paths. Originally added to the ip_address phase-2;
+        # extending to web/api phase-2 here so apache-version-
+        # disclosure and similar web-target signals are caught.
+        # Parse host+port out of target_value to fit probe_http_port's
+        # ip+port signature.
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(target_value)
+            host = parsed.hostname
+            port = parsed.port
+            if port is None:
+                port = 443 if parsed.scheme == "https" else 80
+            scheme = parsed.scheme or "http"
+            if host:
+                _probe_emissions.append(
+                    ("probe_http_port",
+                     probe_http_port(host, port, scheme=scheme))
+                )
+        except Exception:  # noqa: BLE001
+            pass
         # Item I: openapi-spec-exposure probe (needs spec_url from
         # openapi_spec_ingest)
         spec_url = None

@@ -5,14 +5,15 @@
 # expose authenticated lessons + the H2 console (when enabled in
 # the build) to anything routable to this host.
 #
-# Pin: webgoat/webgoat:2023.8 — stable tag that's been on Docker
-# Hub for >12 months. Bumping the tag may shift which lessons
-# (and thus which detection signals) the L1 surface exposes; re-
-# baseline after any version change.
+# Pin: webgoat/webgoat:latest — the project's published image
+# stream. The `2023.8` numeric tag does NOT exist on Docker Hub;
+# verified during iter-15 validation. Bumping the tag may shift
+# which lessons (and thus which detection signals) the L1 surface
+# exposes; re-baseline after any version change.
 
 services:
   webgoat:
-    image: webgoat/webgoat:2023.8
+    image: webgoat/webgoat:latest
     container_name: bench-webgoat
     # 8082 host → 8080 container. Picked to avoid the typical 8080
     # conflict with juiceshop / other dev tools.
