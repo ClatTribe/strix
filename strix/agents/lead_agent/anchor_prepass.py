@@ -103,9 +103,25 @@ def _code_kwargs(target_value: str, workspace_path: str, tool_name: str) -> dict
 
 
 def _api_url_kwargs(target_value: str, workspace_path: str, tool_name: str) -> dict[str, Any]:
-    """Kwargs for API/web-target anchor tools (scan_nuclei_templates,
-    jwt_audit, scan_api_bola, etc.). All take `url`."""
+    """Kwargs for API/web-target anchor tools that accept a plain
+    `url` parameter (scan_nuclei_templates / scan_sqli / scan_xxe /
+    scan_ssrf / scan_ssti / scan_path_traversal / scan_nosql_injection /
+    scan_cmd_injection / scan_api_rate_limit / open_redirect_check /
+    csrf_check / cors_deep_check / scan_xss / dom_xss_static_probe /
+    scan_cache_deception / scan_websocket_auth / scan_prototype_pollution
+    / scan_secrets_in_response / http_security_headers_audit / tls_audit).
+
+    NOT used for tools that take `target=` (fingerprint_tech_stack,
+    openapi_spec_ingest) — they have their own builder."""
     return {"url": target_value}
+
+
+def _api_target_kwargs(target_value: str, workspace_path: str, tool_name: str) -> dict[str, Any]:
+    """Kwargs for tools that use `target=` rather than `url=`
+    (fingerprint_tech_stack, openapi_spec_ingest). Caught live on
+    2026-05-20: fingerprint_tech_stack raised TypeError when passed
+    `url`."""
+    return {"target": target_value}
 
 
 def _api_url_with_severity_kwargs(
@@ -148,19 +164,23 @@ _ANCHORS_LOCAL_CODE: list[tuple[str, Any]] = [
 _ANCHORS_API: list[tuple[str, Any]] = [
     # 1. Tech-stack fingerprint — light HTTP probe to identify stack
     #    BEFORE the heavier signature scans target the right rule
-    #    subset. Also seeds the lead's understanding of the target.
-    ("fingerprint_tech_stack", _api_url_kwargs),
-    # 2. Signature corpus — nuclei templates for known CVEs in any
+    #    subset. Uses `target=` (not `url=`) — caught 2026-05-20.
+    ("fingerprint_tech_stack", _api_target_kwargs),
+    # 2. OpenAPI/Swagger spec discovery + ingest. Emits the
+    #    `endpoints` list that downstream OWASP API Top 10 specialists
+    #    (scan_api_bola/bfla/mass_assignment) consume. Without this
+    #    they CAN'T run from the prepass — they error on missing
+    #    endpoints kwarg.
+    ("openapi_spec_ingest", _api_target_kwargs),
+    # 3. Signature corpus — nuclei templates for known CVEs in any
     #    fingerprinted product. Highest known-CVE coverage.
     ("scan_nuclei_templates", _api_url_with_severity_kwargs),
-    # 3. OWASP API Top 10 deterministic specialists. Each is a
-    #    single-roundtrip-class probe with no LLM cost.
-    ("jwt_audit", _api_url_kwargs),
-    ("scan_api_bola", _api_url_kwargs),
-    ("scan_api_bfla", _api_url_kwargs),
-    ("scan_api_mass_assignment", _api_url_kwargs),
+    # 4. Rate-limit probe — single URL, no params needed.
     ("scan_api_rate_limit", _api_url_kwargs),
-    # 4. Injection class — deterministic probes for the top sinks.
+    # 5. URL-based injection scanners. These accept a bare URL and
+    #    auto-discover params (or report partial when no params).
+    #    They're best-effort in the prepass — the lead will follow
+    #    up with parameter-aware invocations when needed.
     ("scan_sqli", _api_url_kwargs),
     ("scan_xxe", _api_url_kwargs),
     ("scan_ssrf", _api_url_kwargs),
@@ -168,13 +188,22 @@ _ANCHORS_API: list[tuple[str, Any]] = [
     ("scan_path_traversal", _api_url_kwargs),
     ("scan_nosql_injection", _api_url_kwargs),
     ("scan_cmd_injection", _api_url_kwargs),
-    # 5. Misc deterministic checks.
+    # 6. Passive checks — single-URL probes that don't need params.
     ("scan_secrets_in_response", _api_url_kwargs),
     ("http_security_headers_audit", _api_url_kwargs),
     ("tls_audit", _api_url_kwargs),
     ("cors_deep_check", _api_url_kwargs),
     ("csrf_check", _api_url_kwargs),
     ("open_redirect_check", _api_url_kwargs),
+    # NOT in v1 of the API prepass (require prereqs the prepass
+    # doesn't yet wire):
+    #   * jwt_audit — needs a JWT token (out of scope for prepass;
+    #     the lead's L2 layer extracts JWTs from response captures
+    #     then invokes jwt_audit per token).
+    #   * scan_api_bola / scan_api_bfla / scan_api_mass_assignment —
+    #     need `endpoints=list[dict]` from openapi_spec_ingest's
+    #     emission. The lead picks these up from KG endpoints after
+    #     openapi_spec_ingest runs.
 ]
 
 _ANCHORS_WEB: list[tuple[str, Any]] = _ANCHORS_API + [

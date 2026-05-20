@@ -62,18 +62,45 @@ def test_repository_anchors_match_local_code() -> None:
     assert _ANCHORS_BY_TARGET_TYPE["repository"] == _ANCHORS_BY_TARGET_TYPE["local_code"]
 
 
-def test_api_anchors_include_full_owasp_api_top10() -> None:
-    """OWASP API Top 10 specialists MUST all be present — pinning
-    this catches regressions where someone trims the API anchor
-    sequence without thinking it through."""
+def test_api_anchors_include_v1_set() -> None:
+    """API anchor sequence v1 (2026-05-20 — post path-routing fix +
+    kwarg correction):
+      * Recon: fingerprint_tech_stack, openapi_spec_ingest
+      * Signature: scan_nuclei_templates
+      * Rate-limit: scan_api_rate_limit
+      * Injection class (URL-based, no prereqs): scan_sqli, scan_xxe,
+        scan_ssrf, scan_ssti, scan_path_traversal, scan_nosql_injection,
+        scan_cmd_injection
+      * Passive: scan_secrets_in_response, http_security_headers_audit,
+        tls_audit, cors_deep_check, csrf_check, open_redirect_check
+
+    NOT in v1 (require prereqs the prepass doesn't yet wire):
+      * jwt_audit — needs a JWT token (the lead's L2 layer extracts
+        tokens from response captures and invokes per-token)
+      * scan_api_bola / scan_api_bfla / scan_api_mass_assignment —
+        need `endpoints=list[dict]` from openapi_spec_ingest's KG
+        emission. The lead picks these up after the spec is ingested.
+    """
     names = {t[0] for t in _ANCHORS_BY_TARGET_TYPE["api"]}
-    required = {
-        "jwt_audit", "scan_api_bola", "scan_api_bfla",
-        "scan_api_mass_assignment", "scan_api_rate_limit",
-        "scan_nuclei_templates", "fingerprint_tech_stack",
+    required_v1 = {
+        "fingerprint_tech_stack",
+        "openapi_spec_ingest",
+        "scan_nuclei_templates",
+        "scan_api_rate_limit",
+        "scan_sqli", "scan_xxe", "scan_ssrf",
     }
-    missing = required - names
-    assert not missing, f"API anchor sequence missing: {missing}"
+    missing = required_v1 - names
+    assert not missing, f"API anchor v1 sequence missing: {missing}"
+    # Tools that need prereqs MUST NOT be in v1 — they would crash.
+    deferred_to_v2 = {
+        "jwt_audit",
+        "scan_api_bola", "scan_api_bfla", "scan_api_mass_assignment",
+    }
+    invalid = deferred_to_v2 & names
+    assert not invalid, (
+        f"API anchor v1 sequence MUST NOT include tools that need "
+        f"prereqs (would TypeError on missing kwargs): {invalid}"
+    )
 
 
 def test_web_application_extends_api_with_dom_specialists() -> None:
