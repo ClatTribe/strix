@@ -199,4 +199,94 @@ class StrixAgent(BaseAgent):
         if user_instructions:
             task_description += f"\n\nSpecial instructions: {user_instructions}"
 
+        # OSS-first L1 detection pre-pass (2026-05-20 proposal).
+        #
+        # Run the deterministic OSS anchor scans (semgrep / trivy / grype /
+        # osv-scanner / checkov / nuclei / OWASP API specialists / ...) for
+        # each target BEFORE handing control to the LLM-driven lead loop.
+        # Findings are emitted into the agent state's finding store at L1
+        # invocation time; a structured summary is rendered into the
+        # lead's initial task description so the lead's first LLM call
+        # sees the L1 findings ALREADY-PRESENT and its job collapses to
+        # L2 ranking / dedup / FP demote / novel-vuln tagging.
+        #
+        # Why this matters: live measurement on 2026-05-20 showed the
+        # LLM-driven path failed to invoke the OSS anchors AT ALL on
+        # flask-vuln (22 deterministic tool calls in 99 min, NOT ONE of
+        # which was scan_sast / scan_sca_lockfiles / scan_iac). Vanilla
+        # `semgrep` finds 15 vulns in 3 sec at $0 cost. The LLM as a
+        # gatekeeper for deterministic tool selection is the wrong
+        # architecture — quick / standard / deep modes all benefit
+        # from running the OSS layer first.
+        #
+        # Kill switch: `STRIX_OSS_PREPASS_DISABLED=1` skips this entirely.
+        try:
+            from strix.agents.lead_agent.anchor_prepass import (  # noqa: PLC0415
+                run_oss_anchor_prepass,
+                format_summary_for_lead_context,
+                is_disabled as prepass_is_disabled,
+            )
+        except Exception:  # noqa: BLE001
+            run_oss_anchor_prepass = None  # type: ignore[assignment]
+            format_summary_for_lead_context = None  # type: ignore[assignment]
+            prepass_is_disabled = lambda: True  # noqa: E731
+
+        if (
+            run_oss_anchor_prepass is not None
+            and not prepass_is_disabled()
+        ):
+            prepass_blocks: list[str] = []
+            prepass_summaries: list[dict[str, Any]] = []
+            agent_state = getattr(self, "state", None)
+            for target in targets:
+                target_type = target.get("type", "")
+                details = target.get("details", {}) or {}
+                # Resolve the value the anchor tools want to scan.
+                if target_type == "repository":
+                    value = details.get("target_repo", "")
+                elif target_type == "local_code":
+                    value = details.get("target_path", "")
+                elif target_type in ("web_application", "api"):
+                    value = details.get("target_url", "")
+                elif target_type == "ip_address":
+                    value = details.get("target_ip", "")
+                elif target_type == "container_image":
+                    value = details.get("target_image", "")
+                else:
+                    value = target.get("original", "")
+                workspace_subdir = details.get("workspace_subdir") or ""
+                workspace_path = (
+                    f"/workspace/{workspace_subdir}" if workspace_subdir else ""
+                )
+                try:
+                    summary = await run_oss_anchor_prepass(
+                        target_type=target_type,
+                        target_value=value,
+                        workspace_path=workspace_path,
+                        agent_state=agent_state,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    import logging as _lg
+                    _lg.getLogger(__name__).warning(
+                        "OSS prepass raised on %s/%s: %s — falling "
+                        "through to LLM-driven path", target_type,
+                        value, e,
+                    )
+                    continue
+                prepass_summaries.append(summary.to_dict())
+                block = format_summary_for_lead_context(summary)
+                if block:
+                    prepass_blocks.append(block)
+            # Stash on the agent so telemetry can emit it into
+            # simulation_run.json's `oss_anchor_prepass` block.
+            if hasattr(self, "state") and self.state is not None:
+                try:
+                    self.state.oss_prepass_summaries = prepass_summaries  # type: ignore[attr-defined]
+                except Exception:  # noqa: BLE001
+                    pass
+            if prepass_blocks:
+                task_description = (
+                    "\n".join(prepass_blocks) + "\n\n" + task_description
+                )
+
         return await self.agent_loop(task=task_description)
