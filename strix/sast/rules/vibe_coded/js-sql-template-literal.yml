@@ -1,0 +1,48 @@
+# JavaScript-only SQLi rule. Lives in its own file (not in the
+# multi-language sql-string-concat.yml) because that rule has a
+# pre-existing parse error: it mixes JS / Python f-string patterns
+# in a single `languages: [javascript, typescript, python]` rule
+# and semgrep tries to parse the Python f-string syntax as JS,
+# erroring on the whole rule. Splitting per-language avoids the
+# cross-syntax breakage.
+#
+# Added 2026-05-21 after measuring sast-vibe: the existing nested-
+# metavariable patterns (`${$REQ.params.$X}`) did NOT match
+# `${req.params.id}` in `db.query(\`SELECT ... ${req.params.id}\`)`
+# across recent semgrep versions. This file uses a single $X
+# placeholder + metavariable-regex on its textual form — works
+# robustly.
+
+rules:
+  - id: strix-js-sql-template-literal-user-input
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: >-
+      SQL query built via template literal with what looks like
+      a request parameter (`req.body.x` / `req.params.x` /
+      `req.query.x` / similar). Classic SQL injection — string
+      interpolation does no quoting / escaping. Use parameterised
+      queries: `$1, $2` placeholders for `pg`, `?` for `sqlite3`,
+      or an ORM's safe builder.
+    metadata:
+      cwe: "CWE-89"
+      owasp: "A03:2021"
+      category: sqli
+      confidence: HIGH
+      vibe_pattern: true
+    pattern-either:
+      - patterns:
+          - pattern: $DB.query(`...${$X}...`)
+          - metavariable-regex:
+              metavariable: $X
+              regex: '.*(req|request|ctx|context).*(body|query|params|param|headers|cookies).*'
+      - patterns:
+          - pattern: $DB.execute(`...${$X}...`)
+          - metavariable-regex:
+              metavariable: $X
+              regex: '.*(req|request|ctx|context).*(body|query|params|param|headers|cookies).*'
+      - patterns:
+          - pattern: $DB.raw(`...${$X}...`)
+          - metavariable-regex:
+              metavariable: $X
+              regex: '.*(req|request|ctx|context).*(body|query|params|param|headers|cookies).*'

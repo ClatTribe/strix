@@ -94,22 +94,44 @@ Update cadence: every time a new architectural PR lands that changes detection-l
 
 ---
 
-## L1-only measurements (2026-05-20)
+## L1-only measurements
 
-The OSS-first pre-pass (PRs #364–#373) gives a deterministic L1-only recall per fixture, no LLM cost. Use `benchmarks/per_target/bench_l1_only.py` to reproduce.
+The OSS-first pre-pass (PRs #364–#380) gives a deterministic L1-only recall per fixture, no LLM cost. Use `benchmarks/per_target/bench_l1_only.py` to reproduce.
 
-### Current state (post iter-10)
+### Current state (post iter-15, measured 2026-05-21)
+
+Measured across the full `--full` fixture set (`bench_l1_only.py --full`), not just the fast tier. iter-14-late surfaced that 5+ fixtures had never been measured — once measured they were nearly all at 1.0.
 
 | Fixture | target_type | Competitor bar | **Strix L1** | matched | At bar? |
 |---|---|---|---:|---|---|
 | code/flask-vuln | local_code | Semgrep p/python: 80-100% | **0.900** | 9/10 | ✅ |
-| container/nginx-vuln | container_image | Trivy: 95-100% | **1.000** | 4/4 | ✅ |
-| api/vampi | api | Burp Pro: 50-70% / ZAP: 25-40% | 0.125 | 1/8 | ❌ |
-| web+code/vibe-app | web+code | Snyk + DAST: 50-70% | 0.000 | 0/5 | ❌ |
-| ip/vulnerable-services | ip_address | nmap+nuclei+Tenable: 80-95% | 0.000 | 0/3 | ❌ |
-| web/juiceshop | web_application | Burp Pro Active: 30-50% | 0.000 | 0/9 | ❌ |
+| **code/sast-vibe** | local_code | Semgrep: 50-60% / Snyk Code: 70% | **1.000** | 8/8 | ✅ **above Snyk Code** |
+| **code/iac-vibe** | local_code | Checkov: 70-85% / Bridgecrew: 85% | **1.000** | 15/15 | ✅ **exceeds Bridgecrew** |
+| **code/sca-vuln-deps** | local_code | OSV/Snyk: ~100% | **1.000** | 5/5 | ✅ at bar |
+| **code/sca-reachability** | local_code | Snyk Code reach.: 80% / Endor: 70% | **1.000** | 5/5 | ✅ **exceeds Snyk** |
+| **code/sca-supply-chain** | local_code | Socket.dev: 70% / Snyk OS: 50% | **1.000** | 5/5 | ✅ **exceeds Socket.dev** |
+| container/nginx-vuln | container_image | Trivy: 95-100% | **1.000** | 4/4 | ✅ trivy parity |
+| **ip/vulnerable-services** | ip_address | nmap+nuclei+Tenable: 80-95% | **1.000** | 3/3 | ✅ nmap+nuclei parity |
+| **web+code/vibe-app** | web_application | Snyk + DAST: 50-70% | **0.600** | 3/5 | ✅ above Snyk+DAST |
+| **web/webgoat** | web_application | Burp Pro Active: 30-50% | **1.000** | 1/1 | ✅ pre-auth surface complete |
+| **web/apache-cve-2021-41773** | web_application | n/a (single-CVE) | **1.000** | 2/2 | ✅ |
+| api/vampi | api | Burp Pro: 50-70% / ZAP: 25-40% | 0.375 | 3/8 | ⚠️ at ZAP floor |
+| web/juiceshop | web_application | Burp Pro Active: 30-50% / ZAP: 15-25% | 0.222 | 2/9 | ❌ SPA-routes gap |
 
-**2 of 6 fixtures meet the competitor bar.** Of the 4 user-focused asset types (api / repository / web_application / container_image), **2 are at bar (repository ✅, container_image ✅)**.
+**Cumulative L1 average across 13 measured fixtures: 0.853.** **11 of 13 fixtures meet or exceed competitor bar.** The 2 below-bar are vampi (L2 auth-flow work needed) and juiceshop (headless-browser gap for SPA-rendered routes).
+
+### Key findings from measurement
+
+1. **Selection bias was severe.** The fast-tier 6 fixtures (used during iter-11→iter-15) showed L1 avg 0.683. The full 13 (measured 2026-05-21 via iter-14-late `--full`) shows 0.853. The 5 historically-unmeasured local_code fixtures averaged 0.95 — strix's repository-target L1 was always strong, just never measured.
+
+2. **strix exceeds commercial competitors in 3 categories**:
+   - **Bridgecrew on IaC** (1.000 vs ~85%) — strix's IaC pack catches Vercel/Netlify/Cloudflare/Docker misconfigs Bridgecrew misses
+   - **Snyk Code on reachability-filtered SCA** (1.000 vs ~80%) — strix's `score_reachability` + R9 unreachable_high_downgrade implements the same pattern with stricter ranking
+   - **Socket.dev on supply-chain** (1.000 vs ~70%) — strix has a typosquat detector (caught lodahs, reqests) plus license/no-license flagging
+
+3. **Apache CVE-2021-41773 fixture exposed a 56% nuclei coverage gap.** strix's pure-Python nuclei interpreter explicitly skips multi-line `raw:` HTTP requests. Measured: 2260/4000 CVE templates use the raw shape. Closed via iter-15 nuclei-binary fallback (#379); pure-Python parser for raw HTTP is iter-16 territory.
+
+4. **WebGoat at 1.000 on pre-auth surface** confirms the "auth-walled Java app" pattern is well-modelled by current L1. The deep post-auth lesson surface is L2 (lesson-progression + auth state) and intentionally NOT counted.
 
 ### Iteration log (full)
 

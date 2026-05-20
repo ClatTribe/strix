@@ -34,3 +34,41 @@ rules:
           - metavariable-regex:
               metavariable: $X
               regex: ^(otp|password|invite_code|token)$
+      # Match Math.random() called inside any function whose
+      # name suggests a security-sensitive purpose (token /
+      # secret / password / key / etc generator). Uses
+      # `pattern-inside` to scope the match WITHOUT requiring
+      # the rule to parse the whole function body — that's
+      # what broke the original block-style pattern when JS
+      # chained calls like `Math.random().toString(36).slice(2)`
+      # were used (semgrep treats the chain as a single
+      # expression that doesn't unify with `... Math.random() ...`
+      # inside a function block).
+      # Caught measuring sast-vibe fixture 2026-05-21.
+      - patterns:
+          - pattern: Math.random()
+          - pattern-inside: |
+              function $FN(...) {
+                ...
+              }
+          - metavariable-regex:
+              metavariable: $FN
+              regex: (?i).*(token|secret|password|key|nonce|salt|otp|csrf|session|reset|invite|api).*
+      - patterns:
+          - pattern: Math.random()
+          - pattern-inside: |
+              const $FN = (...) => {
+                ...
+              }
+          - metavariable-regex:
+              metavariable: $FN
+              regex: (?i).*(token|secret|password|key|nonce|salt|otp|csrf|session|reset|invite|api).*
+      - patterns:
+          - pattern: Math.random()
+          - pattern-inside: |
+              $FN = function(...) {
+                ...
+              }
+          - metavariable-regex:
+              metavariable: $FN
+              regex: (?i).*(token|secret|password|key|nonce|salt|otp|csrf|session|reset|invite|api).*
