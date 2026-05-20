@@ -1204,7 +1204,7 @@ def _emit_kg_dependency(
     category="container-image-specialist",
     llm=False,
     default_budget={"cost_usd": 0.0, "max_wall_seconds": 600},
-    sandbox_execution=False,
+    sandbox_execution=True,
     provenance="framework",
     # T1525 Implant Internal Image (registry-side) +
     # T1610 Deploy Container.

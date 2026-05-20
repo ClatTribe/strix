@@ -145,7 +145,7 @@ def _emit_finding(*, finding, repo_path: str) -> str | None:
     category="iac-specialist",
     llm=False,
     default_budget={"cost_usd": 0.0, "max_wall_seconds": 60},
-    sandbox_execution=False,
+    sandbox_execution=True,
     provenance="framework",
     mitre_techniques=["T1078", "T1190"],   # Valid Accounts, Public-Facing App
 )

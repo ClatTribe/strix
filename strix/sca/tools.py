@@ -255,7 +255,7 @@ def _lockfile_command(ecosystem: str) -> str:
     category="sca-specialist",
     llm=False,
     default_budget={"cost_usd": 0.0, "max_wall_seconds": 60},
-    sandbox_execution=False,
+    sandbox_execution=True,
     provenance="framework",
     mitre_techniques=["T1195"],   # Supply Chain Compromise
 )
