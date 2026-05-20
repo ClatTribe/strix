@@ -125,6 +125,56 @@ The OSS-first pre-pass (PRs #364–#373) gives a deterministic L1-only recall pe
 | #371 | path-traversal taint + hardcoded-credential SAST rules | repository | flask-vuln 0.7→**0.9** ✅ |
 | #372 | host-runnable katana crawl fallback | web_application | (no Δ on SPA targets; infra for non-SPA) |
 | #373 | container_image fixture (nginx:1.18) + tracer-aware L1 harness + sca alias | container_image | nginx-vuln 0.0→**1.0** ✅ |
+| iter-11 | Deterministic L1 probe arsenal: forged JWT alg=none, mass-assignment, unauth debug paths (incl. openapi sub-paths), open-redirect, unauth-BOLA path-params, directory-listing, openapi-spec-exposed; widened nuclei tags (`default-login`, `exposure`, `misconfig`, `jwt`, `oauth`, `api`); per-endpoint scan_sqli hydration; bench harness: paired-asset support + URL root correction | api / web | vampi 0.125→**0.375–0.500**, juiceshop 0.0→**0.222**, vibe-app 0.0→**0.200** |
+
+### Current state (post iter-11)
+
+| Fixture | target_type | Competitor bar | **Strix L1** | matched | At bar? |
+|---|---|---|---:|---|---|
+| code/flask-vuln | local_code | Semgrep p/python: 80-100% | **0.900** | 9/10 | ✅ |
+| container/nginx-vuln | container_image | Trivy: 95-100% | **1.000** | 4/4 | ✅ |
+| api/vampi | api | Burp Pro: 50-70% / ZAP: 25-40% | **0.375–0.500** | 3-4/8 | ⚠️ ZAP-floor only (variable: depends on vampi DB-init state at probe time) |
+| web+code/vibe-app | web+code | Snyk + DAST: 50-70% | **0.200** | 1/5 | ❌ (SAST/SCA on source tree now wired; SCA cache lookup still misses lodash/ejs that osv-scanner finds — see follow-up note) |
+| web/juiceshop | web_application | Burp Pro Active: 30-50% | **0.222** | 2/9 | ❌ (caught `directory-traversal-ftp`, `deprecated-interface`; SPA-routed endpoints still invisible to katana) |
+| ip/vulnerable-services | ip_address | nmap+nuclei+Tenable: 80-95% | **0.000** | 0/3 | ❌ (no L1 anchors for ip_address; nmap wrapper pending iter-13) |
+
+**Aggregate L1 recall: 0.460 average across 6 fixtures (up from 0.337 at iter-10).** Of the 4 user-focused asset types, **2 at bar (repository ✅, container_image ✅), 1 at ZAP-floor (api ⚠️), 1 below bar (web_application ❌)**.
+
+### Iter-11 — what landed and what stayed gap
+
+The "yes finish them all" deterministic L1 probe sweep:
+
+| Probe | Catches | Status |
+|---|---|---|
+| `probe_openapi_spec_exposed` | OpenAPI/Swagger spec reachable without auth (e.g. vampi `openapi-spec-exposed`) | ✅ |
+| `probe_unauth_debug_paths` (static + openapi sub-paths) | `/users/v1/_debug` (vampi), `/ftp`, `/b2b/v2/orders` (juiceshop), `/actuator/*` (Spring) | ✅ |
+| `probe_open_redirect` | `?next=`, `?to=`, `?redirect=` echoed in Location header (flask-vuln pattern catches at SAST-layer; juiceshop's redirect needs whitelist-bypass payloads — future) | ✅ |
+| `probe_directory_listing` | nginx autoindex / Apache directory listing on `/ftp/`, `/uploads/`, `/backup/` | ✅ |
+| `probe_unauth_bola_path_params` | `/users/v1/{username}` returning user data without auth (vampi `bola-user-by-username`) | ✅ |
+| `probe_jwt_none_alg` | `alg: none` forged JWT accepted (most APIs reject; rare catch in practice) | ✅ (probe runs; vampi rejects so no catch) |
+| `probe_mass_assignment_priv_fields` | POST endpoints accepting + echoing `admin: true` (vampi may not echo so no catch) | ✅ (probe runs; vampi doesn't echo so no catch) |
+| Widened `scan_nuclei_templates` tags | `default-login`, `exposure`, `misconfig`, `jwt`, `oauth`, `api`, `intrusive` (was `cve` only) | ✅ |
+| Per-endpoint `scan_sqli` with schema hydration | path params + body schema → `params=`, `body_template=`, `method=` per endpoint | ✅ (vampi: 7 endpoints probed; books endpoint is auth-walled at L1 so no catch) |
+
+**Bench-harness fixes** (separate from the probes themselves):
+- `resolve_target` for web/api now uses manifest's `target` field (host-rewritten) instead of `docker.wait_url` — was sending probes to deep health-check URL on juiceshop
+- `resolve_all_targets` + `run_one_fixture` now iterate `additional_targets`, unifying findings across paired targets — vibe-app's SAST/SCA on `src/` now runs alongside DAST on the web URL
+
+### What's still hard at L1 (unchanged or partial)
+
+**vampi remaining 4-5 misses** (cap ~0.500):
+- `jwt-none-alg`: vampi's verifier rejects alg=none on token-validated endpoints (returns 401). Confirmed via probe; not a probe bug — vampi just doesn't have this bug on the probed endpoint. Possibly only triggers on a specific JWT-using path or with a non-standard header.
+- `jwt-weak-secret`: needs offline JWT brute-force against `HS256(secret="secret")`. L2 work — `jwt_audit` against an extracted token.
+- `mass-assignment-admin`: vampi's register returns the user but may not echo the `admin` field in the response body, even when it was accepted into the DB. Probe's heuristic looks for echo; would need a follow-up GET on the created user to confirm. L2 work.
+- `sqli-books`: `/books/v1/{title}` returns 401 unauthenticated. The injection exists but is auth-walled. L2 work — needs auth-flow + tokenised scan_sqli.
+- `bfla-debug-endpoint`: probe DOES catch `/users/v1/_debug` BUT only when vampi's DB has been initialized via `/createdb`. Pre-init returns 500. Probe ordering matters — currently scan_api_rate_limit hits `/createdb` mid-run, so subsequent runs in the same session catch it; first-pass during cold-start may miss.
+
+**vibe-app remaining 4 misses** (cap ~0.40):
+- `sca-lodash` / `sca-ejs`: strix's `scan_sca_lockfiles` uses an internal threat-intel cache (`ti_lookup.find_cves_for`). Without a populated cache, all 9 CVEs that osv-scanner finds are invisible. **This is the next big L1 gap to close** — direct osv-scanner / grype invocation as fallback when the cache is empty.
+- `dast-prototype-pollution-merge` / `dast-ejs-rce`: vibe-app has no openapi spec; katana_crawl returns endpoints with no body schema. Per-endpoint scan_sqli/ssrf hydration has nothing to hydrate. Would need an interactive crawler that captures POST bodies during normal usage.
+
+**juiceshop remaining 7 misses**:
+- `sqli-login`, `xss-search`, `idor-basket`, `missing-auth-admin`, `weak-jwt-handling`, `nosqli-products`, `open-redirect-redirect` — all require either (a) auth state, (b) Angular SPA-route understanding (currently invisible to katana), or (c) DOM-aware execution. The 2 catches (`directory-traversal-ftp`, `deprecated-interface`) are the static-path subset.
 
 ### Why the 4 below-bar fixtures stay below bar
 
