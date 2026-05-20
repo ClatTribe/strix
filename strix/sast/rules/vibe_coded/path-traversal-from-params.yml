@@ -1,4 +1,5 @@
 rules:
+  # JS/TS structural — original rule, catches direct one-line uses.
   - id: strix-path-traversal-from-params
     languages: [javascript, typescript, python]
     severity: ERROR
@@ -15,6 +16,7 @@ rules:
       confidence: MEDIUM
       vibe_pattern: true
     pattern-either:
+      # JavaScript / TypeScript / Node patterns
       - pattern: |
           fs.readFile($REQ.params.$X, ...)
       - pattern: |
@@ -33,3 +35,105 @@ rules:
           send_file($REQ.$X)
       - pattern: |
           send_from_directory($DIR, $REQ.$X)
+      # Python / Flask patterns. Catches the canonical
+      # `os.path.join(BASE, request.args.get(...))` + `open(...)`
+      # shape used in flask-vuln's /files endpoint (and most
+      # vibe-coded Flask file-serving handlers).
+      # The taint flows: request.args/.values/.form/.json →
+      # variable → os.path.join → open/read_file.
+      # We catch BOTH the direct pattern (one-line) AND the
+      # two-step pattern (assignment then use).
+      - patterns:
+          - pattern-either:
+              - pattern: open(os.path.join(...), ...)
+              - pattern: open(os.path.join(...))
+          - pattern-not: open(os.path.join(...,$VAR), ...)
+          - pattern-not-inside: |
+              $VAR = secure_filename(...)
+              ...
+      - pattern: |
+          $FILENAME = request.args.get(...)
+          ...
+          open(os.path.join(..., $FILENAME), ...)
+      - pattern: |
+          $FILENAME = request.args.get(...)
+          ...
+          $PATH = os.path.join(..., $FILENAME)
+          ...
+          open($PATH, ...)
+      - pattern: |
+          $FILENAME = request.values.get(...)
+          ...
+          $PATH = os.path.join(..., $FILENAME)
+          ...
+          open($PATH, ...)
+      - pattern: |
+          $FILENAME = request.form.get(...)
+          ...
+          $PATH = os.path.join(..., $FILENAME)
+          ...
+          open($PATH, ...)
+      - pattern: |
+          $FILENAME = request.args[...]
+          ...
+          $PATH = os.path.join(..., $FILENAME)
+          ...
+          open($PATH, ...)
+      # Flask's send_file with tainted path
+      - pattern: |
+          $FILENAME = request.args.get(...)
+          ...
+          send_file(os.path.join(..., $FILENAME), ...)
+      - pattern: |
+          $FILENAME = request.args.get(...)
+          ...
+          send_file($FILENAME, ...)
+
+  # Python / Flask taint-mode rule — catches multi-hop flows like:
+  #   filename = request.args.get(...)        # source
+  #   path = os.path.join(BASE, filename)
+  #   open(path, ...)                          # sink
+  #
+  # The taint propagates through both the .get() return and the
+  # os.path.join() call. send_file() / send_from_directory() are
+  # also sinks. The sanitizer is werkzeug.utils.secure_filename
+  # which strips path components (and tools like os.path.basename
+  # which the rule SHOULD also accept; conservative for now).
+  - id: strix-path-traversal-from-params-python-taint
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Request parameter flows into a file-system open() call
+      without sanitization. An attacker can include `../../etc/passwd`
+      to read arbitrary files. Use `werkzeug.utils.secure_filename`
+      to strip directory components, OR validate against an explicit
+      allowlist of permitted filenames.
+    metadata:
+      cwe: "CWE-22"
+      owasp: "A01:2021"
+      category: path_traversal
+      confidence: HIGH
+      vibe_pattern: true
+    mode: taint
+    pattern-sources:
+      - pattern: request.args.get(...)
+      - pattern: request.args[...]
+      - pattern: request.values.get(...)
+      - pattern: request.values[...]
+      - pattern: request.form.get(...)
+      - pattern: request.form[...]
+      - pattern: request.json.get(...)
+      - pattern: request.json[...]
+      - pattern: request.params.get(...)
+      - pattern: request.GET.get(...)  # Django shape
+      - pattern: request.POST.get(...)
+    pattern-sanitizers:
+      - pattern: secure_filename(...)
+      - pattern: werkzeug.utils.secure_filename(...)
+    pattern-sinks:
+      - pattern: open($PATH, ...)
+      - pattern: send_file($PATH, ...)
+      - pattern: send_from_directory(..., $PATH, ...)
+      - pattern: pathlib.Path($PATH).open(...)
+      - pattern: pathlib.Path($PATH).read_text(...)
+      - pattern: pathlib.Path($PATH).read_bytes(...)
