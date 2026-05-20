@@ -1,8 +1,6 @@
 import asyncio
-import collections
 import logging
 import os
-import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -25,85 +23,6 @@ from strix.llm.utils import (
 )
 from strix.skills import load_skills
 from strix.tools import get_tools_prompt
-
-
-# ---------------------------------------------------------------------------
-# Process-global rolling-window RPM throttle
-# ---------------------------------------------------------------------------
-#
-# Some upstream providers (notably Gemini free tier @ 10 RPM, Anthropic
-# free tier @ 5 RPM) have per-minute request caps that strix's lead-loop
-# fan-out + retry pattern can saturate within a single iteration. When
-# that happens the upstream returns rate-limit errors, strix's retry
-# kicks in, but the retries themselves count against the same per-minute
-# window — leading to thrashing where every call retries to exhaustion.
-#
-# `STRIX_LLM_RPM=<int>` enables a rolling-60s gate that holds calls until
-# making one more would not exceed the cap. Unset (default) preserves
-# legacy unrestricted behaviour — this is opt-in for customers running
-# on RPM-constrained providers.
-#
-# Process-global because strix may instantiate multiple LLM objects (lead
-# + recon interpreter + specialist orchestrator + per-specialist agents)
-# and they all share the upstream rate limit.
-_LLM_CALL_TIMESTAMPS: collections.deque[float] = collections.deque()
-_LLM_RPM_LOCK = asyncio.Lock()
-
-
-def _read_rpm_cap() -> int | None:
-    """Read STRIX_LLM_RPM. Returns None when unset / invalid / <= 0
-    (disable throttle); a positive int means "this many requests
-    per rolling 60s window, max."""
-    raw = (os.environ.get("STRIX_LLM_RPM") or "").strip()
-    if not raw:
-        return None
-    try:
-        cap = int(float(raw))
-    except (TypeError, ValueError):
-        return None
-    return cap if cap > 0 else None
-
-
-def _reset_rpm_state_for_tests() -> None:
-    """Clear the rolling timestamp window. Tests use this to isolate
-    runs from each other. Not used in production."""
-    _LLM_CALL_TIMESTAMPS.clear()
-
-
-async def _wait_for_rpm_slot() -> None:
-    """Block until making one more LLM call would not exceed the
-    configured per-minute cap. No-op when STRIX_LLM_RPM is unset.
-
-    Algorithm: maintain a rolling 60s deque of call timestamps. If
-    we're already at the cap, sleep until the oldest call expires
-    out of the window. Re-check (loop) because another concurrent
-    call may have grabbed the slot we were waiting on.
-    """
-    cap = _read_rpm_cap()
-    if cap is None:
-        return
-    async with _LLM_RPM_LOCK:
-        while True:
-            now = time.monotonic()
-            # Trim entries older than the rolling 60s window.
-            while _LLM_CALL_TIMESTAMPS and now - _LLM_CALL_TIMESTAMPS[0] > 60.0:
-                _LLM_CALL_TIMESTAMPS.popleft()
-            if len(_LLM_CALL_TIMESTAMPS) < cap:
-                # Slot available — record and return.
-                _LLM_CALL_TIMESTAMPS.append(now)
-                return
-            # Window full. Sleep until oldest expires + a small
-            # safety margin so we don't race the boundary.
-            oldest = _LLM_CALL_TIMESTAMPS[0]
-            wait = 60.0 - (now - oldest) + 0.05
-            wait = max(wait, 0.05)
-            logger.info(
-                "STRIX_LLM_RPM throttle: %d/%d calls in window, sleeping %.2fs",
-                len(_LLM_CALL_TIMESTAMPS), cap, wait,
-            )
-            await asyncio.sleep(wait)
-            # Loop and re-check; another caller may have taken the
-            # slot in the meantime.
 from strix.utils.resource_paths import get_strix_resource_path
 
 
@@ -497,11 +416,6 @@ class LLM:
 
         self._total_stats.requests += 1
         timeout = self.config.timeout
-        # STRIX_LLM_RPM rolling-window gate. No-op when env var unset.
-        # When set, blocks until making this call wouldn't exceed the
-        # per-minute cap on the upstream provider. See module-level
-        # docstring on `_wait_for_rpm_slot` for the rationale.
-        await _wait_for_rpm_slot()
         response = await asyncio.wait_for(
             acompletion(**self._build_completion_args(messages), stream=True),
             timeout=timeout,
