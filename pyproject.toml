@@ -65,6 +65,16 @@ sandbox = [
   "pyte>=0.8.1",
   "libtmux>=0.46.2",
   "numpydoc>=1.8.0",
+  # iter-19: strix/telemetry/tracer.py + utils.py import opentelemetry
+  # unconditionally at module top — every L1 tool (scan_sast,
+  # scan_sca_lockfiles, scan_iac, secrets_scan, nuclei_runner, ...)
+  # transitively imports tracer.py via the finding-emission path.
+  # Without opentelemetry in the sandbox, every L1 tool errors with
+  # "No module named 'opentelemetry'". PRs #386/#387 slimmed the
+  # image and dropped these — restoring. ~5MB total across api +
+  # sdk; negligible vs the 7.63 GB image size.
+  "opentelemetry-api>=1.20",
+  "opentelemetry-sdk>=1.20",
 ]
 
 [dependency-groups]

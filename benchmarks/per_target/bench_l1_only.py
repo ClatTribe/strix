@@ -110,12 +110,204 @@ class _FakeAgentState:
     sandbox_execution=True will error out cleanly. The bench
     captures the LOWER BOUND of L1 recall (what runs without
     sandbox infrastructure); production sees the full anchor
-    coverage."""
+    coverage. Use `--with-sandbox` to provision a real sandbox
+    container and measure full production-equivalent recall."""
     sandbox_id = None
     sandbox_token = None
     sandbox_info: dict = {}
     agent_id = "l1-bench"
     findings: list = []
+
+
+class _SandboxAgentState:
+    """agent_state populated with a real strix-sandbox container's
+    workspace_id + tool_server_port. iter-19: makes the bench run
+    every L1 anchor specialist (semgrep, trivy, nuclei, jwt_audit,
+    webapp_recon_pipeline, etc.) inside the strix-sandbox:local
+    container — measures production-equivalent L1 recall, not the
+    no-sandbox lower bound."""
+
+    def __init__(self, sandbox_info: dict) -> None:
+        self.sandbox_info = sandbox_info
+        self.sandbox_id = sandbox_info.get("workspace_id")
+        self.sandbox_token = sandbox_info.get("auth_token")
+        self.agent_id = sandbox_info.get("agent_id") or "l1-bench"
+        self.findings: list = []
+
+
+async def _provision_sandbox(image: str | None = None) -> tuple[Any, Any]:
+    """Spin up the strix-sandbox container and return (runtime,
+    sandbox_info). Image defaults to whatever Config.strix_image
+    resolves to (env STRIX_IMAGE → default ghcr.io/usestrix/strix-
+    sandbox:0.1.13). The bench typically wants `strix-sandbox:local`
+    which is the locally-built image with the iter-15+ tools.
+
+    iter-19 also pip-installs `opentelemetry-api`+`opentelemetry-sdk`
+    into the running container if missing — PRs #386/#387 slimmed
+    these out of the sandbox image but strix's tracer.py imports
+    them unconditionally. pyproject.toml's sandbox extras have been
+    updated to include them for the next image rebuild; this
+    docker-exec workaround keeps existing locally-built images
+    usable without rebuild.
+    """
+    if image:
+        os.environ["STRIX_IMAGE"] = image
+    from strix.runtime import get_runtime  # late-import: needs STRIX_IMAGE set first
+    runtime = get_runtime()
+    info = await runtime.create_sandbox(
+        agent_id="l1-bench-" + os.urandom(4).hex(),
+    )
+    # The tool server in the sandbox runs as `sudo -u pentester ...`
+    # which strips PATH to sudo's secure_path (no /opt/pipx/bin,
+    # no /home/pentester/go/bin, etc.). `shutil.which("semgrep")`
+    # then returns None inside scan_sast and the tool errors with
+    # "semgrep CLI not installed". Symlink the L1 anchor tools into
+    # /usr/local/bin (which IS on sudo's secure_path) so the tool
+    # server can find them. iter-19 measurement-infrastructure fix;
+    # the proper sandbox-image fix is to add
+    # `Defaults env_keep += "PATH"` to /etc/sudoers OR pass
+    # `sudo --preserve-env=PATH`. Both need an image rebuild.
+    try:
+        container_id = info.get("workspace_id")
+        if container_id:
+            tools_to_link = [
+                "/opt/pipx/bin/semgrep",
+                "/opt/pipx/bin/checkov",
+                "/opt/pipx/bin/bandit",
+                "/opt/pipx/bin/trufflehog",
+                "/usr/local/bin/trivy",      # if already symlinked, no-op
+                "/usr/local/bin/grype",
+                "/usr/local/bin/osv-scanner",
+                "/usr/local/bin/gitleaks",
+                "/usr/local/bin/nuclei",
+                "/usr/local/bin/katana",
+            ]
+            symlink_script = (
+                " && ".join(
+                    f"[ -e {p} ] && ln -sf {p} /usr/local/bin/$(basename {p}) || true"
+                    for p in tools_to_link
+                )
+                + " ; echo done"
+            )
+            subprocess.run(
+                ["docker", "exec", "--user", "root", container_id,
+                 "sh", "-c", symlink_script],
+                capture_output=True, timeout=15,
+            )
+    except Exception as e:  # noqa: BLE001
+        print(f"[bench] tool-path symlinks failed (continuing): {e}",
+              flush=True)
+
+    # Verify + uv-pip-install opentelemetry into the sandbox's
+    # /app/.venv if missing. The sandbox runs strix from a uv-managed
+    # virtualenv at /app/.venv; system `pip install` doesn't reach
+    # that venv. Use `uv pip install --python /app/.venv/bin/python3`
+    # to target it specifically.
+    try:
+        container_id = info.get("workspace_id")
+        if container_id:
+            check = subprocess.run(
+                ["docker", "exec", container_id,
+                 "/app/.venv/bin/python3", "-c", "import opentelemetry"],
+                capture_output=True, timeout=15,
+            )
+            if check.returncode != 0:
+                print(
+                    "[bench] sandbox venv missing opentelemetry — uv-pip-installing...",
+                    flush=True,
+                )
+                install = subprocess.run(
+                    ["docker", "exec", "--workdir", "/app", container_id,
+                     "uv", "pip", "install", "--python",
+                     "/app/.venv/bin/python3",
+                     "opentelemetry-api>=1.20",
+                     "opentelemetry-sdk>=1.20"],
+                    capture_output=True, timeout=180, text=True,
+                )
+                if install.returncode != 0:
+                    print(
+                        f"[bench] uv pip install failed: "
+                        f"{install.stderr[:200]}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "[bench] opentelemetry installed in sandbox venv.",
+                        flush=True,
+                    )
+    except Exception as e:  # noqa: BLE001
+        print(f"[bench] opentelemetry shim failed (continuing): {e}", flush=True)
+    return runtime, info
+
+
+def _copy_source_into_sandbox(
+    sandbox_info: dict, host_path: str,
+) -> str:
+    """Tar the host source dir + put it at /workspace/<basename> inside
+    the sandbox. Returns the in-sandbox workspace_path that scan_sast /
+    scan_sca_lockfiles / scan_iac / secrets_scan should read.
+
+    iter-19: needed because the L1 bench was previously running every
+    code-target tool on the host (sandbox_execution=False semantics).
+    Post-PR #384, those tools execute in the sandbox — the host path
+    `/Users/...` doesn't exist inside the container, so we need to
+    copy + remap.
+
+    Best-effort: failure returns empty string, prepass falls back to
+    host path → tool errors → finding count 0 for that target. Logged
+    by the caller via the bench's per-tool error captures.
+    """
+    import tarfile
+    from io import BytesIO
+    container_id = sandbox_info.get("workspace_id")
+    if not container_id:
+        return ""
+    host_path_obj = Path(host_path).resolve()
+    if not host_path_obj.exists() or not host_path_obj.is_dir():
+        return ""
+    target_name = host_path_obj.name
+    workspace_path = f"/workspace/{target_name}"
+    try:
+        # Build a tarball of the source dir.
+        tar_buffer = BytesIO()
+        with tarfile.open(fileobj=tar_buffer, mode="w") as tar:
+            for item in host_path_obj.rglob("*"):
+                if item.is_file():
+                    rel = item.relative_to(host_path_obj)
+                    tar.add(item, arcname=str(Path(target_name) / rel))
+        tar_buffer.seek(0)
+        # Stream the tarball into the container at /workspace.
+        proc = subprocess.run(
+            ["docker", "cp", "-", f"{container_id}:/workspace"],
+            input=tar_buffer.getvalue(),
+            capture_output=True, timeout=60,
+        )
+        if proc.returncode != 0:
+            return ""
+        # Chown so the pentester user can read the files.
+        subprocess.run(
+            ["docker", "exec", "--user", "root", container_id, "sh", "-c",
+             f"chown -R pentester:pentester /workspace/{target_name} && "
+             f"chmod -R 755 /workspace/{target_name}"],
+            capture_output=True, timeout=30,
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+    return workspace_path
+
+
+async def _destroy_sandbox(runtime: Any, sandbox_info: dict) -> None:
+    """Best-effort sandbox teardown."""
+    try:
+        wid = sandbox_info.get("workspace_id")
+        if wid:
+            await runtime.destroy_sandbox(wid)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        runtime.cleanup()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _ensure_tracer() -> None:
@@ -330,8 +522,15 @@ async def run_one_fixture(
     fixture_dir: Path,
     *,
     skip_docker: bool = False,
+    agent_state: Any | None = None,
 ) -> dict[str, Any]:
-    """Run L1 prepass against one fixture; return scored result dict."""
+    """Run L1 prepass against one fixture; return scored result dict.
+
+    If `agent_state` is supplied (e.g. a `_SandboxAgentState` from
+    `--with-sandbox` provisioning), it's used for the prepass —
+    enabling sandbox-routed tools to actually run. Otherwise falls
+    back to the no-sandbox `_FakeAgentState` (bench lower bound).
+    """
     manifest, expected = parse_expected(fixture_dir)
     targets = resolve_all_targets(fixture_dir, manifest)
     rel = fixture_dir.relative_to(REPO_ROOT) if str(fixture_dir).startswith(str(REPO_ROOT)) else fixture_dir
@@ -344,7 +543,8 @@ async def run_one_fixture(
     try:
         if not skip_docker:
             docker_up_ok = docker_up(fixture_dir, manifest)
-        agent_state = _FakeAgentState()
+        if agent_state is None:
+            agent_state = _FakeAgentState()
 
         # Run the L1 prepass against EACH target and union findings.
         # Paired-asset fixtures (vibe-app) need this so SCA / SAST
@@ -357,10 +557,30 @@ async def run_one_fixture(
         total_tools_succeeded = 0
         total_tools_failed = 0
         for tt, tv in targets:
+            # iter-19: for local_code/repository targets under
+            # --with-sandbox, copy the source dir into the sandbox
+            # at /workspace/<basename> and pass workspace_path so the
+            # in-sandbox scan_sast / scan_sca_lockfiles / scan_iac /
+            # secrets_scan find the right path. Non-code targets pass
+            # workspace_path=""; the prepass uses target_value (URL).
+            ws_path = ""
+            if (
+                tt in ("local_code", "repository")
+                and hasattr(agent_state, "sandbox_info")
+                and agent_state.sandbox_info
+            ):
+                ws_path = _copy_source_into_sandbox(
+                    agent_state.sandbox_info, tv,
+                )
+                if ws_path:
+                    print(
+                        f"  copied {tv} → sandbox {ws_path}",
+                        flush=True,
+                    )
             summary = await run_oss_anchor_prepass(
                 target_type=tt,
                 target_value=tv,
-                workspace_path="",
+                workspace_path=ws_path,
                 agent_state=agent_state,
             )
             for r in summary.tool_results:
@@ -471,20 +691,60 @@ async def amain(args: argparse.Namespace) -> int:
     else:
         targets = [fixtures_root / f for f in _FAST_FIXTURES]
 
+    # iter-19: optional sandbox provisioning. With `--with-sandbox`,
+    # the bench spins up a strix-sandbox container ONCE and reuses it
+    # across every fixture. The fixture's docker compose (the target
+    # under test) runs alongside the sandbox; the sandbox reaches the
+    # target via host.docker.internal (HOST_GATEWAY).
+    sandbox_runtime = None
+    sandbox_info: dict | None = None
+    if args.with_sandbox:
+        print(
+            f"[bench] provisioning strix-sandbox container "
+            f"(image={args.sandbox_image or '$STRIX_IMAGE'})...",
+            flush=True,
+        )
+        sandbox_runtime, sandbox_info = await _provision_sandbox(
+            image=args.sandbox_image,
+        )
+        print(
+            f"[bench] sandbox ready: workspace_id="
+            f"{sandbox_info['workspace_id'][:12]}... "
+            f"tool_server_port={sandbox_info['tool_server_port']}",
+            flush=True,
+        )
+
     results: list[dict[str, Any]] = []
-    for fx in targets:
-        if not (fx / "expected.yaml").exists():
-            print(f"  [skip] {fx.name}: no expected.yaml", flush=True)
-            continue
-        try:
-            results.append(await run_one_fixture(fx, skip_docker=args.skip_docker))
-        except Exception as e:  # noqa: BLE001
-            import traceback
-            traceback.print_exc()
-            results.append({
-                "fixture": str(fx.relative_to(REPO_ROOT)),
-                "error": f"{type(e).__name__}: {e}",
-            })
+    try:
+        for fx in targets:
+            if not (fx / "expected.yaml").exists():
+                print(f"  [skip] {fx.name}: no expected.yaml", flush=True)
+                continue
+            try:
+                # Build a fresh per-fixture agent_state. When the
+                # sandbox is shared, each fixture gets a state object
+                # pointing at the same sandbox_info — fine because the
+                # prepass doesn't mutate sandbox_info, only reads it.
+                if sandbox_info is not None:
+                    agent_state = _SandboxAgentState(sandbox_info)
+                else:
+                    agent_state = None  # falls back to _FakeAgentState
+                results.append(await run_one_fixture(
+                    fx,
+                    skip_docker=args.skip_docker,
+                    agent_state=agent_state,
+                ))
+            except Exception as e:  # noqa: BLE001
+                import traceback
+                traceback.print_exc()
+                results.append({
+                    "fixture": str(fx.relative_to(REPO_ROOT)),
+                    "error": f"{type(e).__name__}: {e}",
+                })
+    finally:
+        if sandbox_runtime is not None and sandbox_info is not None:
+            print("[bench] tearing down sandbox...", flush=True)
+            await _destroy_sandbox(sandbox_runtime, sandbox_info)
 
     # Emit markdown summary.
     ts = time.strftime("%Y%m%d_%H%M%S")
@@ -559,6 +819,21 @@ def main() -> int:
     parser.add_argument(
         "--skip-docker", action="store_true",
         help="don't bring up docker compose (assume target is already up)",
+    )
+    parser.add_argument(
+        "--with-sandbox", action="store_true",
+        help="provision a real strix-sandbox container and route every "
+             "L1 anchor tool through it. Without this flag the bench "
+             "shows the no-sandbox LOWER BOUND (semgrep/trivy/nuclei/"
+             "etc. error cleanly). With it, the bench measures "
+             "production-equivalent L1 recall.",
+    )
+    parser.add_argument(
+        "--sandbox-image", default=None,
+        help="override the sandbox image (sets STRIX_IMAGE). Default: "
+             "whatever STRIX_IMAGE env or Config.strix_image resolves "
+             "to. Typically `strix-sandbox:local` for a locally-built "
+             "image.",
     )
     args = parser.parse_args()
     return asyncio.run(amain(args))
