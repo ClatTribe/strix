@@ -71,7 +71,18 @@ RUN go install -ldflags="-s -w" github.com/projectdiscovery/httpx/cmd/httpx@late
  && go install -ldflags="-s -w" github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest \
  && go install -ldflags="-s -w" github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
  && go install -ldflags="-s -w" github.com/projectdiscovery/naabu/v2/cmd/naabu@latest \
- && go install -ldflags="-s -w" github.com/ffuf/ffuf/v2@latest
+ && go install -ldflags="-s -w" github.com/ffuf/ffuf/v2@latest \
+ # iter-21.7 — cosign for Sigstore signature + SLSA / SBOM /
+ # VEX attestation verification. The verification code in
+ # `strix/tools/container_image/scan_container_image.py`
+ # (Phase 5 block at line 590+) has shipped since iter-5 and is
+ # wired into the main scan flow at line 1466 — but the binary
+ # was never installed in the sandbox image, so
+ # `_cosign_available()` always returned False and the whole
+ # ~950-line integration was silently dead. Building from source
+ # rather than fetching the GitHub release tarball keeps the
+ # go-builder pattern uniform with the other PD tools.
+ && go install -ldflags="-s -w" github.com/sigstore/cosign/v2/cmd/cosign@latest
 
 # =============================================================================
 # Stage: node-builder

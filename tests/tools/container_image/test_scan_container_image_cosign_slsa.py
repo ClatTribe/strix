@@ -297,21 +297,27 @@ def test_extract_slsa_builder_empty_when_missing() -> None:
 
 def test_unsigned_image_emits_finding(monkeypatch) -> None:
     """Cosign verify fails → unsigned-image finding emits (medium
-    severity when policy is best-effort)."""
+    severity when policy is best-effort).
+
+    iter-21.7 expanded the attestation-type sweep to also cover
+    `cyclonedx` (SBOM) and `vuln` (VEX) — so when the mock has
+    all attestations failing, we get 4 image_signing findings:
+    unsigned + missing-SLSA + missing-SBOM + missing-VEX. This
+    test pins the UNSIGNED + SLSA findings without over-
+    constraining the count (the SBOM/VEX paths are covered in
+    `test_scan_container_image_cosign_sbom_vex.py`)."""
     monkeypatch.delenv("STRIX_COSIGN_REQUIRE_SIGNED", raising=False)
     _mock_subprocess(
         monkeypatch,
         cosign_verify=(1, "", "no matching signatures"),
-        cosign_attest=(1, "", "no attestation"),  # also fail
+        cosign_attest=(1, "", "no attestation"),  # all 3 attest types fail
     )
     out = scan_container_image(image_ref="myapp:v1")
     assert out["status"] == "ok"
     findings = _emitted()
-    # 2 cosign findings expected: unsigned + missing-SLSA.
     image_signing_findings = [
         f for f in findings if f["category"] == "image_signing"
     ]
-    assert len(image_signing_findings) == 2
     titles = {f["title"] for f in image_signing_findings}
     assert any("Unsigned" in t for t in titles)
     assert any("SLSA" in t for t in titles)
@@ -360,8 +366,10 @@ def test_signed_image_emits_no_signing_finding(monkeypatch) -> None:
 
 
 def test_signed_but_no_slsa_emits_slsa_finding(monkeypatch) -> None:
-    """Signature OK but no SLSA attestation → ONE finding
-    (missing-SLSA, medium)."""
+    """Signature OK but no SLSA attestation → missing-SLSA finding
+    (medium, CWE-345). iter-21.7 also emits info-severity SBOM
+    and VEX findings under the same mock, so we assert the SLSA
+    finding's specific shape rather than the total count."""
     payload = [{"optional": {"Subject": "build@example.com"}}]
     _mock_subprocess(
         monkeypatch,
@@ -372,10 +380,10 @@ def test_signed_but_no_slsa_emits_slsa_finding(monkeypatch) -> None:
     findings = [
         f for f in _emitted() if f["category"] == "image_signing"
     ]
-    assert len(findings) == 1
-    assert "SLSA" in findings[0]["title"]
-    assert findings[0]["severity"] == "medium"
-    assert findings[0]["cwe"] == "CWE-345"
+    slsa = [f for f in findings if "SLSA" in f["title"]]
+    assert len(slsa) == 1
+    assert slsa[0]["severity"] == "medium"
+    assert slsa[0]["cwe"] == "CWE-345"
 
 
 def test_cosign_unavailable_skips_signing_phase(monkeypatch) -> None:

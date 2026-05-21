@@ -300,15 +300,22 @@ def test_trivy_command_includes_image_ref(monkeypatch) -> None:
     assert "registry.example.com/foo/bar:v1" in cmd
 
 
-def test_trivy_command_skips_db_update(monkeypatch) -> None:
-    """`--skip-db-update` keeps the scan hermetic: operators run a
-    separate `trivy --download-db-only` ahead of scan time. Without
-    it, every scan would race against the registry."""
+def test_trivy_command_does_not_set_skip_db_update(monkeypatch) -> None:
+    """iter-20 (commit 9082b4a) dropped `--skip-db-update` after the
+    nginx-vuln bench hit `FATAL ... DB error: --skip-db-update
+    cannot be specified on the first run` inside the strix-sandbox.
+    The entrypoint's lazy-init pre-fetches the DB on container
+    start, but the tool server (invoked via sudo) bypasses the
+    entrypoint, so the first tool-server-invoked trivy call always
+    hit a missing DB and `--skip-db-update` blocked the recovery
+    path. Without the flag, trivy is idempotent: uses existing DB
+    if fresh, refreshes once otherwise. This test was previously
+    asserting the flag IS present; iter-20 inverted it."""
     run_mock = _mock_trivy_run(monkeypatch)
     scan_container_image(image_ref="nginx:1.25")
 
     cmd = run_mock.call_args[0][0]
-    assert "--skip-db-update" in cmd
+    assert "--skip-db-update" not in cmd
 
 
 # ---------------------------------------------------------------------------
