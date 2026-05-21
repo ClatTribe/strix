@@ -77,6 +77,14 @@ from .authn_metadata_audit import *  # noqa: F403  # scan_authn_metadata
 # Pure-Python zip + xml + plist inspection; no docker dep, no
 # mobsf. Closes the `asset_type=mobile_app` gap.
 from .mobile_app_audit import *      # noqa: F403  # scan_mobile_app
+# iter-21.6.2 — direct IMDS-passthrough probe. Complements
+# `scan_ssrf` (which needs an SSRF param to drive payloads
+# through) for routes that proxy 169.254.169.254 unconditionally
+# (dev/debug leftovers, reverse-proxy misconfig, K8s sidecars).
+# The bucket-discovery companion previously bundled here was
+# reverted in PR #401 — iter-21.6.1 brings it back as an OSS
+# wrapper (bbot) instead of in-house code.
+from .cloud_exposure_audit import *   # noqa: F403  # scan_cloud_imds_passthrough
 
 # SCA / supply-chain analysis (Phase 6) — registers
 # `scan_sca_lockfiles`.
