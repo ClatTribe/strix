@@ -1001,6 +1001,203 @@ def _emit_missing_slsa_finding(
         return None
 
 
+# ===========================================================================
+# iter-21.7 — extended attestation types: SBOM (cyclonedx) + VEX (vuln)
+# ===========================================================================
+#
+# Cosign supports verifying typed attestations beyond just SLSA
+# provenance. Two more flavours matter for supply-chain hygiene:
+#
+#   * **SBOM attestation** (`--type cyclonedx` or `--type spdxjson`)
+#     — the build pipeline emits a signed Software Bill of Materials
+#     bound to the image digest. Verifies the SBOM strix's `trivy`
+#     scan reports is the one the producer actually published. SLSA
+#     L3+ expects this; Chainguard ships it by default.
+#
+#   * **VEX statement attestation** (`--type vuln`) — Vulnerability
+#     Exploitability eXchange. The producer marks specific CVEs as
+#     "not_affected" / "fixed" / "under_investigation" for THIS
+#     image. When attached, the trivy CVE findings can be demoted
+#     ("vendor confirms not exploitable in this config") rather than
+#     ranked on raw CVSS. Emerging best practice; rarely deployed.
+#
+# Each emits ONE info-severity finding when MISSING (operators can
+# raise severity via env policy if they want stricter posture). The
+# default is intentionally weak — missing SBOM / VEX is a "could
+# be better" rather than "exploit primitive" signal.
+
+
+def _emit_missing_sbom_attestation_finding(
+    *, image_ref: str, error: str | None,
+) -> str | None:
+    """Emit a finding when cosign verify-attestation (--type
+    cyclonedx) fails. iter-21.7."""
+    try:
+        from strix.telemetry.tracer import get_global_tracer
+
+        tracer = get_global_tracer()
+        if tracer is None:
+            return None
+        return tracer.add_vulnerability_report(
+            title=f"Missing CycloneDX SBOM attestation: {image_ref}",
+            severity="info",
+            cwe="CWE-1357",
+            endpoint=image_ref,
+            target=image_ref,
+            category="image_signing",
+            verification_status="verified",
+            confidence=0.9,
+            description=(
+                f"`cosign verify-attestation --type cyclonedx "
+                f"{image_ref}` did not find a CycloneDX-format "
+                "SBOM attestation bound to this image digest. "
+                "Without a signed SBOM the operator must TRUST "
+                "the SBOM strix's local `trivy` scan extracted — "
+                "if trivy missed a component, or if the published "
+                "image differs from what's in the registry, the "
+                "drift is undetectable.\n\n"
+                f"Cosign error: {error or '(no detail)'}"
+            ),
+            impact=(
+                "Component drift between the build-time SBOM and "
+                "what's actually in the image runs undetected. "
+                "Supply-chain auditors (SLSA L3+, EO 14028) "
+                "increasingly require a signed SBOM as evidence "
+                "of build integrity."
+            ),
+            technical_analysis=(
+                f"Image: {image_ref}\n"
+                f"Attestation type queried: cyclonedx\n"
+                f"Cosign stderr: {error or '(empty)'}"
+            ),
+            poc_description=(
+                f"1. `cosign verify-attestation --type cyclonedx "
+                f"--output json {image_ref}`\n"
+                "2. Cosign returns non-zero when no CycloneDX "
+                "attestation is bound to the image digest."
+            ),
+            poc_script_code=(
+                f"cosign verify-attestation --type cyclonedx "
+                f"--output json {image_ref}"
+            ),
+            remediation_steps=(
+                "1. Add a `cosign attest --type cyclonedx --predicate "
+                "sbom.cdx.json` step to the build pipeline AFTER "
+                "the image push, where `sbom.cdx.json` is the "
+                "SBOM your build system generated (syft / "
+                "anchore / trivy can produce it).\n"
+                "2. Operators can also use `spdxjson` if their "
+                "tooling prefers SPDX 2.3 over CycloneDX 1.5."
+            ),
+            reasoning_trace=[
+                f"Ran cosign verify-attestation --type cyclonedx "
+                f"{image_ref}.",
+                "Cosign exited non-zero — no SBOM attestation "
+                "bound to image digest.",
+                f"Error: {error or '(no detail)'}",
+            ],
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "scan_container_image: SBOM attestation finding emit failed: %s",
+            e, exc_info=True,
+        )
+        return None
+
+
+def _emit_missing_vex_attestation_finding(
+    *, image_ref: str, error: str | None,
+) -> str | None:
+    """Emit a finding when cosign verify-attestation (--type vuln)
+    fails. iter-21.7.
+
+    Severity is intentionally `info` — missing VEX is "could-be-
+    better", not "exploit primitive". The signal is most useful
+    in combination with the CVE findings trivy emits: when a CVE
+    is reported AND no VEX statement exists, the operator can
+    look up the upstream vendor's VEX feed or wait for one.
+    """
+    try:
+        from strix.telemetry.tracer import get_global_tracer
+
+        tracer = get_global_tracer()
+        if tracer is None:
+            return None
+        return tracer.add_vulnerability_report(
+            title=(
+                f"Missing VEX (vulnerability exploitability) "
+                f"attestation: {image_ref}"
+            ),
+            severity="info",
+            cwe="CWE-1357",
+            endpoint=image_ref,
+            target=image_ref,
+            category="image_signing",
+            verification_status="verified",
+            confidence=0.9,
+            description=(
+                f"`cosign verify-attestation --type vuln {image_ref}` "
+                "did not find a VEX statement attestation bound to "
+                "this image digest. VEX (Vulnerability Exploitability "
+                "eXchange; CSAF / OpenVEX schema) lets the producer "
+                "declare per-CVE applicability: `not_affected` (the "
+                "vulnerable code path isn't reachable in this image), "
+                "`affected_fixed` (patch is included), `under_"
+                "investigation`, etc. Without VEX, trivy's CVE list "
+                "is ranked on raw CVSS — including CVEs the producer "
+                "has already confirmed don't apply.\n\n"
+                f"Cosign error: {error or '(no detail)'}"
+            ),
+            impact=(
+                "Without VEX, false-positive CVE noise dominates "
+                "container scans for any image with > a few dozen "
+                "deps. Operators triage CVEs that don't apply, "
+                "real ones get lost in the queue. Chainguard / "
+                "Wolfi / Bitnami publish VEX; most images don't."
+            ),
+            technical_analysis=(
+                f"Image: {image_ref}\n"
+                f"Attestation type queried: vuln (VEX)\n"
+                f"Cosign stderr: {error or '(empty)'}"
+            ),
+            poc_description=(
+                f"1. `cosign verify-attestation --type vuln "
+                f"--output json {image_ref}`\n"
+                "2. Cosign returns non-zero when no VEX "
+                "attestation is bound to the image digest."
+            ),
+            poc_script_code=(
+                f"cosign verify-attestation --type vuln "
+                f"--output json {image_ref}"
+            ),
+            remediation_steps=(
+                "1. Generate a VEX document covering the CVEs "
+                "this image's components advertise. Format: "
+                "OpenVEX (https://github.com/openvex/spec) or "
+                "CSAF VEX (https://docs.oasis-open.org/csaf/csaf/"
+                "v2.0/csaf-v2.0.html).\n"
+                "2. Sign-and-bind via `cosign attest --type vuln "
+                "--predicate vex.openvex.json <image>`.\n"
+                "3. At scan-time, strix's threat-intel decorator "
+                "can read the attached VEX and demote CVEs the "
+                "producer has marked not_affected."
+            ),
+            reasoning_trace=[
+                f"Ran cosign verify-attestation --type vuln "
+                f"{image_ref}.",
+                "Cosign exited non-zero — no VEX attestation "
+                "bound to image digest.",
+                f"Error: {error or '(no detail)'}",
+            ],
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(
+            "scan_container_image: VEX attestation finding emit failed: %s",
+            e, exc_info=True,
+        )
+        return None
+
+
 def _decorate_with_threat_intel(
     cve_id: str, trivy_severity: str,
 ) -> tuple[str, bool, float | None]:
@@ -1541,6 +1738,80 @@ def scan_container_image(
             evidence.append(
                 f"cosign verify-attestation slsaprovenance: FAIL "
                 f"err={slsa_err or '(none)'}"
+            )
+
+        # iter-21.7 — SBOM (cyclonedx) attestation.
+        sbom_ok, _sbom_payload, sbom_err = (
+            _run_cosign_verify_attestation(
+                image_ref, attestation_type="cyclonedx",
+            )
+        )
+        if sbom_ok:
+            evidence.append(
+                "cosign verify-attestation cyclonedx: PASS"
+            )
+        else:
+            rid = _emit_missing_sbom_attestation_finding(
+                image_ref=image_ref, error=sbom_err,
+            )
+            if rid:
+                drafts.append(FindingDraft(
+                    title=(
+                        f"Missing CycloneDX SBOM attestation: "
+                        f"{image_ref}"
+                    ),
+                    severity="info",
+                    cwe="CWE-1357",
+                    endpoint=image_ref,
+                    category="image_signing",
+                    verification_status="verified",
+                    confidence=0.9,
+                    description=(
+                        f"cosign verify-attestation (cyclonedx) "
+                        f"failed on {image_ref}: "
+                        f"{sbom_err or '(no detail)'}"
+                    ),
+                ))
+            evidence.append(
+                f"cosign verify-attestation cyclonedx: FAIL "
+                f"err={sbom_err or '(none)'}"
+            )
+
+        # iter-21.7 — VEX (vuln) attestation.
+        vex_ok, _vex_payload, vex_err = (
+            _run_cosign_verify_attestation(
+                image_ref, attestation_type="vuln",
+            )
+        )
+        if vex_ok:
+            evidence.append(
+                "cosign verify-attestation vuln (VEX): PASS"
+            )
+        else:
+            rid = _emit_missing_vex_attestation_finding(
+                image_ref=image_ref, error=vex_err,
+            )
+            if rid:
+                drafts.append(FindingDraft(
+                    title=(
+                        f"Missing VEX (vulnerability exploitability) "
+                        f"attestation: {image_ref}"
+                    ),
+                    severity="info",
+                    cwe="CWE-1357",
+                    endpoint=image_ref,
+                    category="image_signing",
+                    verification_status="verified",
+                    confidence=0.9,
+                    description=(
+                        f"cosign verify-attestation (vuln/VEX) "
+                        f"failed on {image_ref}: "
+                        f"{vex_err or '(no detail)'}"
+                    ),
+                ))
+            evidence.append(
+                f"cosign verify-attestation vuln (VEX): FAIL "
+                f"err={vex_err or '(none)'}"
             )
 
     # Phase 1.6 — decision provenance log.
