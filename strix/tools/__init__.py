@@ -67,6 +67,12 @@ from .tls_audit import *            # noqa: F403  # tls_audit
 from .web_crawler import *          # noqa: F403  # web_crawler / bfs_crawl
 from .websocket import *            # noqa: F403  # scan_websocket_auth
 from .well_known import *           # noqa: F403  # well-known endpoint probes
+# iter-21.3 — deterministic audit of OIDC / OAuth 2.0 / JWKS
+# metadata exposed via `.well-known/`. Companion to
+# `well_known_harvest` (which just discloses) — this module emits
+# severity findings for `alg=none`, deprecated grants, HMAC keys
+# leaked in JWKS, sub-2048-bit RSA, etc.
+from .authn_metadata_audit import *  # noqa: F403  # scan_authn_metadata
 
 # SCA / supply-chain analysis (Phase 6) — registers
 # `scan_sca_lockfiles`.
