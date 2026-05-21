@@ -171,13 +171,25 @@ def _container_kwargs(target_value: str, workspace_path: str, tool_name: str) ->
     return {"image_ref": target_value}
 
 
-def _mobile_app_kwargs(
-    target_value: str, workspace_path: str, tool_name: str,
-) -> dict[str, Any]:
-    """Kwargs for `scan_mobile_app` — takes `binary_path=` pointing
-    to an APK / IPA on the workspace. The bench / runtime passes
-    the binary path as `target_value`. iter-21.5."""
-    return {"binary_path": target_value}
+# iter-21.5 followup: `_mobile_app_kwargs` was added with the
+# `_ANCHORS_MOBILE` list + `mobile_app` asset-type entry below.
+# That trio is intentionally NOT wired here yet — the upstream
+# pipeline doesn't recognize `target.type = "mobile_app"`
+# (CLI, preflight, target-type utilities, StrixAgent dispatch,
+# bench fixtures, lead-agent prompts all branch only on
+# local_code / repository / web_application / api /
+# container_image / ip_address). Adding the anchor without the
+# upstream plumbing was dead code — the anchor list would never
+# fire because the asset-type detection never produces
+# "mobile_app". Removed here so the prepass dict reflects the
+# real asset-type surface.
+#
+# The `scan_mobile_app` tool itself remains registered under
+# `strix.tools.mobile_app_audit`: LLM agents can call it
+# explicitly when a user supplies a binary path. End-to-end
+# mobile_app pipeline support (CLI flag + preflight + fixture +
+# routing) is a future iter that needs to land BEFORE the
+# anchor entry is restored.
 
 
 def _sbom_extract_kwargs(
@@ -361,13 +373,13 @@ _ANCHORS_CONTAINER: list[tuple[str, Any]] = [
     ("scan_container_image", _container_kwargs),
 ]
 
-# iter-21.5 — mobile_app asset type. Single deterministic
-# anchor: `scan_mobile_app` reads the APK / IPA as a zip,
-# applies a rule set against AndroidManifest.xml /
-# Info.plist / resources. Pure Python — no docker, no mobsf.
-_ANCHORS_MOBILE: list[tuple[str, Any]] = [
-    ("scan_mobile_app", _mobile_app_kwargs),
-]
+# iter-21.5 followup: the `_ANCHORS_MOBILE` list + `mobile_app`
+# entry below were removed after the user pointed out that the
+# upstream pipeline doesn't recognize the asset type — the
+# anchor would never have fired. The `scan_mobile_app` tool
+# itself stays registered (`strix.tools.mobile_app_audit`) so
+# agents can invoke it explicitly; the asset-type wiring
+# returns once CLI/preflight/runner support lands.
 
 # Per-target-type anchor lookup. Empty list = "no signature corpus
 # applies to this target type; fall through to the lead loop with
@@ -378,7 +390,6 @@ _ANCHORS_BY_TARGET_TYPE: dict[str, list[tuple[str, Any]]] = {
     "api": _ANCHORS_API,
     "web_application": _ANCHORS_WEB,
     "container_image": _ANCHORS_CONTAINER,
-    "mobile_app": _ANCHORS_MOBILE,
     "domain": [],
     "ip_address": [],
 }
