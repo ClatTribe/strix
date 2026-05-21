@@ -303,6 +303,15 @@ _ANCHORS_API: list[tuple[str, Any]] = [
     ("cors_deep_check", _api_target_url_kwargs),
     ("csrf_check", _api_target_url_kwargs),
     ("open_redirect_check", _api_target_url_kwargs),
+    # iter-21.3 — deterministic OIDC/OAuth/JWKS metadata audit.
+    # Companion to `well_known_harvest` (which just discloses):
+    # this probe AUDITS the metadata for `alg: none`, deprecated
+    # grants (implicit / password), missing PKCE, HMAC keys leaked
+    # in JWKS, sub-2048-bit RSA, weak EC curves, missing kids.
+    # Uses `target_url=` like the other audit-style anchors.
+    # Returns partial when the target isn't an OIDC/OAuth issuer
+    # (no penalty on non-OIDC targets).
+    ("scan_authn_metadata", _api_target_url_kwargs),
     # Tools wired via phase-2 (require runtime-captured state, not
     # just target_value), invoked in `_run_dependent_api_tools`:
     #   * jwt_audit — needs a JWT token. iter-17 auth-flow captures
