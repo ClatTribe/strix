@@ -135,6 +135,47 @@ CREATE TABLE IF NOT EXISTS malicious_packages (
 );
 CREATE INDEX IF NOT EXISTS ix_malicious_packages_lookup
     ON malicious_packages(ecosystem, name);
+
+-- iter-21.2 — active-exploitation campaign correlation.
+--
+-- A "campaign" is one entry from a threat-intel feed describing
+-- a coordinated attacker activity. Sources include:
+--   * AlienVault OTX pulses (https://otx.alienvault.com/api/v1/)
+--   * MISP community feeds (event-shaped)
+--   * Mandiant ASM / MS Defender TI campaign reports
+--   * Recorded Future Community / IntelX
+--
+-- Each campaign typically references multiple CVEs that the
+-- attacker(s) leverage. The `campaign_cve_links` mapping lets us
+-- answer "which active campaigns are using CVE-X right now?"
+-- when emitting a finding, mirroring the way KEV answers "is
+-- this CVE in CISA's exploited-in-wild catalog?".
+CREATE TABLE IF NOT EXISTS campaigns (
+    campaign_id TEXT PRIMARY KEY,    -- feed-prefixed (e.g. 'otx:65f...', 'misp:1234')
+    source TEXT NOT NULL,            -- 'otx' | 'misp' | 'mandiant' | 'recorded_future'
+    name TEXT,                       -- pulse / event / report title
+    description TEXT,
+    author TEXT,                     -- pulse author / curator
+    first_seen TEXT,                 -- ISO-8601 of first appearance
+    last_seen TEXT,                  -- ISO-8601 of last update (some feeds re-update)
+    severity TEXT,                   -- 'critical' | 'high' | 'medium' | 'low' | null
+    references_json TEXT,            -- JSON array of reference URLs
+    tags_json TEXT                   -- JSON array of feed tags / TLP / sector
+);
+
+CREATE INDEX IF NOT EXISTS ix_campaigns_source ON campaigns(source);
+CREATE INDEX IF NOT EXISTS ix_campaigns_last_seen ON campaigns(last_seen);
+
+CREATE TABLE IF NOT EXISTS campaign_cve_links (
+    cve_id TEXT NOT NULL,
+    campaign_id TEXT NOT NULL,
+    PRIMARY KEY (cve_id, campaign_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_campaign_cve_links_cve
+    ON campaign_cve_links(cve_id);
+CREATE INDEX IF NOT EXISTS ix_campaign_cve_links_campaign
+    ON campaign_cve_links(campaign_id);
 """
 
 
@@ -805,3 +846,148 @@ def reset_for_testing(path: Path | None = None) -> None:
             pass
     with connect(p) as conn:
         conn.executescript(_SCHEMA)
+
+
+# ---------------------------------------------------------------------------
+# iter-21.2 — campaign correlation read/write helpers.
+# ---------------------------------------------------------------------------
+
+
+def upsert_campaign(record: dict[str, Any]) -> bool:
+    """Insert / update one campaign row. Returns True on success.
+
+    Expected keys: `campaign_id` (str, feed-prefixed and unique),
+    `source`, plus any of: `name`, `description`, `author`,
+    `first_seen`, `last_seen`, `severity`, `references` (list),
+    `tags` (list). Best-effort: returns False on any DB error.
+    """
+    cid = record.get("campaign_id")
+    src = record.get("source")
+    if not isinstance(cid, str) or not cid.strip():
+        return False
+    if not isinstance(src, str) or not src.strip():
+        return False
+    refs = record.get("references")
+    tags = record.get("tags")
+    refs_json = json.dumps(refs) if isinstance(refs, list) else None
+    tags_json = json.dumps(tags) if isinstance(tags, list) else None
+    try:
+        with connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO campaigns
+                    (campaign_id, source, name, description, author,
+                     first_seen, last_seen, severity,
+                     references_json, tags_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(campaign_id) DO UPDATE SET
+                    source           = excluded.source,
+                    name             = COALESCE(excluded.name,
+                                                campaigns.name),
+                    description      = COALESCE(excluded.description,
+                                                campaigns.description),
+                    author           = COALESCE(excluded.author,
+                                                campaigns.author),
+                    first_seen       = COALESCE(campaigns.first_seen,
+                                                excluded.first_seen),
+                    last_seen        = COALESCE(excluded.last_seen,
+                                                campaigns.last_seen),
+                    severity         = COALESCE(excluded.severity,
+                                                campaigns.severity),
+                    references_json  = COALESCE(excluded.references_json,
+                                                campaigns.references_json),
+                    tags_json        = COALESCE(excluded.tags_json,
+                                                campaigns.tags_json)
+                """,
+                (
+                    cid.strip(), src.strip(),
+                    record.get("name"), record.get("description"),
+                    record.get("author"),
+                    record.get("first_seen"), record.get("last_seen"),
+                    record.get("severity"),
+                    refs_json, tags_json,
+                ),
+            )
+            return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("upsert_campaign failed: %s", e, exc_info=True)
+        return False
+
+
+def link_campaign_to_cves(
+    campaign_id: str, cve_ids: Iterable[str],
+) -> int:
+    """Link one campaign to N CVEs. Idempotent (PRIMARY KEY on the
+    composite). Returns the number of rows attempted to insert.
+    Failures are swallowed; returns 0 on DB error.
+    """
+    if not isinstance(campaign_id, str) or not campaign_id.strip():
+        return 0
+    pairs = [
+        (cve_id.strip(), campaign_id.strip())
+        for cve_id in cve_ids
+        if isinstance(cve_id, str) and cve_id.strip()
+    ]
+    if not pairs:
+        return 0
+    try:
+        with connect() as conn:
+            cur = conn.cursor()
+            cur.executemany(
+                """
+                INSERT OR IGNORE INTO campaign_cve_links
+                    (cve_id, campaign_id)
+                VALUES (?, ?)
+                """,
+                pairs,
+            )
+            return len(pairs)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("link_campaign_to_cves failed: %s", e, exc_info=True)
+        return 0
+
+
+def fetch_campaigns_for_cve(
+    cve_id: str, *, limit: int = 25,
+) -> list[dict[str, Any]]:
+    """Return campaigns linked to a CVE, ordered by `last_seen`
+    descending (most recently active first). Each entry is a dict
+    with the full campaign row + parsed `references` / `tags`.
+    Returns [] on cache error or missing CVE.
+    """
+    if not isinstance(cve_id, str) or not cve_id.strip():
+        return []
+    try:
+        with connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT c.*
+                FROM campaigns c
+                JOIN campaign_cve_links l
+                  ON l.campaign_id = c.campaign_id
+                WHERE l.cve_id = ?
+                ORDER BY COALESCE(c.last_seen, c.first_seen) DESC
+                LIMIT ?
+                """,
+                (cve_id.strip(), max(1, min(limit, 100))),
+            )
+            out: list[dict[str, Any]] = []
+            for row in cur.fetchall():
+                d = dict(row)
+                refs = d.pop("references_json", None)
+                tags = d.pop("tags_json", None)
+                try:
+                    d["references"] = json.loads(refs) if refs else []
+                except (ValueError, TypeError):
+                    d["references"] = []
+                try:
+                    d["tags"] = json.loads(tags) if tags else []
+                except (ValueError, TypeError):
+                    d["tags"] = []
+                out.append(d)
+            return out
+    except Exception as e:  # noqa: BLE001
+        logger.debug("fetch_campaigns_for_cve(%s) failed: %s", cve_id, e)
+        return []

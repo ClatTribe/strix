@@ -1161,6 +1161,49 @@ class Tracer:
         except Exception as e:  # noqa: BLE001
             logger.debug("kev severity promotion failed: %s", e)
 
+        # iter-21.2 — active-campaign correlation. For findings
+        # whose CVE is referenced by one or more campaigns currently
+        # in the threat-intel feed (AlienVault OTX, MISP, Mandiant
+        # ASM, Recorded Future), attach a structured `campaigns`
+        # block listing the matched pulses + their severity. When
+        # at least one matched campaign is severity ≥ high AND the
+        # finding's current severity is below high, nudge it up one
+        # tier (medium → high; low → medium). Conservative: never
+        # pushes to critical — that's the KEV path. Logs the nudge
+        # to reasoning_trace.
+        try:
+            from strix.llm.campaign_enrichment import resolve_campaign_block
+            report["campaigns"] = resolve_campaign_block(cve=cve)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("campaign enrichment failed: %s", e)
+            report["campaigns"] = {
+                "matched_pulse_count": 0,
+                "matched_pulses": [],
+                "highest_campaign_severity": None,
+                "sources_seen": [],
+                "last_updated": None,
+                "reason": "cache_unavailable",
+            }
+
+        try:
+            from strix.llm.campaign_enrichment import (
+                maybe_nudge_severity_for_campaign,
+            )
+            new_sev, campaign_trace_line = maybe_nudge_severity_for_campaign(
+                current_severity=report.get("severity"),
+                campaign_block=report.get("campaigns") or {},
+            )
+            if new_sev is not None:
+                report["severity"] = new_sev
+                _existing_trace = report.get("reasoning_trace") or []
+                if isinstance(_existing_trace, str):
+                    _existing_trace = [_existing_trace]
+                if isinstance(_existing_trace, list) and campaign_trace_line:
+                    _existing_trace = list(_existing_trace) + [campaign_trace_line]
+                    report["reasoning_trace"] = _existing_trace
+        except Exception as e:  # noqa: BLE001
+            logger.debug("campaign severity nudge failed: %s", e)
+
         # MA-S2 P0-CVS-D — discovery_method block for novel-vuln
         # attestation. CVS-0.3 requires demonstrating that novel,
         # zero-day-class vulnerabilities (no CVE matched) are
