@@ -333,21 +333,6 @@ _ANCHORS_API: list[tuple[str, Any]] = [
     # Returns partial when the target isn't an OIDC/OAuth issuer
     # (no penalty on non-OIDC targets).
     ("scan_authn_metadata", _api_target_url_kwargs),
-    # iter-21.6 — deterministic cloud-exposure audits.
-    #
-    # `scan_public_bucket_exposure` extracts bucket-name candidates
-    # from the target's hostname labels and probes AWS S3 / GCP
-    # GCS / Azure Blob endpoints. Returns partial on bare-IP
-    # targets (no useful labels to seed candidates).
-    #
-    # `scan_cloud_imds_passthrough` GETs a corpus of known
-    # IMDS-proxy paths (`/imds`, `/metadata`, `/debug/imds`, ...)
-    # on the target itself and fingerprints AWS/GCP/Azure/OCI
-    # response bodies. Complements `scan_ssrf` (which needs a
-    # SSRF-shaped param to drive probes through) for the
-    # parameter-less direct-passthrough case.
-    ("scan_public_bucket_exposure", _api_target_url_kwargs),
-    ("scan_cloud_imds_passthrough", _api_target_url_kwargs),
     # Tools wired via phase-2 (require runtime-captured state, not
     # just target_value), invoked in `_run_dependent_api_tools`:
     #   * jwt_audit — needs a JWT token. iter-17 auth-flow captures
