@@ -73,6 +73,10 @@ from .well_known import *           # noqa: F403  # well-known endpoint probes
 # severity findings for `alg=none`, deprecated grants, HMAC keys
 # leaked in JWKS, sub-2048-bit RSA, etc.
 from .authn_metadata_audit import *  # noqa: F403  # scan_authn_metadata
+# iter-21.5 — deterministic mobile-app (APK / IPA) static analysis.
+# Pure-Python zip + xml + plist inspection; no docker dep, no
+# mobsf. Closes the `asset_type=mobile_app` gap.
+from .mobile_app_audit import *      # noqa: F403  # scan_mobile_app
 
 # SCA / supply-chain analysis (Phase 6) — registers
 # `scan_sca_lockfiles`.
