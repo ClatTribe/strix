@@ -171,6 +171,15 @@ def _container_kwargs(target_value: str, workspace_path: str, tool_name: str) ->
     return {"image_ref": target_value}
 
 
+def _mobile_app_kwargs(
+    target_value: str, workspace_path: str, tool_name: str,
+) -> dict[str, Any]:
+    """Kwargs for `scan_mobile_app` — takes `binary_path=` pointing
+    to an APK / IPA on the workspace. The bench / runtime passes
+    the binary path as `target_value`. iter-21.5."""
+    return {"binary_path": target_value}
+
+
 def _sbom_extract_kwargs(
     target_value: str, workspace_path: str, tool_name: str,
 ) -> dict[str, Any]:
@@ -352,6 +361,14 @@ _ANCHORS_CONTAINER: list[tuple[str, Any]] = [
     ("scan_container_image", _container_kwargs),
 ]
 
+# iter-21.5 — mobile_app asset type. Single deterministic
+# anchor: `scan_mobile_app` reads the APK / IPA as a zip,
+# applies a rule set against AndroidManifest.xml /
+# Info.plist / resources. Pure Python — no docker, no mobsf.
+_ANCHORS_MOBILE: list[tuple[str, Any]] = [
+    ("scan_mobile_app", _mobile_app_kwargs),
+]
+
 # Per-target-type anchor lookup. Empty list = "no signature corpus
 # applies to this target type; fall through to the lead loop with
 # no prepass findings."
@@ -361,6 +378,7 @@ _ANCHORS_BY_TARGET_TYPE: dict[str, list[tuple[str, Any]]] = {
     "api": _ANCHORS_API,
     "web_application": _ANCHORS_WEB,
     "container_image": _ANCHORS_CONTAINER,
+    "mobile_app": _ANCHORS_MOBILE,
     "domain": [],
     "ip_address": [],
 }
