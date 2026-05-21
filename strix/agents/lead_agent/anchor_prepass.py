@@ -37,14 +37,21 @@ context, not to decide which scanner to call.
 
 | Layer | What does the work | Scope |
 |---|---|---|
-| L1 (this module) | OSS signature corpus + deterministic specialists | Layer 1 — same in all modes (quick, standard, deep) |
-| L2 (existing lead loop) | LLM reasoning — rank, dedupe, FP demote, novel-vuln tag | Layer 2 — proportional to scan mode |
-| L3 (dispatch_specialist) | Fresh-context exploit chains + PoC synthesis | Layer 3 — quick=0, standard=8, deep=unbounded |
+| L1 (this module) | OSS signature corpus + deterministic specialists. **Every L1 tool runs inside the strix-sandbox container in production** (PRs #384/#386/#387 collapsed the host-vs-sandbox split). Includes: scan_sast, scan_sca_lockfiles, scan_iac, secrets_scan, scan_nuclei_templates, scan_container_image, scan_api_rate_limit, scan_api_bola/bfla/mass_assignment, scan_idor, jwt_audit, webapp_recon_pipeline, http_security_headers_audit, tls_audit, cors_deep_check, csrf_check, open_redirect_check, dom_xss_static_probe, scan_cache_deception, scan_websocket_auth, scan_prototype_pollution, fingerprint_tech_stack, openapi_spec_ingest, sbom_extract. | Same in all modes (quick, standard, deep) |
+| L2 (existing lead loop) | LLM reasoning — rank, dedupe, FP demote, novel-vuln tag, cross-asset SAST↔DAST correlation, multi-role role-picking | Proportional to scan mode |
+| L3 (dispatch_specialist) | Fresh-context exploit chains + PoC synthesis | quick=0, standard=8, deep=unbounded |
 
 This module is L1 ONLY. It never invokes the LLM. It runs the same
 deterministic anchor sequence regardless of scan mode — the lead
 loop's iter_cap (and downstream dispatch_specialist budget) handles
 the mode-aware L2/L3 budgeting.
+
+The "sandbox-only" terminology is deprecated — every L1 tool runs
+in the sandbox. The `sandbox_execution` registry flag still routes
+tool execution (sandbox vs in-process), but it's not a layer
+indicator. The bench harness (`bench_l1_only.py`) has no sandbox
+and shows a deliberate LOWER BOUND of L1 recall; production sees
+the full anchor coverage including sandbox-routed tools.
 
 ## Kill switches
 
@@ -219,15 +226,17 @@ _ANCHORS_API: list[tuple[str, Any]] = [
     ("cors_deep_check", _api_url_kwargs),
     ("csrf_check", _api_url_kwargs),
     ("open_redirect_check", _api_url_kwargs),
-    # NOT in v1 of the API prepass (require prereqs the prepass
-    # doesn't yet wire):
-    #   * jwt_audit — needs a JWT token (out of scope for prepass;
-    #     the lead's L2 layer extracts JWTs from response captures
-    #     then invokes jwt_audit per token).
-    #   * scan_api_bola / scan_api_bfla / scan_api_mass_assignment —
-    #     need `endpoints=list[dict]` from openapi_spec_ingest's
-    #     emission. The lead picks these up from KG endpoints after
-    #     openapi_spec_ingest runs.
+    # Tools wired via phase-2 (require runtime-captured state, not
+    # just target_value), invoked in `_run_dependent_api_tools`:
+    #   * jwt_audit — needs a JWT token. iter-17 auth-flow captures
+    #     it from /login; phase-2 calls jwt_audit with the token.
+    #   * scan_api_bola / scan_api_bfla / scan_api_mass_assignment /
+    #     scan_idor — need `endpoints=list[dict]` from openapi_spec_
+    #     ingest + auth state under user-a + user-b labels. iter-18
+    #     auth-flow registers both users; phase-2 invokes the
+    #     specialists.
+    #   * webapp_recon_pipeline — playwright-driven SPA crawl;
+    #     phase-2 calls it for web_application targets.
 ]
 
 _ANCHORS_WEB: list[tuple[str, Any]] = _ANCHORS_API + [
@@ -276,7 +285,7 @@ class PrepassSummary:
 
     `total_findings` is the naive UNION across tools — over-counts
     duplicates (e.g. nuclei + scan_sqli both flagging the same SQLi
-    endpoint). Dedup happens in the lead loop's L2 layer."""
+    endpoint). Dedup happens in the lead loop on top of L1."""
     target_type: str
     target_value: str
     tools_run: list[str] = field(default_factory=list)
@@ -2170,8 +2179,7 @@ async def _run_auth_flow(
         ))
         return None
 
-    # Build credentials. Use a single username/password pair across
-    # register + login so they line up.
+    # Build credentials for user-a (the primary captured user).
     import random as _random
     import string as _string
     state.username = (
@@ -2184,95 +2192,124 @@ async def _run_auth_flow(
         + "!"
     )
 
-    # Step 1 — register (best-effort; some APIs don't have public
-    # registration and we'd just use a default credential).
-    if auth_eps.register:
+    # Helper: do one register+login cycle for a given user, return
+    # (token_or_empty, cookies). Extracted so we can run TWICE — once
+    # for user-a (the primary auth-state) and once for user-b (the
+    # cross-session counterpart that BOLA/BFLA/IDOR probes need).
+    # iter-18: previously we registered ONE user and reused that token
+    # under both user-a + user-b labels. BOLA probes then degenerate
+    # to "same user accessing their own resources" → 0 BOLA findings.
+    # Now user-b is a DIFFERENT account → real cross-session probing.
+    def _do_register_then_login(
+        username: str, password: str,
+    ) -> tuple[str, dict[str, str]]:
+        if auth_eps.register:
+            try:
+                reg_body = _build_schema_driven_body(
+                    auth_eps.register, username=username, password=password,
+                )
+                reg_url_inner = auth_eps.register.get("url") or (
+                    target_value.rstrip("/") + (auth_eps.register.get("path") or "")
+                )
+                _http_request(
+                    reg_url_inner, method="POST", timeout=8.0,
+                    headers={"Content-Type": "application/json"},
+                    data=_json.dumps(reg_body).encode(),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        login_url_inner = auth_eps.login.get("url") or (
+            target_value.rstrip("/") + (auth_eps.login.get("path") or "")
+        )
         try:
-            reg_body = _build_schema_driven_body(
-                auth_eps.register,
-                username=state.username,
-                password=state.password,
+            login_body = _build_schema_driven_body(
+                auth_eps.login, username=username, password=password,
             )
-            reg_url = auth_eps.register.get("url") or (
-                target_value.rstrip("/") + (auth_eps.register.get("path") or "")
-            )
-            state.register_endpoint = reg_url
-            data = _json.dumps(reg_body).encode()
-            _http_request(
-                reg_url, method="POST", timeout=8.0,
+            resp = _http_request(
+                login_url_inner, method="POST", timeout=8.0,
                 headers={"Content-Type": "application/json"},
-                data=data,
+                data=_json.dumps(login_body).encode(),
             )
-            # We don't gate on registration status — some APIs return
-            # 200, some 201, some 4xx (duplicate user) and login still
-            # works with the supplied creds. Some accept register
-            # without explicit "create" and grant a token in the
-            # response — we don't try to capture from register here
-            # because the dominant pattern is "register THEN login".
+            status = getattr(resp, "status", getattr(resp, "code", None))
+            if status and 200 <= status < 300:
+                _, hdr_val, ck = _extract_auth_from_response(resp)
+                return (hdr_val, ck)
         except Exception:  # noqa: BLE001
             pass
+        return ("", {})
 
-    # Step 2 — login.
-    login_url = auth_eps.login.get("url") or (
-        target_value.rstrip("/") + (auth_eps.login.get("path") or "")
+    # Step 1 — register + login user-a (primary)
+    state.register_endpoint = auth_eps.register.get("url", "") if auth_eps.register else ""
+    state.login_endpoint = auth_eps.login.get("url", "") if auth_eps.login else ""
+    user_a_token, user_a_cookies = _do_register_then_login(
+        state.username, state.password,
     )
-    state.login_endpoint = login_url
-    try:
-        login_body = _build_schema_driven_body(
-            auth_eps.login,
-            username=state.username,
-            password=state.password,
-        )
-        data = _json.dumps(login_body).encode()
-        resp = _http_request(
-            login_url, method="POST", timeout=8.0,
-            headers={"Content-Type": "application/json"},
-            data=data,
-        )
-        status = getattr(resp, "status", getattr(resp, "code", None))
-        if status and 200 <= status < 300:
-            hdr_name, hdr_val, cookies = _extract_auth_from_response(resp)
-            state.header_name = hdr_name
-            state.header_value = hdr_val
-            state.cookies = cookies
-    except Exception:  # noqa: BLE001
-        pass
+    if user_a_token or user_a_cookies:
+        state.header_name = "Authorization"
+        state.header_value = user_a_token
+        state.cookies = user_a_cookies
 
-    # Register the captured state in the SecurityContext auth
-    # registry so scan_api_bola / scan_api_bfla /
-    # scan_api_mass_assignment can find it by label. Their kwargs
-    # use `owner_label` / `auth_label` / `admin_label` which look
-    # up via `get_auth_state(label)`.
-    if state.is_valid:
+    # Step 2 (iter-18) — register + login user-b for cross-session probes.
+    # Different username + different password than user-a.
+    user_b_username = (
+        "strix_bench_"
+        + "".join(_random.choices(_string.ascii_lowercase, k=8))
+    )
+    user_b_password = (
+        "Strix_BenchB_"
+        + "".join(_random.choices(_string.ascii_letters + _string.digits, k=12))
+        + "!"
+    )
+    user_b_token, user_b_cookies = _do_register_then_login(
+        user_b_username, user_b_password,
+    )
+
+    # Register both captured states in the SecurityContext auth
+    # registry. Iter-18: user-a + user-b are now SEPARATE accounts
+    # with distinct tokens. The OWASP API specialists read by label:
+    #   * scan_api_bola: owner_label="user-a", accessor_label="user-b"
+    #   * scan_api_bfla: admin_label="admin", role_labels=["viewer","member","user"]
+    #   * scan_api_mass_assignment: auth_label="user-a"
+    #   * scan_idor: owner_label="user-a", accessor_label="user-b"
+    #
+    # user-a's token registers under user-a + admin + viewer + member +
+    # user (so BFLA defaults work even when we only have one role; the
+    # probe becomes a self-as-self check — not a real BFLA but at
+    # least the tool fires).
+    # user-b's token (when distinct) registers under user-b ONLY — so
+    # BOLA / IDOR see two different tokens and produce real
+    # cross-session probes.
+    def _to_bearer(hdr_val: str) -> str:
+        if hdr_val and hdr_val.lower().startswith("bearer "):
+            return hdr_val[len("Bearer "):].strip()
+        return ""
+
+    if state.is_valid or user_b_token or user_b_cookies:
         try:
             from strix.agents.security_context import record_auth_state
-            raw_bearer = ""
-            if state.header_value and state.header_value.lower().startswith("bearer "):
-                raw_bearer = state.header_value[len("Bearer "):].strip()
-            # Register under multiple labels so default kwargs of the
-            # specialists pick it up. Each specialist defaults to a
-            # different label:
-            #   * scan_api_bola: owner_label="user-a", accessor_label="user-b"
-            #   * scan_api_bfla: admin_label="admin", role_labels=["viewer","member","user"]
-            #   * scan_api_mass_assignment: auth_label="user-a"
-            # We register the SAME captured token under all of them.
-            # That makes single-user BOLA probes meaningful (the
-            # specialist sends 2 requests with the same identity; the
-            # comparison is degenerate — it'll be 0 BOLA findings).
-            # But it lets BFLA / mass-assignment actually fire with
-            # our token instead of erroring on "no role sessions".
-            for label in (
-                "user-a", "user-b", "admin",
-                "viewer", "member", "user",
-                "iter17-auth",
-            ):
+            # user-a registrations
+            a_bearer = _to_bearer(state.header_value) if state.header_value else ""
+            if state.is_valid:
+                for label in ("user-a", "admin", "viewer", "member", "user"):
+                    record_auth_state(
+                        label=label,
+                        cookies=state.cookies if state.cookies else None,
+                        bearer=a_bearer or None,
+                        notes=(
+                            f"strix L1 user-a captured via openapi /login "
+                            f"at {login_url}"
+                        ),
+                    )
+            # user-b registration — separate token for real cross-session probes
+            b_bearer = _to_bearer(user_b_token) if user_b_token else ""
+            if b_bearer or user_b_cookies:
                 record_auth_state(
-                    label=label,
-                    cookies=state.cookies if state.cookies else None,
-                    bearer=raw_bearer or None,
+                    label="user-b",
+                    cookies=user_b_cookies if user_b_cookies else None,
+                    bearer=b_bearer or None,
                     notes=(
-                        f"strix L1 iter-17 captured via openapi /login "
-                        f"at {login_url}"
+                        f"strix L1 user-b (iter-18 cross-session) "
+                        f"captured via openapi /login at {login_url}"
                     ),
                 )
         except Exception:  # noqa: BLE001
@@ -3001,9 +3038,15 @@ async def _run_dependent_api_tools(
     # Fallback for web_application targets that have no OpenAPI spec:
     # crawl the target with katana to emit an endpoint list. Without
     # this, vibe-app / juiceshop / similar HTML-rendering apps have
-    # no per-endpoint surface for phase-2 to iterate. The lead's L2
-    # layer would also handle this via webapp_recon_pipeline, but
-    # that's sandbox_execution=True and unavailable here.
+    # no per-endpoint surface for phase-2 to iterate.
+    #
+    # iter-18: ALSO call webapp_recon_pipeline (playwright-driven,
+    # sandbox-resident). Where katana is a static JS-AST crawler,
+    # webapp_recon_pipeline executes JS in headless Chrome → discovers
+    # routes computed at runtime (Angular SPAs like juiceshop, React
+    # SPAs, Vue, etc.). Both are deterministic L1 work; both run when
+    # the sandbox is available (always in production, errors cleanly
+    # in the bench harness without a sandbox).
     if (not endpoints) and target_type == "web_application" and target_value:
         crawled = _katana_crawl(target_value, max_endpoints=30, depth=2)
         if crawled:
@@ -3020,6 +3063,35 @@ async def _run_dependent_api_tools(
                 wall_time_s=0.0,
                 raw_result={"endpoints": crawled},
             ))
+
+    # iter-18: webapp_recon_pipeline runs unconditionally for
+    # web_application targets — its playwright-driven crawl catches
+    # SPA-routed endpoints katana misses (juiceshop's Angular bundle
+    # builds routes at runtime). The pipeline ALSO emits its own
+    # security findings (TLS, security-headers, well-known files).
+    # We don't merge its endpoint output into the local `endpoints`
+    # variable — its findings flow through the tracer into the
+    # canonical store directly via `_emit_finding`. The phase-2
+    # loop below uses katana/openapi-emitted endpoints regardless.
+    if target_type == "web_application" and target_value:
+        summary.tools_run.append("webapp_recon_pipeline")
+        wrp_result = await _run_one_tool(
+            "webapp_recon_pipeline",
+            {"target_url": target_value},
+            agent_state=agent_state, timeout_s=timeout_s,
+        )
+        summary.tool_results.append(wrp_result)
+        summary.total_findings += wrp_result.findings_count
+        if wrp_result.status in ("ok", "partial"):
+            summary.tools_succeeded.append("webapp_recon_pipeline")
+        else:
+            summary.tools_failed.append("webapp_recon_pipeline")
+        # If the pipeline returned endpoints AND we still have none,
+        # use them for the downstream phase-2 loop.
+        if (not endpoints) and isinstance(wrp_result.raw_result, dict):
+            pipeline_endpoints = wrp_result.raw_result.get("endpoints")
+            if isinstance(pipeline_endpoints, list) and pipeline_endpoints:
+                endpoints = pipeline_endpoints
     # Iter-11 deterministic L1 probes — fire BEFORE bailing out on
     # empty endpoints. These probes don't need the endpoint list at
     # all (only target_value), so they should fire even when openapi
@@ -3156,24 +3228,17 @@ async def _run_dependent_api_tools(
     else:
         endpoints_for_auth = endpoints
 
-    # NOTE: scan_api_bola / scan_api_bfla / scan_api_mass_assignment
-    # are NOT included here in the deterministic L1 phase, despite
-    # taking the endpoints list. The reason: they require additional
-    # prereqs that L1 can't synthesize from a bare endpoint list:
-    #   * scan_api_bola needs `owner_ids: dict[str, str]` — the map
-    #     of path-param-name → owner-resource-value (the "user A's
-    #     resource" half of the cross-session BOLA probe).
-    #     Discovering this requires authenticating as 2 users +
-    #     enumerating each one's resources, which is L2 work.
-    #   * scan_api_bfla needs `path_ids` for the same reason.
-    #   * scan_api_mass_assignment needs `path_ids` for the target
-    #     user's record IDs.
-    # The lead's L2 layer picks these up after AuthFlow specialist
-    # produces credentials, then invokes with proper kwargs. They're
-    # in the lead's tool_catalog for that reason.
-    #
-    # The phase-2 prepass focuses on tools that genuinely work with
-    # just the openapi-emitted endpoint list (no auth needed).
+    # iter-17/18: scan_api_bola / scan_api_bfla / scan_api_mass_
+    # assignment / scan_idor ARE wired into the L1 phase-2 below.
+    # They use:
+    #   * endpoints emitted by openapi_spec_ingest / katana /
+    #     webapp_recon_pipeline
+    #   * AuthState registered by _run_auth_flow under user-a (and
+    #     iter-18: user-b for real cross-session probing)
+    # No L2 needed for these — they're deterministic specialists.
+    # Some still need richer prereqs (path-id discovery for path-
+    # param-driven BOLA on resources owned by user-a); those still
+    # benefit from L2 reasoning to enumerate resources first.
 
     # Item A — per-endpoint scan_sqli with hydrated params + body.
     # Without this, base-URL scan_sqli returns partial="no params
@@ -3272,6 +3337,21 @@ async def _run_dependent_api_tools(
                 "endpoints": endpoints,
                 "admin_label": "admin",
             }),
+            # iter-18: scan_idor is a cross-session IDOR probe that
+            # uses owner_label=user-a + accessor_label=user-b from
+            # SecurityContext. With iter-18's two-user auth-flow, both
+            # labels carry distinct tokens → real cross-session probe.
+            # Takes a list of urls — use the openapi-emitted endpoint
+            # URLs. Caps at max_urls=50 internally.
+            ("scan_idor", {
+                "urls": [
+                    ep.get("url") for ep in endpoints
+                    if isinstance(ep, dict) and ep.get("url")
+                ],
+                "owner_label": "user-a",
+                "accessor_label": "user-b",
+                "test_anon": True,
+            }),
         ):
             summary.tools_run.append(api_tool)
             result = await _run_one_tool(
@@ -3286,12 +3366,13 @@ async def _run_dependent_api_tools(
                 summary.tools_failed.append(api_tool)
 
         # ---- Part 2e: jwt_audit on the captured token.
-        # Note: jwt_audit is `sandbox_execution=True` — it runs
-        # inside the strix-sandbox container. In the L1 bench
-        # harness without a sandbox, it errors; in real strix
-        # invocations the sandbox is available. We still queue
-        # it because in production it'll run, and our additive
-        # `probe_jwt_brute_secret` below covers the bench case.
+        # jwt_audit covers HS/RS/EC algorithms, alg-confusion (RSA
+        # public-key → HMAC secret), alg=none acceptance, key
+        # disclosure, JKU/X5U manipulation, dictionary brute. It runs
+        # inside the sandbox in production (always available); the
+        # bench's _FakeAgentState lacks a sandbox so it errors cleanly
+        # in bench runs only. Our additive `probe_jwt_brute_secret`
+        # below is a pure-Python lower-bound that ALWAYS runs.
         if auth_state.header_value and auth_state.header_value.lower().startswith("bearer "):
             raw_token = auth_state.header_value[len("Bearer "):].strip()
             summary.tools_run.append("jwt_audit")
@@ -3570,8 +3651,10 @@ def format_summary_for_lead_context(summary: PrepassSummary) -> str:
         lines.append("")
     lines.append(
         "Do NOT re-invoke the L1 anchor tools listed above — they "
-        "already ran. Use your remaining iterations for L2 ranking, "
-        "dedup, FP analysis, and final report emission."
+        "already ran inside the sandbox. Use your remaining "
+        "iterations for ranking, dedupe, FP analysis, novel-vuln "
+        "tagging, cross-asset correlation (SAST↔DAST chains), and "
+        "final report emission."
     )
     lines.append("")
     return "\n".join(lines)

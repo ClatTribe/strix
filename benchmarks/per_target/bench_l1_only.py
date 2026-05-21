@@ -11,10 +11,26 @@ fails fast on 429 because the previous fixture's tail exhausted the
 quota).
 
 L1 alone is deterministic — it's strix's OSS anchor pre-pass
-(`strix.agents.lead_agent.anchor_prepass.run_oss_anchor_prepass`).
-For tools with `sandbox_execution=False` (scan_sast / scan_sca_lockfiles
-/ scan_iac), L1 runs entirely on the host with zero LLM cost. We can
-measure exactly what L1 catches per fixture in ~30 seconds each.
+(`strix.agents.lead_agent.anchor_prepass.run_oss_anchor_prepass`),
+no LLM cost.
+
+**Sandbox vs bench gap (post PR #384):** every L1 anchor specialist
+now runs inside the strix-sandbox container in production. The
+bench harness here has NO sandbox — tools with
+`sandbox_execution=True` error cleanly with "Agent state with a
+valid sandbox_id is required" and contribute 0 findings.
+
+That's by design: the bench measures the LOWER BOUND of L1 (what
+runs without the sandbox infrastructure). Production sees the full
+anchor coverage including jwt_audit, webapp_recon_pipeline,
+http_security_headers_audit, tls_audit, cors_deep_check,
+csrf_check, dom_xss_static_probe, scan_cache_deception,
+scan_websocket_auth, scan_prototype_pollution, scan_container_image,
+scan_sast, scan_sca_lockfiles, scan_iac, secrets_scan, etc.
+
+The bench's job is to validate L1's NON-sandbox-resident probes +
+the orchestration logic. Sandbox-resident specialists are
+validated separately (unit tests + production runs).
 
 ## What this measures
 
@@ -91,8 +107,10 @@ def _require_yaml():
 class _FakeAgentState:
     """Minimal agent_state for the prepass — has the attrs the
     tool registry checks but no real sandbox. Tools with
-    sandbox_execution=True will error out (acceptable for L1
-    measurement; sandbox-dependent tools are L2/L3 territory)."""
+    sandbox_execution=True will error out cleanly. The bench
+    captures the LOWER BOUND of L1 recall (what runs without
+    sandbox infrastructure); production sees the full anchor
+    coverage."""
     sandbox_id = None
     sandbox_token = None
     sandbox_info: dict = {}

@@ -411,6 +411,12 @@ def needs_agent_state(tool_name: str) -> bool:
 
 
 def should_execute_in_sandbox(tool_name: str) -> bool:
+    # Every L1 anchor tool runs inside the strix-sandbox container
+    # in production (PRs #384/#386/#387). The bench harness
+    # (`bench_l1_only.py`) measures L1 WITHOUT a sandbox — tools
+    # with sandbox_execution=True error out, showing a deliberate
+    # bench-vs-production gap. The bench captures the lower-bound
+    # measurement; production sees the full anchor coverage.
     for tool in tools:
         if tool.get("name") == tool_name:
             return bool(tool.get("sandbox_execution", True))
