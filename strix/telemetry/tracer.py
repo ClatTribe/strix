@@ -1090,6 +1090,77 @@ class Tracer:
                 "reason": "cache_unavailable",
             }
 
+        # iter-21.1 — CISA KEV enrichment on every emitted finding.
+        # Same attestation discipline as EPSS: block is always
+        # present, `reason` carries the explanation when listing
+        # is missing. Mirrors `epss_enrichment.resolve_epss_block`.
+        # When `kev.listed=True`, severity gets auto-promoted to
+        # critical via `maybe_promote_severity` (and the
+        # promotion is recorded in reasoning_trace below). This
+        # unifies the KEV severity-bump logic that previously
+        # lived ad-hoc inside `sca/tools.py` +
+        # `container_image/scan_container_image.py` but was
+        # silently absent from `nuclei_runner` + custom SAST
+        # paths.
+        try:
+            from strix.llm.kev_enrichment import resolve_kev_block
+            report["kev_block"] = resolve_kev_block(cve=cve)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("kev enrichment failed: %s", e)
+            report["kev_block"] = {
+                "listed": None,
+                "date_added": None,
+                "due_date": None,
+                "known_ransomware_use": None,
+                "vendor_project": None,
+                "product": None,
+                "vulnerability_name": None,
+                "short_description": None,
+                "required_action": None,
+                "last_updated": None,
+                "reason": "cache_unavailable",
+            }
+
+        # Mirror `kev_block.listed` onto the legacy `kev` /
+        # `is_kev` fields so downstream consumers (priority-label
+        # derivation, KG emission, compliance) that read either
+        # field see the canonical authoritative answer. Tools
+        # that already set `kev` manually (sca + container_image)
+        # win — we only fill it when not already set, and we
+        # never down-grade from True to False.
+        try:
+            kev_listed = report["kev_block"].get("listed")
+            if kev_listed is True and not report.get("kev"):
+                report["kev"] = True
+                report["actively_exploited_in_wild"] = True
+        except Exception:  # noqa: BLE001
+            logger.warning("kev mirror failed", exc_info=True)
+
+        # iter-21.1 — severity auto-promotion. If KEV-listed +
+        # current severity below critical, bump to critical and
+        # record a reasoning_trace line so auditors can see WHY
+        # the tier moved. Conservative: only when listing is
+        # explicit (not on stale / unavailable / no_cve).
+        try:
+            from strix.llm.kev_enrichment import maybe_promote_severity
+            new_sev, kev_trace_line = maybe_promote_severity(
+                current_severity=report.get("severity"),
+                kev_block=report.get("kev_block") or {},
+            )
+            if new_sev is not None:
+                report["severity"] = new_sev
+                # Keep the promotion visible to the reasoning
+                # trace; if the tool didn't pass one, start
+                # one with this line.
+                _existing_trace = report.get("reasoning_trace") or []
+                if isinstance(_existing_trace, str):
+                    _existing_trace = [_existing_trace]
+                if isinstance(_existing_trace, list) and kev_trace_line:
+                    _existing_trace = list(_existing_trace) + [kev_trace_line]
+                    report["reasoning_trace"] = _existing_trace
+        except Exception as e:  # noqa: BLE001
+            logger.debug("kev severity promotion failed: %s", e)
+
         # MA-S2 P0-CVS-D — discovery_method block for novel-vuln
         # attestation. CVS-0.3 requires demonstrating that novel,
         # zero-day-class vulnerabilities (no CVE matched) are
