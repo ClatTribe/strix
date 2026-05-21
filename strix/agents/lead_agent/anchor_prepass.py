@@ -171,6 +171,64 @@ def _container_kwargs(target_value: str, workspace_path: str, tool_name: str) ->
     return {"image_ref": target_value}
 
 
+def _sbom_extract_kwargs(
+    target_value: str, workspace_path: str, tool_name: str,
+) -> dict[str, Any]:
+    """Kwargs for `sbom_extract` — it takes `target_url=`, not the
+    generic `url=` or `target=` used by the rest of the anchor
+    catalog. Caught 2026-05-21 when it was mis-wired into
+    `_ANCHORS_CONTAINER` with `_container_kwargs` (image_ref=) and
+    every container_image fixture errored `unexpected keyword
+    argument 'image_ref'`. Moved here with its own builder."""
+    return {"target_url": target_value}
+
+
+def _api_target_url_kwargs(
+    target_value: str, workspace_path: str, tool_name: str,
+) -> dict[str, Any]:
+    """Kwargs for L1 anchor tools that take `target_url=` (NOT the
+    bare `url=` used by the scan_* specialists, and NOT `target=`
+    used by fingerprint/openapi). Tools in this group:
+
+      * http_security_headers_audit (header-policy audit)
+      * cors_deep_check (CORS policy reflection)
+      * csrf_check (Origin/Referer enforcement)
+      * open_redirect_check (open-redirect param probe)
+      * dom_xss_static_probe (JS bundle source→sink static)
+
+    Caught 2026-05-21 in `l1_only_20260521_115852.md`: every
+    web/api fixture had 5 anchor entries fail with `unexpected
+    keyword argument 'url'` because the prepass uniformly used
+    `_api_url_kwargs` (`{url=...}`) across all URL-shaped tools. The
+    specialists under `tools/specialist/scan_*.py` were ported to
+    `url=`; the original L1 OSS-corpus tools under
+    `tools/{http_headers,cors_check,csrf_check,open_redirect,dom_
+    xss_static}` stayed on the more descriptive `target_url=`.
+    Reconciling the two would be a wider refactor — for now we
+    route correctly per-tool."""
+    return {"target_url": target_value}
+
+
+def _tls_audit_kwargs(
+    target_value: str, workspace_path: str, tool_name: str,
+) -> dict[str, Any]:
+    """Kwargs for `tls_audit` — takes `target=` (host / host:port /
+    URL). Caught 2026-05-21 alongside the wider kwarg-mismatch sweep
+    (every web/api fixture had this error)."""
+    return {"target": target_value}
+
+
+def _api_secrets_in_response_kwargs(
+    target_value: str, workspace_path: str, tool_name: str,
+) -> dict[str, Any]:
+    """Kwargs for `scan_secrets_in_response` — takes `urls=`
+    (list[str], plural), not `url=` (singular). The plural shape is
+    intentional: the tool sweeps a batch of URLs in one call. From
+    the prepass we only know the root target — wrap it as a single-
+    element list. Caught 2026-05-21."""
+    return {"urls": [target_value]}
+
+
 # ---------------------------------------------------------------------------
 # Anchor sequences
 # ---------------------------------------------------------------------------
@@ -203,6 +261,15 @@ _ANCHORS_API: list[tuple[str, Any]] = [
     #    they CAN'T run from the prepass — they error on missing
     #    endpoints kwarg.
     ("openapi_spec_ingest", _api_target_kwargs),
+    # 2b. Black-box SBOM extraction (CycloneDX 1.5). Catches CDN-
+    #     served NPM packages, backend frameworks from headers, and
+    #     fingerprintable third-party JS — useful for `Dependency`
+    #     graph nodes feeding R10 chain construction even when no
+    #     repository is attached. Cheap single-URL probe. iter-19+:
+    #     uses `target_url=` (NOT `url=` and NOT `image_ref=`) — has
+    #     its own builder `_sbom_extract_kwargs`. Was mis-wired into
+    #     `_ANCHORS_CONTAINER`; restored to its real home.
+    ("sbom_extract", _sbom_extract_kwargs),
     # 3. Signature corpus — nuclei templates for known CVEs in any
     #    fingerprinted product. Highest known-CVE coverage.
     ("scan_nuclei_templates", _api_url_with_severity_kwargs),
@@ -220,12 +287,22 @@ _ANCHORS_API: list[tuple[str, Any]] = [
     ("scan_nosql_injection", _api_url_kwargs),
     ("scan_cmd_injection", _api_url_kwargs),
     # 6. Passive checks — single-URL probes that don't need params.
-    ("scan_secrets_in_response", _api_url_kwargs),
-    ("http_security_headers_audit", _api_url_kwargs),
-    ("tls_audit", _api_url_kwargs),
-    ("cors_deep_check", _api_url_kwargs),
-    ("csrf_check", _api_url_kwargs),
-    ("open_redirect_check", _api_url_kwargs),
+    #
+    # iter-19+ (2026-05-21) kwarg-name reconciliation:
+    #   * scan_secrets_in_response: takes `urls=` (plural list)
+    #   * http_security_headers_audit / cors_deep_check / csrf_check
+    #     / open_redirect_check: take `target_url=`
+    #   * tls_audit: takes `target=`
+    # Every web/api fixture in `l1_only_20260521_115852.md` had
+    # 5+ of these tools fail with `unexpected keyword argument
+    # 'url'` because the prepass uniformly used `_api_url_kwargs`
+    # — silently dropped 5 anchor signals per target. Routed below.
+    ("scan_secrets_in_response", _api_secrets_in_response_kwargs),
+    ("http_security_headers_audit", _api_target_url_kwargs),
+    ("tls_audit", _tls_audit_kwargs),
+    ("cors_deep_check", _api_target_url_kwargs),
+    ("csrf_check", _api_target_url_kwargs),
+    ("open_redirect_check", _api_target_url_kwargs),
     # Tools wired via phase-2 (require runtime-captured state, not
     # just target_value), invoked in `_run_dependent_api_tools`:
     #   * jwt_audit — needs a JWT token. iter-17 auth-flow captures
@@ -241,8 +318,14 @@ _ANCHORS_API: list[tuple[str, Any]] = [
 
 _ANCHORS_WEB: list[tuple[str, Any]] = _ANCHORS_API + [
     # Web-only DOM-aware probes.
+    #   * scan_xss / scan_cache_deception / scan_websocket_auth /
+    #     scan_prototype_pollution: take `url=` (scan_* specialist
+    #     family — uniform `url=` interface).
+    #   * dom_xss_static_probe: takes `target_url=` (legacy OSS-
+    #     corpus signature, not the scan_* family). Caught
+    #     2026-05-21 alongside the wider kwarg-mismatch sweep.
     ("scan_xss", _api_url_kwargs),
-    ("dom_xss_static_probe", _api_url_kwargs),
+    ("dom_xss_static_probe", _api_target_url_kwargs),
     ("scan_cache_deception", _api_url_kwargs),
     ("scan_websocket_auth", _api_url_kwargs),
     ("scan_prototype_pollution", _api_url_kwargs),
@@ -250,8 +333,14 @@ _ANCHORS_WEB: list[tuple[str, Any]] = _ANCHORS_API + [
 
 _ANCHORS_CONTAINER: list[tuple[str, Any]] = [
     # trivy image with vuln + misconfig + secret scanners enabled.
+    # trivy's `--scanners vuln,secret,misconfig,license` already
+    # emits component-level SBOM data inline; `sbom_extract` is a
+    # web-target tool (takes `target_url`, not `image_ref`) — it was
+    # mis-wired here in iter-18 and produced a 100% `unexpected
+    # keyword argument 'image_ref'` error on every container_image
+    # fixture. Moved to `_ANCHORS_API` where it belongs (extracts
+    # CycloneDX SBOM from black-box HTTP recon).
     ("scan_container_image", _container_kwargs),
-    ("sbom_extract", _container_kwargs),
 ]
 
 # Per-target-type anchor lookup. Empty list = "no signature corpus

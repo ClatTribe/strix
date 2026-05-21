@@ -182,16 +182,25 @@ def _run_trivy_scan(
 
     Trivy exits non-zero on findings by default; we pass
     `--exit-code 0` so any non-zero exit means a real Trivy error.
-    `--skip-db-update` keeps the call hermetic — operators run
-    `trivy --download-db-only` ahead of scans (the wrapper's
-    threat-intel-refresher pattern).
+
+    iter-19+ (2026-05-21): dropped `--skip-db-update` after the
+    nginx-vuln bench hit `FATAL ... DB error: --skip-db-update
+    cannot be specified on the first run` inside the strix-sandbox
+    container. The lazy-init entrypoint pre-fetches the vuln DB on
+    container start, but the tool server (invoked via sudo by the
+    runtime) does NOT go through the entrypoint script — so the
+    first tool-server-invoked trivy call hit a non-existent DB and
+    `--skip-db-update` blocked the recovery path. Without the flag,
+    trivy is idempotent: uses the existing DB if fresh, otherwise
+    refreshes once (~30s) and proceeds. Operators still run
+    `trivy --download-db-only` in their image build for warm-cache
+    behaviour; the flag was a footgun, not a hermetic guarantee.
     """
     cmd = [
         _TRIVY_BIN, "image",
         "--format", "json",
         "--quiet",
         "--exit-code", "0",
-        "--skip-db-update",
         "--scanners", _trivy_scanners(),
         "--severity", "LOW,MEDIUM,HIGH,CRITICAL",
         image_ref,
