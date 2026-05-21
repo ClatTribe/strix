@@ -202,8 +202,8 @@ def _close_phase(tracer: Any, phase_id: str | None, summary: dict[str, Any]) -> 
     mitre_techniques=["T1595", "T1592", "T1593"],  # Active scanning, info gathering
 )
 def webapp_recon_pipeline(  # noqa: PLR0912
-    agent_state: Any,
     target_url: str,
+    agent_state: Any = None,
     max_pages: int = 200,
     max_depth: int = 3,
     seed_urls: str | None = None,
@@ -286,12 +286,27 @@ def webapp_recon_pipeline(  # noqa: PLR0912
 
     try:
         # 1. Fingerprint — tech stack + auto-load skills.
+        #
+        # iter-19+ (2026-05-21): `fingerprint_tech_stack` REQUIRES
+        # `agent_state` to load skills into the agent prompt. In the
+        # sandbox tool-server path there is no `agent_state` (the
+        # tool server only forwards kwargs from the HTTP request);
+        # the skill-loading side effect is a host-side concern. Skip
+        # the fingerprint step in sandbox runs; the structured tech-
+        # stack data comes from the dedicated `fingerprint_tech_stack`
+        # entry in the prepass anchor list anyway. Without this gate,
+        # webapp_recon_pipeline used to fail with
+        # `missing 1 required positional argument` and every web
+        # fixture lost its recon pipeline.
         try:
-            from strix.tools.recon.fingerprint import fingerprint_tech_stack
+            if agent_state is None:
+                fingerprint_result = None
+            else:
+                from strix.tools.recon.fingerprint import fingerprint_tech_stack
 
-            fingerprint_result = fingerprint_tech_stack(
-                agent_state=agent_state, target=target_norm, deep=False,
-            )
+                fingerprint_result = fingerprint_tech_stack(
+                    agent_state=agent_state, target=target_norm, deep=False,
+                )
         except Exception as e:  # noqa: BLE001
             errors.append({"step": "fingerprint", "error": str(e)})
             logger.warning("fingerprint_tech_stack failed", exc_info=True)

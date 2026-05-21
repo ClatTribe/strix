@@ -37,11 +37,40 @@ _DEFAULT_BRANCH = "main"
 
 
 def templates_dir() -> Path:
-    """Resolve the on-disk templates dir."""
+    """Resolve the on-disk templates dir.
+
+    Lookup order:
+      1. `STRIX_NUCLEI_TEMPLATES_DIR` env override (operator-set).
+      2. `~/.cache/strix/nuclei_templates` (canonical strix layout
+         used by this module's refresh CLI).
+      3. `~/nuclei-templates` (legacy / projectdiscovery default —
+         what `nuclei -update-templates` writes into when invoked
+         by the strix-sandbox docker-entrypoint's lazy-init).
+
+    The fallback chain matters in production: PRs #386/#387 shipped
+    a sandbox image whose entrypoint runs `nuclei -update-templates
+    -silent` (writes to `~/nuclei-templates`), but the tool was
+    looking only at `~/.cache/strix/nuclei_templates` — so every
+    `scan_nuclei_templates` call in the sandbox saw a missing
+    corpus and returned `status=partial findings=0`. Caught
+    2026-05-21 in `l1_only_20260521_115852.md` (every web/api
+    fixture had `nuclei-templates corpus not found at
+    /home/pentester/.cache/strix/nuclei_templates`).
+    """
     env = os.environ.get("STRIX_NUCLEI_TEMPLATES_DIR")
     if env:
         return Path(env).expanduser()
-    return Path.home() / ".cache" / "strix" / "nuclei_templates"
+    canonical = Path.home() / ".cache" / "strix" / "nuclei_templates"
+    if canonical.exists():
+        return canonical
+    # Legacy / sandbox-entrypoint location. Only return it when
+    # populated — otherwise return the canonical path so the
+    # caller's `not corpus.exists()` branch surfaces the path that
+    # matches the operator's remediation docs.
+    legacy = Path.home() / "nuclei-templates"
+    if legacy.exists():
+        return legacy
+    return canonical
 
 
 def _git_available() -> bool:

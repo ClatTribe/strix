@@ -167,6 +167,20 @@ class DockerRuntime(AbstractRuntime):
                                 "STRIX_RATE_LIMIT",
                                 "STRIX_SEED_URLS",
                                 "STRIX_OPENAPI_URL",
+                                # iter-20 (2026-05-21): allow the bench
+                                # harness (and air-gapped operators) to
+                                # skip the entrypoint's lazy-init
+                                # fetches (nuclei templates, trivy DB,
+                                # grype DB). When set, the entrypoint
+                                # falls through to tool_server launch
+                                # in ~2s instead of ~2-3min. The bench
+                                # then warms caches asynchronously after
+                                # tool server is healthy, so per-tool
+                                # invocations either see warm data or
+                                # fall back to the tool's own DB-fetch
+                                # path (e.g. trivy without
+                                # --skip-db-update).
+                                "STRIX_SKIP_CACHE_INIT",
                             )
                             if os.environ.get(k)
                         },
