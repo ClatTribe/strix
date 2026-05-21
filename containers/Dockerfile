@@ -137,7 +137,18 @@ RUN pipx install semgrep \
  && pipx install dirsearch \
  && pipx inject dirsearch setuptools \
  && pipx install wafw00f \
- && pipx install wapiti3
+ && pipx install wapiti3 \
+ # iter-21.6.1 — bbot ASM toolkit. Wrapped by
+ # `scan_buckets_via_bbot` for multi-cloud bucket discovery
+ # (AWS S3 / GCP GCS / Azure Blob / DigitalOcean Spaces /
+ # Firebase / IBM COS). Replaces the in-house bucket probe
+ # from PR #400 (reverted via PR #401) — strix already wraps
+ # mature OSS scanners (trivy / semgrep / nuclei / checkov /
+ # gitleaks), so the bucket-discovery sub-iter follows the
+ # same pattern. bbot is a substantial install (~50MB+ of
+ # transitive deps including httpx / dnspython / deepdiff /
+ # mmh3 / lxml) — pipx-isolated like the other Python CLIs.
+ && pipx install bbot
 
 # =============================================================================
 # Stage: clone-builder
