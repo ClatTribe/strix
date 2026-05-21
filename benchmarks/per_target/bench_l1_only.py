@@ -152,6 +152,18 @@ async def _provision_sandbox(image: str | None = None) -> tuple[Any, Any]:
     """
     if image:
         os.environ["STRIX_IMAGE"] = image
+    # iter-20 (2026-05-21): skip the entrypoint's lazy-init fetches
+    # (nuclei templates + trivy DB + grype DB, ~2-3min). Without this,
+    # `_wait_for_tool_server`'s max budget (~5min in theory, ~2-3min
+    # in practice with httpx connection-refused short-circuits) trips
+    # the lazy-init deadline and the bench raises
+    # `SandboxInitializationError: Tool server failed to start`.
+    # Caches are warmed below via `docker exec` AFTER tool server is
+    # healthy, so per-tool invocations either see warm data or fall
+    # back to the tool's own DB-fetch path (trivy without
+    # `--skip-db-update`, nuclei with the `~/nuclei-templates`
+    # fallback in `templates_dir()`).
+    os.environ["STRIX_SKIP_CACHE_INIT"] = "1"
     from strix.runtime import get_runtime  # late-import: needs STRIX_IMAGE set first
     runtime = get_runtime()
     info = await runtime.create_sandbox(
@@ -237,6 +249,46 @@ async def _provision_sandbox(image: str | None = None) -> tuple[Any, Any]:
                     )
     except Exception as e:  # noqa: BLE001
         print(f"[bench] opentelemetry shim failed (continuing): {e}", flush=True)
+
+    # iter-20 (2026-05-21): warm the scanner-data caches now that the
+    # tool server is up. These would normally be fetched by the
+    # entrypoint's lazy-init, but we skipped it with
+    # `STRIX_SKIP_CACHE_INIT=1` so the tool server starts in seconds
+    # rather than minutes.
+    #
+    # Each warmup is best-effort + concurrent (kick all three in
+    # background then wait, capped at 120s total). The first per-tool
+    # invocation that needs the data will block until ready; warming
+    # here just shifts the cost out of the per-tool wall-time budget.
+    try:
+        container_id = info.get("workspace_id")
+        if container_id:
+            # Kick off all three concurrently — they share no state.
+            # Output redirected to a log inside the container; check
+            # the process status before the bench's first tool call.
+            warmup_script = (
+                "nohup nuclei -update-templates -silent "
+                ">/tmp/warmup_nuclei.log 2>&1 & "
+                "nohup trivy image --download-db-only --quiet "
+                ">/tmp/warmup_trivy.log 2>&1 & "
+                "nohup grype db update "
+                ">/tmp/warmup_grype.log 2>&1 & "
+                "echo started_warmup"
+            )
+            subprocess.run(
+                ["docker", "exec", container_id, "sh", "-c", warmup_script],
+                capture_output=True, timeout=15,
+            )
+            print(
+                "[bench] cache warmup (nuclei/trivy/grype) running in "
+                "background inside sandbox; per-tool invocations will "
+                "block on cache readiness as needed.",
+                flush=True,
+            )
+    except Exception as e:  # noqa: BLE001
+        print(f"[bench] cache warmup kickoff failed (continuing): {e}",
+              flush=True)
+
     return runtime, info
 
 
