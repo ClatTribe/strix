@@ -98,34 +98,47 @@ Update cadence: every time a new architectural PR lands that changes detection-l
 
 The OSS-first pre-pass (PRs #364–#380) gives a deterministic L1-only recall per fixture, no LLM cost. Use `benchmarks/per_target/bench_l1_only.py` to reproduce.
 
-### Current state (post iter-18, measured 2026-05-21)
+### Current state (post iter-20, measured 2026-05-21 14:31)
 
-iter-18 collapsed the "L1 anchor / L2 sandbox specialist" terminology and dropped the bench-time host-execution hack. Two numbers now matter per fixture:
+iter-19 (PR #391) added `--with-sandbox` mode to the bench that provisions a real strix-sandbox container and routes every `sandbox_execution=True` tool through it — closing the "bench can't measure production recall" gap that iter-18 surfaced.
 
-- **Bench lower bound** = `bench_l1_only.py --full` against a `_FakeAgentState` with no sandbox. Sandbox-resident L1 tools (semgrep, trivy, grype, osv-scanner, checkov, nuclei, jwt_audit, http_security_headers_audit, tls_audit, cors_deep_check, csrf_check, dom_xss_static_probe, scan_cache_deception, scan_websocket_auth, scan_prototype_pollution, scan_idor, webapp_recon_pipeline, scan_container_image, sbom_extract, secrets_scan, scan_sast, scan_sca_lockfiles, scan_iac) error cleanly. **Captures only L1's non-sandbox-resident probes + orchestration logic.**
-- **Production (projected)** = strix CLI with a real sandbox. Every L1 anchor specialist runs. Confirmed via vampi+webgoat+apache spot checks where bench partially overlaps production behaviour.
+iter-20 (PR #392) caught five gaps that the iter-19 production-equivalent bench exposed on every web/api/container fixture:
 
-| Fixture | target_type | Competitor bar | **Bench (lower bound)** | **Production (projected)** | Δ vs prior iter-17 |
-|---|---|---|---:|---:|---:|
-| code/flask-vuln | local_code | Semgrep p/python: 80-100% | 0.000 (0/10) ⚠️ no sandbox | **0.900** (9/10) | unchanged |
-| code/sast-vibe | local_code | Semgrep: 50-60% / Snyk Code: 70% | 0.000 (0/8) ⚠️ no sandbox | **1.000** (8/8) | unchanged |
-| code/iac-vibe | local_code | Checkov: 70-85% / Bridgecrew: 85% | 0.000 (0/15) ⚠️ no sandbox | **1.000** (15/15) | unchanged |
-| code/sca-vuln-deps | local_code | OSV/Snyk: ~100% | 0.000 (0/5) ⚠️ no sandbox | **1.000** (5/5) | unchanged |
-| code/sca-reachability | local_code | Snyk Code reach.: 80% / Endor: 70% | 0.000 (0/5) ⚠️ no sandbox | **1.000** (5/5) | unchanged |
-| code/sca-supply-chain | local_code | Socket.dev: 70% / Snyk OS: 50% | 0.000 (0/5) ⚠️ no sandbox | **1.000** (5/5) | unchanged |
-| container/nginx-vuln | container_image | Trivy: 95-100% | 0.000 (0/4) ⚠️ no sandbox | **1.000** (4/4) | unchanged |
-| ip/vulnerable-services | ip_address | nmap+nuclei+Tenable: 80-95% | **1.000** (3/3) | **1.000** (3/3) | unchanged |
-| web+code/vibe-app | web_application | Snyk + DAST: 50-70% | 0.000 (0/5) ⚠️ no sandbox | **~0.800** (4/5 projected — webapp_recon_pipeline + SAST chain) | +0.2 from iter-18 wiring |
-| web/webgoat | web_application | Burp Pro Active: 30-50% | **1.000** (1/1) | **1.000** (1/1) | unchanged |
-| web/apache-cve-2021-41773 | web_application | n/a (single-CVE) | 0.500 (1/2) — nuclei sandbox | **1.000** (2/2 — nuclei in sandbox catches CVE) | unchanged |
-| **api/vampi** | api | Burp Pro: 50-70% / ZAP: 25-40% | **0.875** (7/8) | **~0.940** (jwt_audit in sandbox closes jwt-none-alg) | +0.06 from iter-18 jwt_audit |
-| **api/crapi** | api | Burp Pro: 40-60% / ZAP: 20-30% | **0.500** (4/8) | **~0.625** (jwt_audit closes weak-jwt-secret RS256; scan_idor enables bola-vehicle) | +0.125 from iter-18 |
-| web/juiceshop | web_application | Burp Pro Active: 30-50% / ZAP: 15-25% | 0.222 (2/9) | **~0.555** (5/9 — webapp_recon_pipeline finds SPA routes + auth-required probes) | +0.333 from iter-18 |
+1. **`sbom_extract` mis-wired** to `_ANCHORS_CONTAINER` with `image_ref=` — it's a web-target tool that takes `target_url=`. 100% error rate on container fixtures.
+2. **6 anchor tools sent `url=`** but take `target_url=` / `target=` / `urls=` — every web/api fixture had 5–6 anchor errors with `unexpected keyword argument 'url'` (29 total errors in iter-19's full run).
+3. **`scan_container_image` used `trivy --skip-db-update`** — the sandbox's tool server bypasses the entrypoint's lazy-init, so trivy hit `--skip-db-update cannot be specified on the first run` on every container scan.
+4. **`webapp_recon_pipeline` required `agent_state`** as a positional arg — but the sandbox tool-server doesn't inject `agent_state` into the kwargs it forwards. Every web fixture lost its recon pipeline with `missing 1 required positional argument`.
+5. **`nuclei_runner.templates_dir()` lookup mismatch** — sandbox entrypoint writes templates to `~/nuclei-templates`, but the tool only looked at `~/.cache/strix/nuclei_templates`. Every `scan_nuclei_templates` call in sandbox returned `partial findings=0`.
 
-### Aggregate
+After iter-20, the bench numbers below ARE the production numbers. The "bench lower bound vs production projected" split from iter-18 collapses — when the bench has a real sandbox AND the kwargs are right AND the cache resolves, it runs the same code paths production does.
 
-- **Bench lower bound (iter-18 post-hotfix, 14 fixtures): ~0.29 avg** — but this number is meaningless on its own. It's what L1 does WITHOUT a sandbox. Production never runs without one.
-- **Production projected (iter-18): ~0.91 avg** — every L1 sandbox-resident tool fires. **13 of 14 fixtures meet or exceed competitor bar.** Only juiceshop remains below — and even that climbs to ~0.555 (within Burp Pro Active range 30-50%) with iter-18's webapp_recon_pipeline.
+| Fixture | target_type | Competitor bar | **iter-20 (measured, --with-sandbox)** | At bar? |
+|---|---|---|---:|---|
+| code/flask-vuln | local_code | Semgrep p/python: 80-100% | **0.900** (9/10) | ✅ |
+| code/sast-vibe | local_code | Semgrep: 50-60% / Snyk Code: 70% | **1.000** (8/8) | ✅ |
+| code/iac-vibe | local_code | Checkov: 70-85% / Bridgecrew: 85% | **1.000** (15/15) | ✅ |
+| code/sca-vuln-deps | local_code | OSV/Snyk: ~100% | **1.000** (5/5) | ✅ |
+| code/sca-reachability | local_code | Snyk Code reach.: 80% / Endor: 70% | **1.000** (5/5) | ✅ |
+| code/sca-supply-chain | local_code | Socket.dev: 70% / Snyk OS: 50% | **1.000** (5/5) | ✅ |
+| ip/vulnerable-services | ip_address | nmap+nuclei+Tenable: 80-95% | **1.000** (3/3) | ✅ |
+| web/webgoat | web_application | Burp Pro Active: 30-50% | **1.000** (1/1) | ✅ |
+| **api/vampi** | api | Burp Pro: 50-70% / ZAP: 25-40% | **0.875** (7/8) | ✅ (above Burp Pro upper) |
+| web+code/vibe-app | web_application | Snyk + DAST: 50-70% | **0.600** (3/5) | ⚠️ (mid-range, below upper) |
+| web/apache-cve-2021-41773 | web_application | n/a (single-CVE) | **0.500** (1/2) — server-version disclosed; CVE-2021-41773 path-traversal missed | ⚠️ |
+| **api/crapi** | api | Burp Pro: 40-60% / ZAP: 20-30% | **0.500** (4/8) | ✅ (mid Burp Pro range; +0.125 from iter-19) |
+| web/juiceshop | web_application | Burp Pro Active: 30-50% / ZAP: 15-25% | **0.222** (2/9) | ⚠️ (above ZAP, below Burp Pro lower) |
+| container/nginx-vuln | container_image | Trivy: 95-100% | **0.000** (0/4) — trivy times out at 120s in sandbox (first-run DB + image-pull through Caido proxy) | ❌ |
+
+### Aggregate (iter-20 measured)
+
+- **14 fixtures, cumulative L1 recall: 0.7569 avg** (vs iter-19's 0.7480 — **+0.009**).
+- **Median: 1.000** — half the fixtures find every must_find.
+- **At-or-above 0.5: 12 / 14**, **at 1.0: 7 / 14**, **at competitor bar: 9 / 14** (✅ in table above).
+- Single biggest iter-20 win: **crapi 0.375 → 0.500** (+0.125). Restored from `http_security_headers_audit` catching `missing-security-headers` (which previously errored on every fixture due to `unexpected keyword argument 'url'`) and `scan_nuclei_templates` catching `ssrf-profile-pic` (which previously returned `partial findings=0` due to the templates_dir() lookup mismatch).
+- Single biggest remaining gap: **nginx-vuln 0.0**. Trivy times out at 120s when forced to download both the vuln DB AND pull `nginx:1.18` through Caido's HTTPS-MITM proxy. Two fixes needed (split out as iter-21):
+  1. Set `STRIX_SANDBOX_EXECUTION_TIMEOUT` higher per-tool for `scan_container_image`.
+  2. Configure the sandbox to bypass Caido for `registry-1.docker.io` traffic.
+- Other below-bar fixtures (juiceshop, apache-cve, vampi) are tracked as deferred deep-iteration gaps below.
 
 ### Why the bench shows 0.000 on 6 local_code fixtures (iter-18 reframe)
 
@@ -240,7 +253,9 @@ A future iter could provision a minimal sandbox for the bench to measure the pro
 | #383 | iter-17 — deterministic auth-flow into L1 (auth + spec-as-scope). probe_auth_flow, probe_jwt_brute_secret, probe_password_reset_otp_space, scan_api_bola/bfla/mass_assignment with captured token | api | vampi 0.375→**0.625** |
 | #385 | iter-17.5/.6/.7 — mass-assignment follow-up GET probe, fixture corrections, scorer best-CWE-match, crapi compose env restore, static-path auth-fallback, OTP/user path keyword expansion | api | vampi 0.625→**0.875**, crapi 0.125→**0.500** (after fixture restore) |
 | #389 | iter-18 — collapsed L1/L2-sandbox-only terminology, two-user auth-flow (user-a + user-b distinct), scan_idor + webapp_recon_pipeline wired into L1 phase-2, dropped STRIX_FORCE_HOST_EXECUTION hack | api / web | vampi production projection 0.875→**~0.940** (jwt_audit closes jwt-none-alg), crapi production →**~0.625**, juiceshop production →**~0.555**, vibe-app production →**~0.800** |
-| (hotfix) | NameError `login_url` + TypeError `endpoints=None` — iter-18 two-user refactor regressions caught by bench | all | n/a (mechanical fix) |
+| #390 | iter-18 hotfix — NameError `login_url` + TypeError `endpoints=None` (iter-18 two-user refactor regressions caught by bench) | all | n/a (mechanical fix) |
+| #391 | iter-19 — register 21 missing L1 tools (cors_check / csrf_check / cache_deception / cookie_scoping / debug_endpoint / dom_xss_static / file_upload / graphql / http_headers / jwt_audit / nuclei_templates / open_redirect / race_check / sbom_extract / secrets_scan / tls_audit / web_crawler / websocket / well_known + 3 specialists). Bench adds `--with-sandbox` mode that provisions a real strix-sandbox container so the harness measures production recall directly. | infra / all | cumulative bench (no sandbox) 0.43 → (with sandbox) **0.748** across 14 fixtures |
+| #392 | iter-20 — anchor kwarg sweep (`sbom_extract` `image_ref`→`target_url`; 6 anchors `url`→`target_url`/`target`/`urls`), `webapp_recon_pipeline` `agent_state` made optional (sandbox tool-server doesn't inject), `trivy --skip-db-update` dropped (incompatible with first-run DB), `nuclei templates_dir()` falls back to `~/nuclei-templates` (sandbox-entrypoint location), `STRIX_SKIP_CACHE_INIT` forwarded for bench warm-up flow | all | cumulative **0.748 → 0.7569**; crapi **0.375 → 0.500** (+0.125); 29 kwarg errors → 0 |
 
 ### Current state (post iter-11)
 
