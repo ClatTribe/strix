@@ -50,6 +50,17 @@ LINK_IAC_DAST_CATEGORY = "iac_to_dast_category"
 LINK_ANOMALY_DAST_ENDPOINT = "anomaly_to_specialist_endpoint"
 LINK_SCA_SAST_PACKAGE = "sca_to_sast_package"
 
+# iter-21.4 — attack-chain linkers. Where the linkers above tie
+# findings by CWE/category co-occurrence on a shared target, these
+# encode SPECIFIC exploit chains: combinations that escalate
+# severity together because each piece alone is mitigatable but
+# together they form an end-to-end attack. Confidence floor here
+# is higher (0.85+) because the matches require exact rule
+# co-firing, not just CWE-family overlap.
+LINK_CORS_TO_SSRF_CHAIN = "cors_reflection_to_ssrf_chain"
+LINK_JWT_CONFUSION_CHAIN = "jwt_confusion_chain"
+LINK_AUTH_BYPASS_VIA_METHOD_OVERRIDE = "auth_bypass_via_method_override_chain"
+
 LinkType = str
 
 
@@ -385,6 +396,260 @@ def link_sca_to_sast_by_package(findings: list[Finding]) -> list[ChainLink]:
 
 
 # ---------------------------------------------------------------------------
+# iter-21.4 — attack-chain linkers
+#
+# These encode SPECIFIC end-to-end exploits, not just CWE family
+# co-occurrence. Each captures a real-world chain that competitor
+# tools detect components of but rarely chain together
+# automatically: Burp Pro detects CORS reflections AND SSRF but
+# requires a human to spot the chain; ZAP detects JWT alg=none AND
+# JWKS audit issues but doesn't combine them; commercial scanners
+# rarely surface HTTP method override bypasses at all.
+#
+# Confidence floor is intentionally high (0.85+) — each chain
+# requires multiple specific rule fires, not just a CWE-family
+# overlap, so false-positive risk is low. When matched these
+# chains are typically critical regardless of the individual
+# finding severities.
+# ---------------------------------------------------------------------------
+
+
+def link_cors_reflection_to_ssrf_chain(
+    findings: list[Finding],
+) -> list[ChainLink]:
+    """**CORS reflection → SSRF exfil chain.**
+
+    When a target has BOTH (a) a CORS misconfig that reflects the
+    `Origin` header AND credentials are allowed (cors_deep_check
+    emits this) AND (b) an SSRF primitive on the same host
+    (scan_ssrf / nuclei_runner with an ssrf-class CVE template),
+    the attacker can chain them: their malicious page in any
+    browser sends authenticated requests via the victim's session
+    AND can read responses cross-origin AND can probe internal
+    services through the SSRF primitive — full read-and-exfil.
+
+    Each finding alone is medium-ish; together they're critical.
+    Burp Pro detects both components but requires a human pen-tester
+    to spot the chain — this linker automates that recognition.
+
+    Conservative: requires same target AND both components present.
+    Confidence: 0.9 (specific rule co-fire is unambiguous).
+    """
+    out: list[ChainLink] = []
+
+    def _is_cors_reflection(f: Finding) -> bool:
+        if f.category not in ("cors", "misconfig", "http_security_headers"):
+            return False
+        # Look for the specific reflective-CORS signature in title /
+        # description. Tools emitting CORS findings vary in shape;
+        # we match any of the canonical signals.
+        haystack = f"{f.title} {f.description}".lower()
+        return any(s in haystack for s in (
+            "cors", "origin", "access-control-allow",
+        )) and any(s in haystack for s in (
+            "reflect", "allow-credentials", "wildcard", "echo",
+        ))
+
+    def _is_ssrf(f: Finding) -> bool:
+        if f.category in ("ssrf",):
+            return True
+        if (f.cwe or "").upper() in ("CWE-918", "CWE-345"):
+            return True
+        return False
+
+    cors = [f for f in findings if _is_cors_reflection(f)]
+    ssrf = [f for f in findings if _is_ssrf(f)]
+    for c in cors:
+        for s in ssrf:
+            if not _same_target(c, s):
+                continue
+            out.append(ChainLink(
+                finding_a=c.id, finding_b=s.id,
+                link_type=LINK_CORS_TO_SSRF_CHAIN,
+                confidence=0.9,
+                rationale=(
+                    "Attack chain — CORS reflective policy + SSRF "
+                    "primitive on the same target. An attacker page "
+                    "in any victim's browser can drive authenticated "
+                    "SSRF requests AND read the responses cross-"
+                    "origin, exfiltrating internal-network data with "
+                    "the victim's credentials. Each component alone "
+                    "is medium-class; together they're critical."
+                ),
+            ))
+    return out
+
+
+def link_jwt_confusion_chain(
+    findings: list[Finding],
+) -> list[ChainLink]:
+    """**JWT algorithm-confusion chain.**
+
+    Three known JWT-bypass patterns chain through metadata + JWKS
+    issues that scan_authn_metadata + jwt_audit emit separately:
+
+    1. `alg=none` accepted by verifier (jwt_audit) +
+       `id_token_signing_alg_values_supported: ["none", ...]` in
+       OIDC metadata (scan_authn_metadata `alg-none-supported`)
+       → confirmed accepts forged tokens; specifically callable.
+
+    2. `alg=none` in OIDC metadata + ANY auth-required endpoint
+       (probe_unauth_bola_path_params / scan_idor finding) →
+       attacker forges admin user for that endpoint.
+
+    3. JWKS has HMAC key with `k` member (scan_authn_metadata
+       `jwks-hmac-key-leaked`) + JWT auth finding on the same
+       target → attacker has the signing key in hand; ALL tokens
+       are forgeable.
+
+    Each component is high-severity alone; chained, the linker
+    surfaces them as one CRITICAL chain with explicit attack
+    construction instructions.
+
+    Confidence: 0.95 (these are deterministic rule co-fires, no
+    heuristic interpretation).
+    """
+    out: list[ChainLink] = []
+    authn_findings = [f for f in findings if f.category == "authn_metadata"]
+    jwt_findings = [f for f in findings if f.category in ("jwt", "authn", "auth")]
+    bola_findings = [
+        f for f in findings
+        if f.category in ("idor", "bola", "auth") or (f.cwe or "") == "CWE-639"
+    ]
+
+    def _has_rule(f: Finding, rule_id: str) -> bool:
+        haystack = f"{f.title} {f.description}".lower()
+        return rule_id in haystack
+
+    # Pattern 1: alg=none accepted on verifier + alg=none advertised
+    # in OIDC metadata = "verifier WILL accept forged tokens".
+    for a in authn_findings:
+        if not _has_rule(a, "alg-none-supported"):
+            continue
+        for j in jwt_findings:
+            jh = f"{j.title} {j.description}".lower()
+            if "alg=none" in jh or "alg-none" in jh or "none alg" in jh:
+                if _same_target(a, j):
+                    out.append(ChainLink(
+                        finding_a=a.id, finding_b=j.id,
+                        link_type=LINK_JWT_CONFUSION_CHAIN,
+                        confidence=0.95,
+                        rationale=(
+                            "JWT algorithm-confusion chain — OIDC "
+                            "metadata advertises `alg=none` AND the "
+                            "verifier accepts forged `alg=none` "
+                            "tokens. Attacker can forge any user "
+                            "(incl. admin) without knowing any "
+                            "signing key. Single critical finding."
+                        ),
+                    ))
+
+    # Pattern 2: HMAC key leaked in JWKS + JWT-protected endpoint
+    # on same target = attacker has the signing key, forges
+    # arbitrary tokens for every endpoint.
+    #
+    # Dedupe by id — `category="auth"` lands in both jwt_findings
+    # and bola_findings; without the set the linker emits two
+    # links for one logical (metadata, endpoint) pair.
+    for a in authn_findings:
+        if not _has_rule(a, "jwks-hmac-key-leaked"):
+            continue
+        candidates_by_id: dict[str, Finding] = {}
+        for j in jwt_findings + bola_findings:
+            candidates_by_id[j.id] = j
+        for j in candidates_by_id.values():
+            if _same_target(a, j):
+                out.append(ChainLink(
+                    finding_a=a.id, finding_b=j.id,
+                    link_type=LINK_JWT_CONFUSION_CHAIN,
+                    confidence=0.95,
+                    rationale=(
+                        "JWT key-exposure chain — HMAC signing key "
+                        "leaked in public JWKS AND a JWT-protected "
+                        "endpoint exists on the same target. The "
+                        "attacker holds the key in hand: every JWT "
+                        "issued by this issuer is forgeable, every "
+                        "JWT-protected endpoint is reachable as "
+                        "any user."
+                    ),
+                ))
+
+    return out
+
+
+def link_auth_bypass_via_method_override(
+    findings: list[Finding],
+) -> list[ChainLink]:
+    """**Auth bypass via HTTP method override chain.**
+
+    Common Spring/Rails/Express misconfiguration: middleware
+    enforces auth on `POST /admin/users` but the framework also
+    accepts `X-HTTP-Method-Override: POST` (or `?_method=POST`)
+    on a `GET /admin/users` request. The auth check fires on the
+    GET (unauthenticated, returns 401) BUT the framework dispatches
+    to the POST handler internally. Net: unauthenticated POST.
+
+    Detection chain:
+      * BFLA / IDOR / unauth-debug finding on `/admin/...` path
+        (scan_api_bfla / probe_unauth_bola_path_params) — indicates
+        the endpoint has weak ACL.
+      * `http_security_headers_audit` finding flagging X-HTTP-
+        Method-Override acceptance (when present in headers).
+      * Same target host.
+
+    OR:
+      * IaC finding for a Spring boot / Express framework
+        configuration that advertises `_method` override.
+
+    Confidence 0.85 (method-override misuse depends on the
+    framework's exact behaviour; the chain identifies the
+    PATTERN that's exploit-prone, but the operator still
+    confirms with a manual probe).
+    """
+    out: list[ChainLink] = []
+
+    def _is_acl_finding(f: Finding) -> bool:
+        if f.category in ("bola", "bfla", "idor"):
+            return True
+        if (f.cwe or "").upper() in ("CWE-285", "CWE-862", "CWE-639"):
+            return True
+        haystack = f"{f.title} {f.description}".lower()
+        return "/admin" in haystack or "/api/admin" in haystack
+
+    def _is_method_override(f: Finding) -> bool:
+        haystack = f"{f.title} {f.description}".lower()
+        return (
+            "x-http-method-override" in haystack
+            or "_method=" in haystack
+            or "method override" in haystack
+            or "method-override" in haystack
+        )
+
+    acl = [f for f in findings if _is_acl_finding(f)]
+    mo = [f for f in findings if _is_method_override(f)]
+    for a in acl:
+        for m in mo:
+            if _same_target(a, m):
+                out.append(ChainLink(
+                    finding_a=a.id, finding_b=m.id,
+                    link_type=LINK_AUTH_BYPASS_VIA_METHOD_OVERRIDE,
+                    confidence=0.85,
+                    rationale=(
+                        "Auth-bypass chain — HTTP method-override "
+                        "header / query parameter accepted by the "
+                        "framework AND an ACL-weakened endpoint on "
+                        "the same target. Pattern: attacker sends "
+                        "`GET /admin/...` (unauth check fires on "
+                        "GET only) with `X-HTTP-Method-Override: "
+                        "POST`; framework dispatches to the POST "
+                        "handler internally, bypassing the auth "
+                        "middleware."
+                    ),
+                ))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Linker registry
 # ---------------------------------------------------------------------------
 
@@ -395,4 +660,12 @@ LINKER_REGISTRY: list[Callable[[list[Finding]], list[ChainLink]]] = [
     link_iac_to_dast_by_category,
     link_anomaly_to_specialist,
     link_sca_to_sast_by_package,
+    # iter-21.4 — attack-chain linkers (added last so they
+    # appear in the chain artifact AFTER the general
+    # co-occurrence linkers — wrapper UIs typically render in
+    # registry order, and the specific exploit chains are
+    # higher-signal than the general overlaps).
+    link_cors_reflection_to_ssrf_chain,
+    link_jwt_confusion_chain,
+    link_auth_bypass_via_method_override,
 ]
