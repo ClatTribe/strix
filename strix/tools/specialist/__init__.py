@@ -96,3 +96,17 @@ from strix.tools.specialist import (
 )
 from strix.tools.specialist import scan_xss as _scan_xss  # noqa: F401  # Phase 3b
 from strix.tools.specialist import scan_xxe as _scan_xxe  # noqa: F401  # Phase 6
+# iter-19 — three specialists that existed but were never imported here.
+# Each registers @register_specialist_tool but the decorator only runs
+# when the module is imported. Without these lines, `scan_cache_
+# deception` / `scan_websocket_auth` / `scan_prototype_pollution`
+# returned "Tool not found" both in production and in the bench.
+from strix.tools.specialist import (
+    scan_cache_deception as _scan_cache_deception,  # noqa: F401
+)
+from strix.tools.specialist import (
+    scan_websocket_auth as _scan_websocket_auth,  # noqa: F401
+)
+from strix.tools.specialist import (
+    scan_prototype_pollution as _scan_prototype_pollution,  # noqa: F401
+)

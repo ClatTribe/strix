@@ -38,6 +38,36 @@ from .openapi_ingest import *  # noqa: F403  # OpenAPI / Swagger spec ingest for
 from .container_image import *  # noqa: F403  # Trivy wrapper for `container_image` target type
 from .workflow import *  # noqa: F403  # Phase 3d / PR-α — workflow state machine
 
+# iter-19 — 18 deterministic L1 anchor specialists that existed under
+# strix/tools/<subdir>/ but were never imported here. Each module
+# carries an `@register_tool` decorator that runs ONLY when the
+# module is imported; without these import lines, the strix registry
+# had no entry for these tools and any call to them returned
+# "Tool '<name>' not found". The anchor_prepass already invokes them
+# in `_ANCHORS_API` / `_ANCHORS_WEB` and the phase-2 dispatcher —
+# they'd been silently failing in production too, not just bench.
+# Caught 2026-05-21 during the iter-19 sandbox-bench wiring when
+# api/vampi runs reported "Tool 'jwt_audit' not found" etc.
+from .cors_check import *           # noqa: F403  # cors_deep_check
+from .csrf_check import *           # noqa: F403  # csrf_check
+from .cache_deception import *      # noqa: F403  # scan_cache_deception
+from .cookie_scoping import *       # noqa: F403  # cookie_scoping
+from .debug_endpoint import *       # noqa: F403  # debug_endpoint_probe
+from .dom_xss_static import *       # noqa: F403  # dom_xss_static_probe
+from .file_upload import *          # noqa: F403  # file_upload-related probes
+from .graphql import *              # noqa: F403  # graphql introspection probe
+from .http_headers import *         # noqa: F403  # http_security_headers_audit
+from .jwt_audit import *            # noqa: F403  # jwt_audit (alg=none, HS/RS brute, alg-confusion)
+from .nuclei_templates import *     # noqa: F403  # nuclei_template_update
+from .open_redirect import *        # noqa: F403  # open_redirect_check
+from .race_check import *           # noqa: F403  # scan_race_condition
+from .sbom_extract import *         # noqa: F403  # sbom_extract
+from .secrets_scan import *         # noqa: F403  # secrets_scan (gitleaks/trufflehog)
+from .tls_audit import *            # noqa: F403  # tls_audit
+from .web_crawler import *          # noqa: F403  # web_crawler / bfs_crawl
+from .websocket import *            # noqa: F403  # scan_websocket_auth
+from .well_known import *           # noqa: F403  # well-known endpoint probes
+
 # SCA / supply-chain analysis (Phase 6) — registers
 # `scan_sca_lockfiles`.
 from strix.sca import tools as _sca_tools  # noqa: F401, E402
