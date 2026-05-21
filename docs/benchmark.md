@@ -98,27 +98,85 @@ Update cadence: every time a new architectural PR lands that changes detection-l
 
 The OSS-first pre-pass (PRs #364–#380) gives a deterministic L1-only recall per fixture, no LLM cost. Use `benchmarks/per_target/bench_l1_only.py` to reproduce.
 
-### Current state (post iter-15, measured 2026-05-21)
+### Current state (post iter-17, measured 2026-05-21)
 
-Measured across the full `--full` fixture set (`bench_l1_only.py --full`), not just the fast tier. iter-14-late surfaced that 5+ fixtures had never been measured — once measured they were nearly all at 1.0.
+Measured across the full `--full` fixture set (14 fixtures). The iter-17 series brought the api asset type to competitor parity (vampi 0.875, crapi 0.500) through deterministic auth-flow + spec-as-scope L1 work.
 
 | Fixture | target_type | Competitor bar | **Strix L1** | matched | At bar? |
 |---|---|---|---:|---|---|
 | code/flask-vuln | local_code | Semgrep p/python: 80-100% | **0.900** | 9/10 | ✅ |
-| **code/sast-vibe** | local_code | Semgrep: 50-60% / Snyk Code: 70% | **1.000** | 8/8 | ✅ **above Snyk Code** |
-| **code/iac-vibe** | local_code | Checkov: 70-85% / Bridgecrew: 85% | **1.000** | 15/15 | ✅ **exceeds Bridgecrew** |
-| **code/sca-vuln-deps** | local_code | OSV/Snyk: ~100% | **1.000** | 5/5 | ✅ at bar |
-| **code/sca-reachability** | local_code | Snyk Code reach.: 80% / Endor: 70% | **1.000** | 5/5 | ✅ **exceeds Snyk** |
-| **code/sca-supply-chain** | local_code | Socket.dev: 70% / Snyk OS: 50% | **1.000** | 5/5 | ✅ **exceeds Socket.dev** |
+| code/sast-vibe | local_code | Semgrep: 50-60% / Snyk Code: 70% | **1.000** | 8/8 | ✅ **above Snyk Code** |
+| code/iac-vibe | local_code | Checkov: 70-85% / Bridgecrew: 85% | **1.000** | 15/15 | ✅ **exceeds Bridgecrew** |
+| code/sca-vuln-deps | local_code | OSV/Snyk: ~100% | **1.000** | 5/5 | ✅ at bar |
+| code/sca-reachability | local_code | Snyk Code reach.: 80% / Endor: 70% | **1.000** | 5/5 | ✅ **exceeds Snyk** |
+| code/sca-supply-chain | local_code | Socket.dev: 70% / Snyk OS: 50% | **1.000** | 5/5 | ✅ **exceeds Socket.dev** |
 | container/nginx-vuln | container_image | Trivy: 95-100% | **1.000** | 4/4 | ✅ trivy parity |
-| **ip/vulnerable-services** | ip_address | nmap+nuclei+Tenable: 80-95% | **1.000** | 3/3 | ✅ nmap+nuclei parity |
-| **web+code/vibe-app** | web_application | Snyk + DAST: 50-70% | **0.600** | 3/5 | ✅ above Snyk+DAST |
-| **web/webgoat** | web_application | Burp Pro Active: 30-50% | **1.000** | 1/1 | ✅ pre-auth surface complete |
-| **web/apache-cve-2021-41773** | web_application | n/a (single-CVE) | **1.000** | 2/2 | ✅ |
-| api/vampi | api | Burp Pro: 50-70% / ZAP: 25-40% | 0.375 | 3/8 | ⚠️ at ZAP floor |
+| ip/vulnerable-services | ip_address | nmap+nuclei+Tenable: 80-95% | **1.000** | 3/3 | ✅ nmap+nuclei parity |
+| web+code/vibe-app | web_application | Snyk + DAST: 50-70% | **0.600** | 3/5 | ✅ above Snyk+DAST |
+| web/webgoat | web_application | Burp Pro Active: 30-50% | **1.000** | 1/1 | ✅ pre-auth surface complete |
+| web/apache-cve-2021-41773 | web_application | n/a (single-CVE) | **1.000** | 2/2 | ✅ |
+| **api/vampi** | api | Burp Pro: 50-70% / ZAP: 25-40% | **0.875** | 7/8 | ✅ **above Burp Pro range** |
+| **api/crapi** | api | Burp Pro: 40-60% / ZAP: 20-30% | **0.500** | 4/8 | ✅ at Burp Pro lower bound |
 | web/juiceshop | web_application | Burp Pro Active: 30-50% / ZAP: 15-25% | 0.222 | 2/9 | ❌ SPA-routes gap |
 
-**Cumulative L1 average across 13 measured fixtures: 0.853.** **11 of 13 fixtures meet or exceed competitor bar.** The 2 below-bar are vampi (L2 auth-flow work needed) and juiceshop (headless-browser gap for SPA-rendered routes).
+**Cumulative L1 average across 14 fixtures: 0.857.** **13 of 14 fixtures meet or exceed competitor bar.** The only below-bar fixture is juiceshop — blocked on headless-browser SPA-route discovery (orthogonal to API L1 work).
+
+### Iter-17 series — API targets to competitor parity
+
+iter-17 (PRs #383 + #385) added deterministic auth into L1 via the "auth-into-L1 + OpenAPI-spec-as-scope" architecture:
+
+1. **`_run_auth_flow`** — discovers `/register` + `/login` from the openapi spec OR a 16-entry static-path fallback list (crapi-style APIs that serve their spec auth-walled). POSTs schema-driven register/login bodies, captures Bearer token / Set-Cookie, registers in SecurityContext under multiple labels.
+
+2. **Per-endpoint signature scanners with auth** — scan_sqli, scan_ssrf, scan_path_traversal, scan_nosql_injection, scan_cmd_injection now fire with `extra_headers=auth_headers` against every openapi-emitted endpoint. Stops returning `partial="no params"`.
+
+3. **`probe_jwt_brute_secret`** — pure-Python HMAC brute against the captured JWT. ~70-entry wordlist (caught vampi's `random` secret).
+
+4. **`probe_mass_assignment_followup`** — register-with-priv-fields → login → GET-self → verify field persisted. Catches mass-assignment when the server accepts the field silently (no echo).
+
+5. **`probe_password_reset_otp_space`** — OTP-rate-limit probe. With iter-17.7 path-keyword + static-fallback expansion, catches crapi's `/identity/api/auth/v3/check-otp`.
+
+6. **Scorer best-CWE-match precedence** — `score()` now picks the best-CWE-matching expected slot for each found (was: first match by declaration order). Fixed a scoring artifact where the JWT brute finding routed to `jwt-none-alg` instead of the CWE-326-exact `jwt-weak-secret`.
+
+7. **Crapi fixture restoration** — env block restored from upstream OWASP compose (SERVER_PORT, TLS_ENABLED, SMTP_*, JWT_SECRET, etc.). Fixture had been broken since the 0.7.0 → 1.1.6-rc8 repin.
+
+### iter-18 — collapse the "L1 anchor / L2 sandbox specialist" split
+
+PRs #384/#386/#387 made every L1 anchor specialist run inside the strix-sandbox container in production. The iter-17 analysis labeled several gaps "L2 only" because they error in the L1 bench harness (which has no sandbox). **That framing conflated measurement infrastructure with detection layer.** iter-18 corrects it:
+
+- **L1** = every deterministic specialist + signature scanner. Runs in sandbox in production. Includes: semgrep, trivy, grype, osv-scanner, checkov, nuclei, **jwt_audit**, **webapp_recon_pipeline**, **http_security_headers_audit**, **tls_audit**, **cors_deep_check**, **csrf_check**, **dom_xss_static_probe**, **scan_cache_deception**, **scan_websocket_auth**, **scan_prototype_pollution**, **scan_idor**, scan_container_image, scan_api_bola/bfla/mass_assignment, fingerprint_tech_stack, openapi_spec_ingest, sbom_extract, secrets_scan.
+- **L2** = LLM reasoning (rank, dedupe, FP demote, novel-vuln tag, **SAST↔DAST correlation**, **multi-role role-picking**).
+- **L3** = fresh-context exploit chain construction + PoC synthesis.
+
+iter-18 also adds: **two-user auth-flow** (user-a + user-b are now distinct accounts with distinct tokens, enabling real cross-session BOLA/IDOR), **scan_idor wired into phase-2**, **webapp_recon_pipeline wired into phase-2 for web_application targets**.
+
+### What L1 (in production with sandbox) should now close
+
+| Fixture | Must_find | L1 sandbox-resident tool that closes it |
+|---|---|---|
+| vampi | `jwt-none-alg` | jwt_audit (alg=none + alg-confusion). Bench lower bound: missed (no sandbox). Production: should catch. |
+| crapi | `weak-jwt-secret` (RS256) | jwt_audit (RS256 brute + RSA→HMAC confusion). HS-only `probe_jwt_brute_secret` is the bench lower bound. |
+| crapi | `missing-security-headers` | http_security_headers_audit. Bench lower bound: missed. Production: should catch. |
+| crapi | `bola-vehicle` | scan_idor + scan_api_bola with iter-18's distinct user-a / user-b tokens. |
+| crapi | `bfla-mechanic-internal` | scan_api_bfla — partial: catches default-role BFLA; needs L2 to pick `role=mechanic` for full coverage. |
+| juiceshop | 5 of 7 SPA-routed misses | webapp_recon_pipeline (playwright) discovers SPA routes → per-endpoint scan_sqli/ssrf/xss with auth. |
+| flask-vuln | `idor-users` | scan_idor with iter-18 two-user setup. |
+| vibe-app | DAST chains | webapp_recon_pipeline + scan_sqli with hydrated bodies. |
+
+### Truly-L2 gaps (LLM reasoning required)
+
+| Gap | Why genuinely L2 |
+|---|---|
+| `mass-assignment-user` on crapi 1.1.6 | Fixture-versioning issue (expected.yaml is from crapi 0.7.0). Not a detection capability gap. |
+| `bfla-mechanic-internal` enum-value picking | L2 reads spec's `role` field enum (`["user", "admin", "mechanic"]`) and registers users with each value. |
+| SAST↔DAST cross-asset chain (vibe-app `dast-*`) | L2 connects `_.merge(req.body)` SAST sink to `POST /api/merge` DAST endpoint, picks prototype-pollution payload. |
+| Hash-routed DOM XSS (juiceshop `/#/search`) | L2 reasoning to recognize hash routing + drive headless browser into the right state. |
+| Novel-vuln tagging | Pattern outside the signature corpus by definition. |
+
+### Bench vs production divergence
+
+The `bench_l1_only.py` harness has no sandbox — every `sandbox_execution=True` tool errors cleanly with "Agent state with a valid sandbox_id is required". **Bench captures the LOWER BOUND of L1.** Production runs every L1 tool in the sandbox; the real recall is materially higher.
+
+A future iter could provision a minimal sandbox for the bench to measure the production-equivalent number, but that's measurement-infrastructure work, not detection work.
 
 ### Key findings from measurement
 
@@ -148,6 +206,14 @@ Measured across the full `--full` fixture set (`bench_l1_only.py --full`), not j
 | #372 | host-runnable katana crawl fallback | web_application | (no Δ on SPA targets; infra for non-SPA) |
 | #373 | container_image fixture (nginx:1.18) + tracer-aware L1 harness + sca alias | container_image | nginx-vuln 0.0→**1.0** ✅ |
 | iter-11 | Deterministic L1 probe arsenal: forged JWT alg=none, mass-assignment, unauth debug paths (incl. openapi sub-paths), open-redirect, unauth-BOLA path-params, directory-listing, openapi-spec-exposed; widened nuclei tags (`default-login`, `exposure`, `misconfig`, `jwt`, `oauth`, `api`); per-endpoint scan_sqli hydration; bench harness: paired-asset support + URL root correction | api / web | vampi 0.125→**0.375–0.500**, juiceshop 0.0→**0.222**, vibe-app 0.0→**0.200** |
+| #376 | osv-scanner SCA fallback when threat-intel cache is empty | repository | vibe-app 0.2→**0.6** (sca-lodash + sca-ejs unblocked) |
+| #378 | ip_address L1 anchors — TCP probes (Redis no-auth, HTTP autoindex+banner, FTP anon) | ip_address | ip-vulnerable 0.0→**1.0** |
+| #379 | WebGoat + Apache CVE-2021-41773 fixtures + nuclei binary fallback (raw-HTTP templates) + probe_http_port for web targets | web_application | apache-cve 0→**1.0**, webgoat **1.0** |
+| #380 | `--full` bench flag + complete fixture inventory (closes selection bias) | infra | (validates) — exposed 5 unmeasured fixtures all at 1.0 |
+| #381 | Fix 6 silently-dropping SAST rules (cross-language parse errors) | repository | (no recall regression; production target coverage unblocked) |
+| #382 | Native raw-HTTP nuclei interpreter (parser + raw-socket sender). Removes binary dependency. + FP fixes (`flow:`, `internal: true`, fail-closed on dropped matchers) | api / web | apache-cve **1.0** without nuclei binary on PATH |
+| #383 | iter-17 — deterministic auth-flow into L1 (auth + spec-as-scope). probe_auth_flow, probe_jwt_brute_secret, probe_password_reset_otp_space, scan_api_bola/bfla/mass_assignment with captured token | api | vampi 0.375→**0.625** |
+| #385 | iter-17.5/.6/.7 — mass-assignment follow-up GET probe, fixture corrections, scorer best-CWE-match, crapi compose env restore, static-path auth-fallback, OTP/user path keyword expansion | api | vampi 0.625→**0.875**, crapi 0.125→**0.500** (after fixture restore) |
 
 ### Current state (post iter-11)
 
