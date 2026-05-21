@@ -2239,8 +2239,15 @@ async def _run_auth_flow(
         return ("", {})
 
     # Step 1 — register + login user-a (primary)
+    # Compute login_url once for use in downstream logs / notes /
+    # finding endpoints. Falls back to the constructed URL if the
+    # endpoint dict doesn't carry the absolute `url`.
+    login_url = (
+        auth_eps.login.get("url")
+        or (target_value.rstrip("/") + (auth_eps.login.get("path") or ""))
+    ) if auth_eps.login else ""
     state.register_endpoint = auth_eps.register.get("url", "") if auth_eps.register else ""
-    state.login_endpoint = auth_eps.login.get("url", "") if auth_eps.login else ""
+    state.login_endpoint = login_url
     user_a_token, user_a_cookies = _do_register_then_login(
         state.username, state.password,
     )
@@ -3324,17 +3331,17 @@ async def _run_dependent_api_tools(
         # account.
         for api_tool, extra_kwargs in (
             ("scan_api_mass_assignment", {
-                "endpoints": endpoints,
+                "endpoints": endpoints or [],
                 "auth_label": "user-a",
                 "confirm_mutation": True,
             }),
             ("scan_api_bola", {
-                "endpoints": endpoints,
+                "endpoints": endpoints or [],
                 "owner_label": "user-a",
                 "accessor_label": "user-b",
             }),
             ("scan_api_bfla", {
-                "endpoints": endpoints,
+                "endpoints": endpoints or [],
                 "admin_label": "admin",
             }),
             # iter-18: scan_idor is a cross-session IDOR probe that
@@ -3345,7 +3352,7 @@ async def _run_dependent_api_tools(
             # URLs. Caps at max_urls=50 internally.
             ("scan_idor", {
                 "urls": [
-                    ep.get("url") for ep in endpoints
+                    ep.get("url") for ep in (endpoints or [])
                     if isinstance(ep, dict) and ep.get("url")
                 ],
                 "owner_label": "user-a",
