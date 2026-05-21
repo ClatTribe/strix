@@ -338,9 +338,17 @@ _ANCHORS_API: list[tuple[str, Any]] = [
     # `/debug/imds`, `/.well-known/instance-data`, ...) and
     # fingerprints AWS/GCP/Azure/OCI response bodies. Complements
     # scan_ssrf (which needs a param) for the parameter-less
-    # passthrough case. Returns ok with zero findings on non-cloud
-    # targets — no false-positive load.
+    # passthrough case.
     ("scan_cloud_imds_passthrough", _api_target_url_kwargs),
+    # iter-21.6.1 — multi-cloud bucket discovery via bbot's
+    # bucket modules (AWS S3 / GCP GCS / Azure Blob /
+    # DigitalOcean Spaces / Firebase / IBM COS). Wraps the bbot
+    # CLI; uses target's domain labels + bbot's own DNS / CT-log
+    # chaining + wordlists to seed bucket-name candidates.
+    # Returns partial when bbot isn't on PATH or target is a
+    # bare IP. Replaces the in-house bucket probe from PR #400
+    # (reverted via PR #401).
+    ("scan_buckets_via_bbot", _api_target_url_kwargs),
     # Tools wired via phase-2 (require runtime-captured state, not
     # just target_value), invoked in `_run_dependent_api_tools`:
     #   * jwt_audit — needs a JWT token. iter-17 auth-flow captures
