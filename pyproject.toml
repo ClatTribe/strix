@@ -33,7 +33,11 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-  "litellm[proxy]>=1.81.1,<1.82.0",
+  # `litellm` (not `litellm[proxy]`) — strix only uses the client.
+  # The proxy extra pulls fastapi / uvicorn / redis / prometheus_client
+  # / sqlalchemy / boto3 that we never invoke from inside the agent
+  # loop. Image-slim Section N1.
+  "litellm>=1.81.1,<1.82.0",
   "tenacity>=9.0.0",
   "pydantic[email]>=2.11.3",
   "rich",
@@ -44,9 +48,13 @@ dependencies = [
   "requests-toolbelt>=1.0.0",
   "gql[requests]>=3.5.3",
   "cvss>=3.2",
-  "traceloop-sdk>=0.53.0",
-  "opentelemetry-exporter-otlp-proto-http>=1.40.0",
-  "scrubadub>=2.0.1",
+  # opentelemetry CORE stays — telemetry/utils.py imports it at
+  # module-load time and the local file exporter is always available.
+  # OTLP exporter + Traceloop SDK move to the `telemetry` optional
+  # extra (image-slim Section N1): both are lazily imported inside
+  # functions guarded by try/except, so they degrade gracefully when
+  # absent. Saves ~150 MB in the sandbox image. Install with
+  # `strix-agent[telemetry]` to re-enable remote OTLP / Traceloop.
   "defusedxml>=0.7.1",
 ]
 
@@ -55,6 +63,14 @@ strix = "strix.interface.main:main"
 
 [project.optional-dependencies]
 vertex = ["google-cloud-aiplatform>=1.38"]
+# Remote OTLP / Traceloop telemetry. Install with `strix-agent[telemetry]`
+# when you want OTLP HTTP export or Traceloop instrumentation. Without
+# this extra, the local file-based span exporter still runs (events.jsonl
+# stays populated); only the remote exporters are disabled.
+telemetry = [
+  "traceloop-sdk>=0.53.0",
+  "opentelemetry-exporter-otlp-proto-http>=1.40.0",
+]
 sandbox = [
   "fastapi",
   "uvicorn",
