@@ -414,11 +414,22 @@ def test_scan_mobile_app_registered() -> None:
     assert callable(fn)
 
 
-def test_anchor_prepass_recognizes_mobile_app_target_type() -> None:
+def test_mobile_app_asset_type_not_wired_yet() -> None:
+    """iter-21.5 followup: `mobile_app` asset_type was added to
+    the anchor prepass dict but the rest of the strix pipeline
+    (CLI, preflight, target detection, runner) doesn't recognize
+    it — the anchor would never have fired. We removed the dead
+    entry; this test pins that it stays removed until the
+    upstream plumbing exists, so a future eager refactor doesn't
+    re-introduce dead code.
+
+    When the full pipeline lands (CLI flag, preflight, fixture,
+    routing), DELETE this test and re-add the asset_type
+    `mobile_app` entry pointing at a single-tool `_ANCHORS_MOBILE`
+    list — the tool itself stays callable by agents in the
+    meantime.
+    """
     from strix.agents.lead_agent.anchor_prepass import (
         _ANCHORS_BY_TARGET_TYPE,
     )
-    assert "mobile_app" in _ANCHORS_BY_TARGET_TYPE
-    anchors = _ANCHORS_BY_TARGET_TYPE["mobile_app"]
-    tool_names = [name for name, _ in anchors]
-    assert "scan_mobile_app" in tool_names
+    assert "mobile_app" not in _ANCHORS_BY_TARGET_TYPE
