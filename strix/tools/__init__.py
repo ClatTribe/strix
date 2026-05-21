@@ -77,14 +77,6 @@ from .authn_metadata_audit import *  # noqa: F403  # scan_authn_metadata
 # Pure-Python zip + xml + plist inspection; no docker dep, no
 # mobsf. Closes the `asset_type=mobile_app` gap.
 from .mobile_app_audit import *      # noqa: F403  # scan_mobile_app
-# iter-21.6 — deterministic cloud-exposure audits:
-#   * scan_public_bucket_exposure — AWS S3 / GCP GCS / Azure Blob
-#     bucket-name guessing from target hostname labels.
-#   * scan_cloud_imds_passthrough — direct GET on known IMDS-proxy
-#     paths (`/imds`, `/metadata`, `/debug/imds`, ...). Complements
-#     scan_ssrf which needs an SSRF-shaped param to drive probes
-#     through.
-from .cloud_exposure_audit import *   # noqa: F403  # scan_public_bucket_exposure, scan_cloud_imds_passthrough
 
 # SCA / supply-chain analysis (Phase 6) — registers
 # `scan_sca_lockfiles`.
