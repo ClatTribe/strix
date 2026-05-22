@@ -17,3 +17,5 @@ from strix.tools.findings import check_budget as _check_budget  # noqa: F401
 from strix.tools.findings import update_finding as _update_finding  # noqa: F401
 # iter-26.2 / 26.7 — L1.5-aware catalog listing for Lead Orchestrator
 from strix.tools.findings import list_findings as _list_findings  # noqa: F401
+# iter-26.5 + 26.6 — auto-fire L1.5 confirmations + probe bundles
+from strix.tools.findings import drain_amplify as _drain_amplify  # noqa: F401
