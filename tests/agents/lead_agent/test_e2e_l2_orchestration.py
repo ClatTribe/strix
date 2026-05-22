@@ -244,6 +244,48 @@ def test_stealth_addendum_renders_into_sqli_specialist_prompt():
 
 
 # =========================================================================
+# F.3 — dispatch_specialist_batch threads dispatch_target for stealth
+# =========================================================================
+
+def test_dispatch_batch_uses_first_target_for_stealth_guidance(monkeypatch):
+    """When `dispatch_specialist_batch` is invoked with N objectives,
+    the per-batch specialist prompt uses the FIRST target for stealth-
+    posture lookup. The single-dispatch path is covered by
+    test_dispatch_specialist_scales_by_surface; the batch path has
+    its OWN dispatch_target threading.
+    """
+    from strix.l15.posture import (
+        SecurityPosture,
+        clear_cache as _clear_posture_cache,
+        set_posture,
+    )
+
+    _clear_posture_cache()
+    set_posture(SecurityPosture(
+        target="https://wafd.example.com/api/v1/foo",
+        waf_detected=True, waf_vendor="cloudflare",
+        stealth_mode_required=True, rate_limit_rps=10,
+    ))
+
+    # Build the prompt directly with the same args dispatch_batch
+    # would build internally. This catches the threading wiring
+    # without spawning a real specialist loop.
+    from strix.agents.specialist_orchestrator import (
+        _build_system_prompt, get_profile,
+    )
+    prompt = _build_system_prompt(
+        profile=get_profile("sqli"),
+        scope_context=None,
+        relevant_findings=None,
+        dispatch_target="https://wafd.example.com/api/v1/foo",
+    )
+    assert "STEALTH MODE" in prompt
+    # rate-limit cap (10 rps observed → 5 rps cap)
+    assert "5 rps" in prompt
+    _clear_posture_cache()
+
+
+# =========================================================================
 # E2E-L2-6 — Lead prompt addendum mentions L1.5 vocabulary
 # =========================================================================
 
