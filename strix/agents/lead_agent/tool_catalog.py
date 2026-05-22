@@ -59,6 +59,11 @@ _CORE_TOOLS: frozenset[str] = frozenset({
     # by default. The Lead calls this between specialist dispatches to
     # pick the highest-leverage next target.
     "list_pending_findings",
+    # iter-26.11 — adaptive-probe escape hatch. Routes through the
+    # POSTURE gate (stealth-aware) and is per-scan call-capped at 10.
+    # For the unforeseen 30% of follow-ups not covered by the
+    # deterministic probe-bundle dispatcher.
+    "execute_adaptive_probe",
     # Threat intel — always-on (read-only, framework provenance).
     # iter-22.9: `cve_lookup` / `nvd_lookup` / `lookup_known_cves` /
     # `lookup_cve_by_id` / `list_actively_exploited_cves` were five
@@ -369,6 +374,9 @@ _ORCHESTRATOR_ALLOWED_TOOLS: frozenset[str] = frozenset({
     "check_budget",
     # iter-26.2 / 26.7 — L1.5-aware ranked catalog.
     "list_pending_findings",
+    # iter-26.11 — adaptive-probe escape hatch (stealth-aware,
+    # call-capped).
+    "execute_adaptive_probe",
     # Threat-intel lookups (lead may need these for orchestration
     # decisions — "what CVEs apply to this tech stack?")
     # iter-22.9: 5 redundant lookup tools collapsed into one.

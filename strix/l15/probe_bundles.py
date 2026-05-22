@@ -39,6 +39,7 @@ from typing import Any, Callable
 from urllib.parse import urljoin
 
 from strix.l15.posture import stealth_required
+from strix.tools.registry import register_tool
 
 
 logger = logging.getLogger(__name__)
@@ -331,6 +332,7 @@ _adaptive_call_log: list[dict[str, Any]] = []
 _ADAPTIVE_CALL_CAP = 10
 
 
+@register_tool(sandbox_execution=False, provenance="framework")
 def execute_adaptive_probe(
     tool_name: str,
     target: str,
@@ -338,20 +340,36 @@ def execute_adaptive_probe(
 ) -> dict[str, Any]:
     """L2 LLM escape hatch — fire any L1 tool with custom args.
 
-    For unforeseen follow-ups the deterministic ``plan_probe_bundle``
-    doesn't cover. Per docs/L2-optimization.md §4 Gap 1 + §8 open
-    question on policy:
+    Use this when the deterministic L1.5 probe-bundle dispatcher
+    didn't cover the follow-up you want — the "unforeseen 30%" of
+    cases beyond the built-in admin-burst / sqli-burst / tech-burst
+    bundles.
 
-      * Per-scan call cap (default 10) so the LLM can't loop on it.
-      * Every call recorded to an audit log keyed by scan run so a
-        human can review what got fired with what params.
-      * Always routes through the POSTURE gate (stealth_required
-        check) — the LLM doesn't get to bypass WAF awareness.
+    Before calling, check whether the source finding already has a
+    `triggered_probes[]` array attached. If yes, those bundles are
+    firing automatically via the amplify orchestrator — don't
+    duplicate; this tool is for cases the deterministic planner
+    didn't anticipate.
 
-    Returns ``{queued: bool, reason: str, stealth: bool}``. Does NOT
-    actually invoke the tool — that's the amplify orchestrator's
-    job. This just records the intent + emits the audit event so the
-    LLM has a deterministic feedback signal.
+    Args:
+        tool_name: the L1 tool name to fire (e.g.
+            "scan_sqli_sqlmap", "discover_paths_feroxbuster",
+            "probe_hosts_httpx").
+        target: target URL or host the tool will probe.
+        extra_args: optional dict of extra keyword args passed to the
+            tool. Whatever the tool's @register_tool signature
+            accepts is valid here.
+
+    Returns:
+        ``{queued: bool, reason: str, stealth: bool}``. Does NOT
+        actually invoke the tool — the amplify orchestrator dequeues
+        and fires. This call just records intent + emits the audit
+        event so the LLM has a deterministic feedback signal.
+
+    Per-scan call cap of 10; further calls return ``queued=False``
+    with reason="adaptive-probe call cap reached". Stealth flag is
+    inherited from the cached SecurityPosture for the target — the
+    LLM doesn't get to bypass WAF awareness here either.
     """
     with _adaptive_call_lock:
         if len(_adaptive_call_log) >= _ADAPTIVE_CALL_CAP:

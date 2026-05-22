@@ -27,9 +27,13 @@ single-lead architecture is used unchanged.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from strix.tools.registry import register_tool
+
+
+logger = logging.getLogger(__name__)
 
 
 # NOTE: same lazy-import pattern as the workflow tools — avoid
@@ -117,11 +121,42 @@ def dispatch_specialist(
     `advance_workflow_phase`. Save the deliberation budget for
     INTERESTING results (findings to chain, blocks to clear).
     """
+    # iter-26.3 + 26.4 — scale max_iterations by L1.5 depth multipliers:
+    #   * per-target surface_priority.depth_multiplier (3.0 critical
+    #     paths like /admin /auth /payment; 0.3 static/health/docs;
+    #     1.0 normal).
+    #   * global hygiene multiplier from hygiene_ledger (2.0 sloppy
+    #     target; 0.6 tidy target; 1.0 neutral).
+    # Both are honoured only when the caller didn't pin max_iterations
+    # explicitly. The combined multiplier is clamped to [0.2, 5.0] so
+    # neither factor can drive the cap below a useful minimum nor
+    # explode it past the cost-budget guards downstream.
+    effective_max_iterations = max_iterations
+    if effective_max_iterations is None and target:
+        try:
+            from strix.l15.surface_priority import depth_multiplier_for
+            from strix.l15.hygiene import hygiene_ledger
+
+            surface_mult = depth_multiplier_for(target)
+            hygiene_mult = hygiene_ledger.compute().depth_multiplier
+            combined = max(0.2, min(5.0, surface_mult * hygiene_mult))
+            # 50 = current default in _orchestrator().dispatch_specialist
+            effective_max_iterations = max(5, int(round(50 * combined)))
+            logger.debug(
+                "l1.5 dispatch budget: target=%s surface=%.2f hygiene=%.2f "
+                "combined=%.2f → max_iterations=%d",
+                target, surface_mult, hygiene_mult,
+                combined, effective_max_iterations,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("l1.5 dispatch scaling failed: %s — passthrough", e)
+            effective_max_iterations = max_iterations
+
     return _orchestrator().dispatch_specialist(
         category=category,
         objective=objective,
         target=target,
-        max_iterations=max_iterations,
+        max_iterations=effective_max_iterations,
         max_cost_usd=max_cost_usd,
         skills_override=skills_override,
     )
