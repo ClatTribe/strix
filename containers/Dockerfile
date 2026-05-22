@@ -164,7 +164,8 @@ RUN pipx install semgrep \
  # domain discovery. Wrapped by `scan_typosquats_dnstwist`.
  # Commercial-feed-equivalent (Cyble / ZeroFOX brand protection
  # tier) but free + zero-auth.
- && pipx install dnstwist
+ && pipx install dnstwist \
+ && pipx install inql
 
 # =============================================================================
 # Stage: clone-builder
@@ -513,6 +514,22 @@ RUN ARCH="$(uname -m)" \
  && curl -fsSL "https://github.com/hadolint/hadolint/releases/download/${TAG}/hadolint-Linux-${HADOLINT_ARCH}" \
         -o /usr/local/bin/hadolint \
  && chmod 0755 /usr/local/bin/hadolint
+
+# iter-23.3 — feroxbuster (Rust recursive content discovery). Same
+# release-binary pattern as gitleaks / hadolint. Used by
+# `discover_paths_feroxbuster`.
+RUN ARCH="$(uname -m)" \
+ && case "$ARCH" in \
+        x86_64) FEROX_ARCH="x86_64-linux-feroxbuster.tar.gz" ;; \
+        aarch64|arm64) FEROX_ARCH="aarch64-linux-feroxbuster.tar.gz" ;; \
+        *) echo "Unsupported architecture for feroxbuster: $ARCH" >&2; exit 1 ;; \
+    esac \
+ && TAG="$(curl -fsSL https://api.github.com/repos/epi052/feroxbuster/releases/latest | jq -r .tag_name)" \
+ && curl -fsSL "https://github.com/epi052/feroxbuster/releases/download/${TAG}/${FEROX_ARCH}" \
+        -o /tmp/feroxbuster.tgz \
+ && tar -xzf /tmp/feroxbuster.tgz -C /tmp \
+ && install -m 0755 /tmp/feroxbuster /usr/local/bin/feroxbuster \
+ && rm -f /tmp/feroxbuster /tmp/feroxbuster.tgz
 
 # iter-22.3 — testssl.sh (bash-based TLS auditor, ~50 checks).
 # Cloned from upstream and symlinked. Used by
