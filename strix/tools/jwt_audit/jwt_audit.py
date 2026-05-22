@@ -90,6 +90,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import time
 from typing import Any
@@ -202,7 +203,17 @@ def crack_hmac_secret(token: str, deadline: float) -> str | None:
     Returns the matching secret if found within `deadline` seconds
     (clock-time), else None. HS256 only — HS384 / HS512 are
     structurally similar but rare in practice and skipped to keep
-    runtime bounded."""
+    runtime bounded.
+
+    iter-22.2 extension: if our 120-entry built-in dictionary
+    misses AND `jwt_tool` is on PATH (it's deployed at
+    `/home/pentester/.local/bin/jwt_tool` in the strix-sandbox
+    image — clone-builder stage), we shell out to it for the
+    larger-wordlist brute as a fallback. The jwt_tool ships with
+    several thousand secrets aggregated across CTFs / leaks /
+    OWASP top-10000. Subprocess-bounded by remaining deadline so
+    overall wall budget stays consistent.
+    """
     parsed = parse_jwt(token)
     if parsed is None:
         return None
@@ -220,6 +231,81 @@ def crack_hmac_secret(token: str, deadline: float) -> str | None:
         ).digest()
         if hmac.compare_digest(actual, expected_sig):
             return secret
+
+    # iter-22.2 fallback: defer to ticarpi/jwt_tool's larger
+    # wordlist when our in-house dict missed AND there's deadline
+    # left to burn.
+    remaining = end_time - time.monotonic()
+    if remaining > 1.0:
+        return _crack_hmac_secret_via_jwt_tool(
+            token=token, timeout_s=min(remaining, 30.0),
+        )
+    return None
+
+
+def _crack_hmac_secret_via_jwt_tool(
+    token: str, *, timeout_s: float,
+) -> str | None:
+    """Subprocess-fallback HMAC brute against jwt_tool's bundled
+    wordlist. Returns the cracked secret string when jwt_tool
+    succeeds; None otherwise. Never raises — failures (binary
+    missing, timeout, parse errors) all return None so the caller
+    treats it identically to "dictionary missed".
+
+    Why this is safe: jwt_tool is read-only when invoked with
+    `-C -d <wordlist>` (crack-mode against a local wordlist) —
+    no network traffic, no server interaction.
+    """
+    import shutil
+    import subprocess
+
+    binary = shutil.which("jwt_tool")
+    if binary is None:
+        return None
+    # Locate jwt_tool's bundled wordlist. The Dockerfile clone
+    # lands at `/home/pentester/tools/jwt_tool/`; the file is
+    # `common-payloads.txt` in that tree. Operators can override
+    # via `STRIX_JWT_TOOL_WORDLIST` (e.g. to point at rockyou.txt
+    # or a custom corpus).
+    wordlist = os.environ.get("STRIX_JWT_TOOL_WORDLIST", "").strip()
+    if not wordlist:
+        # Try the bundled wordlist first.
+        for candidate in (
+            "/home/pentester/tools/jwt_tool/common-payloads.txt",
+            os.path.expanduser("~/tools/jwt_tool/common-payloads.txt"),
+        ):
+            if os.path.exists(candidate):
+                wordlist = candidate
+                break
+    if not wordlist or not os.path.exists(wordlist):
+        return None
+
+    cmd = [binary, token, "-C", "-d", wordlist]
+    try:
+        result = subprocess.run(  # noqa: S603
+            cmd, check=False, capture_output=True,
+            timeout=timeout_s, text=True,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    # Strip ANSI escapes that jwt_tool emits for its banner.
+    ansi_re = re.compile(r"\x1b\[[0-9;]*m")
+    stdout = ansi_re.sub("", result.stdout or "")
+    # jwt_tool prints either "CORRECT key found: '<secret>'" (newer
+    # 2.x output) or "[+] <secret>" (older variants) on success.
+    for line in stdout.splitlines():
+        if "CORRECT key found" in line or "key found:" in line.lower():
+            # Pull whatever's between the first pair of quotes / colons.
+            m = re.search(r"['\"]([^'\"]+)['\"]", line)
+            if m:
+                return m.group(1)
+            m = re.search(r":\s*(\S+)\s*$", line)
+            if m:
+                return m.group(1)
+        # Older-style: "[+] <secret>"
+        m = re.match(r"^\s*\[\+\]\s+(\S+)\s*$", line)
+        if m:
+            return m.group(1)
     return None
 
 
