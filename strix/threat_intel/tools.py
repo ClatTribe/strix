@@ -1,13 +1,27 @@
 """LLM-facing threat-intel tools (registered via @register_tool).
 
-Two tools surface to the agent:
+iter-22.9 (catalog bloat consolidation, per
+`docs/l2-architecture-evaluation.md §5.1`): the four CVE-lookup
+shapes that previously each had their own `@register_tool` schema
+(`lookup_known_cves`, `lookup_cve_by_id`,
+`list_actively_exploited_cves`, plus older `cve_lookup` /
+`nvd_lookup`) are consolidated into a single
+`query_threat_intel(...)` tool. Mode is selected by which kwargs
+are supplied:
 
-  * `lookup_known_cves(component, version=None, ...)` — primary
-    surface. Returns a structured CVE list with KEV / EPSS metadata
-    so the lead can prioritise actively-exploited issues.
-  * `threat_intel_status()` — debug helper. Returns cache freshness
-    + per-feed status so the lead can decide whether to trust the
-    answer (or trigger a refresh).
+  * `cve_id=` → single-CVE detail lookup
+  * `component=` (+ optional `version` / `vendor`) → component
+    CVE list
+  * `actively_exploited=True` → KEV / high-EPSS list
+
+The old three lookup_* function bodies stay in this module
+(internal callers in `strix/tools/verify/verify_findings.py` and
+elsewhere still import them) but **lose their `@register_tool`
+decorator** so the LLM's tool catalog no longer carries their
+~3K of schema-description tokens.
+
+`threat_intel_status()` remains separately registered — it's a
+cache-freshness diagnostic distinct from data queries.
 
 These are *framework provenance* tools — output is from a public
 feed (CISA / NIST / FIRST), not from the target. Outputs feed into
@@ -44,11 +58,10 @@ def _serialise_records(records: list, *, max_records: int) -> list[dict[str, Any
     return out
 
 
-@register_tool(
-    sandbox_execution=False,
-    mitre_techniques=["T1592.002"],  # Gather Victim Host Information: Software
-    provenance="framework",
-)
+# iter-22.9: removed `@register_tool` decorator — the LLM-facing
+# entry point is `query_threat_intel(...)` below. The function
+# body stays as an internal helper used by `verify_findings.py`
+# and re-called by the consolidated tool.
 def lookup_known_cves(
     component: str,
     version: str | None = None,
@@ -136,11 +149,9 @@ def lookup_known_cves(
     }
 
 
-@register_tool(
-    sandbox_execution=False,
-    mitre_techniques=["T1592"],
-    provenance="framework",
-)
+# iter-22.9: removed `@register_tool` — consolidated into
+# `query_threat_intel(cve_id=...)`. Internal helper kept for
+# other-module callers.
 def lookup_cve_by_id(
     cve_id: str,
 ) -> dict[str, Any]:
@@ -176,11 +187,8 @@ def lookup_cve_by_id(
     return {"status": "ok", "cve": record.to_dict()}
 
 
-@register_tool(
-    sandbox_execution=False,
-    mitre_techniques=["T1592"],
-    provenance="framework",
-)
+# iter-22.9: removed `@register_tool` — consolidated into
+# `query_threat_intel(actively_exploited=True)`. Internal helper.
 def list_actively_exploited_cves(
     min_epss: float = 0.5,
     max_records: int = 100,
@@ -213,6 +221,97 @@ def list_actively_exploited_cves(
         "min_epss": min_epss,
         "match_count": len(records),
         "cves": _serialise_records(records, max_records=max_records),
+    }
+
+
+@register_tool(
+    sandbox_execution=False,
+    mitre_techniques=["T1592", "T1592.002"],
+    provenance="framework",
+)
+def query_threat_intel(
+    cve_id: str | None = None,
+    component: str | None = None,
+    version: str | None = None,
+    vendor: str | None = None,
+    actively_exploited: bool = False,
+    only_kev: bool = False,
+    min_epss: float = 0.0,
+    max_records: int = 25,
+) -> dict[str, Any]:
+    """Unified threat-intel query — replaces `lookup_known_cves`,
+    `lookup_cve_by_id`, and `list_actively_exploited_cves`
+    (iter-22.9 catalog consolidation per
+    `docs/l2-architecture-evaluation.md §5.1`).
+
+    Mode dispatch (first matching wins):
+
+      1. `cve_id` supplied → single-CVE detail lookup. Returns
+         `{status, cve}` or `{status: "not_found", message}` when
+         the cache doesn't have the CVE.
+
+      2. `component` supplied → component → CVE list. Backed by
+         CISA KEV + FIRST.org EPSS + NVD CPE matching. Returns
+         `{status, match_count, kev_count, high_epss_count,
+         critical_count, cves, next_action_hint}`.
+
+      3. `actively_exploited=True` (no component, no cve_id) →
+         KEV / high-EPSS list. Returns the global recently-exploited
+         set ordered by KEV-status + EPSS descending.
+
+    Args:
+        cve_id: CVE identifier (e.g. "CVE-2024-12345"). Triggers
+            mode 1 single-CVE lookup.
+        component: package or product name (case-insensitive,
+            e.g. "apache", "nginx", "lodash", "log4j"). Triggers
+            mode 2 component lookup.
+        version: optional version filter for mode 2 (CPE-aware).
+        vendor: optional vendor filter for mode 2 (pin when product
+            names collide, e.g. "tomcat" appears under multiple
+            vendors).
+        actively_exploited: if True and neither cve_id nor
+            component supplied, triggers mode 3 (KEV/high-EPSS
+            list).
+        only_kev: mode 2/3 filter — CISA KEV catalog only.
+        min_epss: mode 2/3 filter — EPSS probability >= this
+            (0.0-1.0). Use 0.5 for "likely to be exploited soon",
+            0.97 for "near-certain weaponisation".
+        max_records: cap returned records (default 25).
+
+    Returns: structured dict with `status` and mode-specific keys.
+    Errors are returned as `{"status": "error", "error": ...}` —
+    the tool never raises.
+    """
+    # Mode 1: single-CVE
+    if cve_id is not None and isinstance(cve_id, str) and cve_id.strip():
+        return lookup_cve_by_id(cve_id=cve_id)
+
+    # Mode 2: component lookup
+    if component is not None and isinstance(component, str) and component.strip():
+        return lookup_known_cves(
+            component=component,
+            version=version,
+            vendor=vendor,
+            only_kev=only_kev,
+            min_epss=min_epss,
+            max_records=max_records,
+        )
+
+    # Mode 3: actively-exploited list
+    if actively_exploited:
+        return list_actively_exploited_cves(
+            min_epss=min_epss if min_epss > 0 else 0.5,
+            max_records=max_records,
+        )
+
+    return {
+        "status": "error",
+        "error": (
+            "query_threat_intel requires one of: `cve_id` (single-"
+            "CVE lookup), `component` (component-to-CVE list), or "
+            "`actively_exploited=True` (KEV/EPSS list)."
+        ),
+        "cves": [],
     }
 
 

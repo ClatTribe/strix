@@ -154,11 +154,9 @@ def _safe_invoke(tool_name: str, **kwargs: Any) -> dict[str, Any]:
         }
 
 
-@register_tool(
-    sandbox_execution=False,
-    mitre_techniques=["T1190"],
-    provenance="framework",
-)
+# iter-22.9: removed `@register_tool` — consolidated into
+# `replay_mutation(source="endpoints", ...)` below. Internal
+# helper retained for direct in-module calls.
 def replay_mutation_on_endpoints(
     endpoints: list[dict[str, Any]],
     *,
@@ -293,11 +291,8 @@ def replay_mutation_on_endpoints(
     }
 
 
-@register_tool(
-    sandbox_execution=False,
-    mitre_techniques=["T1190"],
-    provenance="framework",
-)
+# iter-22.9: removed `@register_tool` — consolidated into
+# `replay_mutation(source="har", file_path=...)`. Internal helper.
 def replay_mutation_from_har_file(
     path: str,
     *,
@@ -332,11 +327,8 @@ def replay_mutation_from_har_file(
     )
 
 
-@register_tool(
-    sandbox_execution=False,
-    mitre_techniques=["T1190"],
-    provenance="framework",
-)
+# iter-22.9: removed `@register_tool` — consolidated into
+# `replay_mutation(source="burp", file_path=...)`. Internal helper.
 def replay_mutation_from_burp_file(
     path: str,
     *,
@@ -368,3 +360,101 @@ def replay_mutation_from_burp_file(
         max_endpoints=max_endpoints,
         extra_headers=extra_headers,
     )
+
+
+@register_tool(
+    sandbox_execution=False,
+    mitre_techniques=["T1190"],
+    provenance="framework",
+)
+def replay_mutation(
+    source: str,
+    endpoints: list[dict[str, Any]] | None = None,
+    file_path: str | None = None,
+    families: list[str] | None = None,
+    max_endpoints: int = 200,
+    extra_headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Unified replay-with-mutation orchestrator — replaces
+    `replay_mutation_on_endpoints`, `replay_mutation_from_har_file`,
+    and `replay_mutation_from_burp_file` (iter-22.9 catalog
+    consolidation per
+    `docs/l2-architecture-evaluation.md §5.2`).
+
+    Mode dispatch by `source`:
+
+      * `source="endpoints"` — requires `endpoints=` (the inventory
+        list, typically from `ingest_har_file` / `ingest_burp_file`
+        or `openapi_spec_ingest`).
+      * `source="har"` — requires `file_path=` (HAR JSON path).
+      * `source="burp"` — requires `file_path=` (Burp XML export).
+
+    Args:
+        source: one of `endpoints` / `har` / `burp`.
+        endpoints: inventory list (mode `endpoints` only).
+        file_path: filesystem path (modes `har` and `burp`).
+        families: optional specialist families filter (e.g.
+            `["sqli", "xxe"]`) — defaults to the full library.
+        max_endpoints: cap how many endpoints the mutation matrix
+            covers (default 200).
+        extra_headers: optional extra headers added to every
+            replay (auth tokens, scope headers, etc.).
+
+    Returns: `SpecialistResult`-shaped dict with `status`,
+    `endpoints_replayed`, `specialists_invoked`, `findings_count`,
+    `per_specialist`, `evidence`, `errors`. Errors return as
+    `{"status": "error", "error": ...}` — never raises.
+    """
+    src = (source or "").strip().lower()
+    if src == "endpoints":
+        if not isinstance(endpoints, list):
+            return {
+                "status": "error",
+                "error": (
+                    "replay_mutation(source='endpoints') requires "
+                    "`endpoints=` list"
+                ),
+            }
+        return replay_mutation_on_endpoints(
+            endpoints=endpoints,
+            families=families,
+            max_endpoints=max_endpoints,
+            extra_headers=extra_headers,
+        )
+    if src == "har":
+        if not isinstance(file_path, str) or not file_path.strip():
+            return {
+                "status": "error",
+                "error": (
+                    "replay_mutation(source='har') requires "
+                    "`file_path=` (path to HAR JSON)"
+                ),
+            }
+        return replay_mutation_from_har_file(
+            path=file_path,
+            families=families,
+            max_endpoints=max_endpoints,
+            extra_headers=extra_headers,
+        )
+    if src == "burp":
+        if not isinstance(file_path, str) or not file_path.strip():
+            return {
+                "status": "error",
+                "error": (
+                    "replay_mutation(source='burp') requires "
+                    "`file_path=` (path to Burp XML export)"
+                ),
+            }
+        return replay_mutation_from_burp_file(
+            path=file_path,
+            families=families,
+            max_endpoints=max_endpoints,
+            extra_headers=extra_headers,
+        )
+    return {
+        "status": "error",
+        "error": (
+            f"replay_mutation: invalid source={source!r}. "
+            "Use 'endpoints' / 'har' / 'burp'."
+        ),
+    }
