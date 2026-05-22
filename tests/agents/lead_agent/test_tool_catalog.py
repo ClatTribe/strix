@@ -284,20 +284,28 @@ def test_empty_target_types_returns_core_minus_blocked() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_per_target_catalog_under_90_tools() -> None:
+def test_per_target_catalog_under_100_tools() -> None:
     """`single-agent.md §2.8` says ~30-50 tools per catalog instead
     of ~130. Cap was 60 pre-Phase-2; raised to 90 after PRs #193-#215
     landed 17 new specialists + the multi-role / replay-mutation
-    orchestrators. Still catches catalog blow-up (130-tool baseline)
-    while accommodating the deterministic-specialist library.
+    orchestrators. Raised to 100 in iter-27 to accommodate the Phase
+    D + Phase F catalog additions (iter-22.1 katana, iter-23.1
+    subfinder/httpx/nmap, iter-23.3 feroxbuster/inql, iter-25.12
+    generate_remediation_plan, iter-26 L1.5 tools, plus the long-
+    missing scan_cache_deception / scan_prototype_pollution /
+    scan_websocket_auth / scan_race_condition / scan_authn_metadata
+    specialists that were registered but unreachable for ~6 months).
+
+    Still catches catalog blow-up (130-tool baseline) while
+    accommodating the deterministic-specialist library.
 
     Future tuning: when active-learning lands (Phase 6.1), the lead
     will subset the catalog per-scan and this cap can drop again."""
     for tt in ["web_application", "repository", "domain", "ip_address"]:
         catalog = get_lead_tool_catalog(target_types=[tt])
-        assert len(catalog) <= 90, (
+        assert len(catalog) <= 100, (
             f"target_type={tt!r} catalog has {len(catalog)} tools — "
-            f"exceeds the §2.8 ~30-50 budget (post-Phase-5 cap: 90)"
+            f"exceeds the §2.8 ~30-50 budget (cap: 100)"
         )
 
 

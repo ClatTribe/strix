@@ -23,6 +23,25 @@ def test_admin_subpath_is_critical():
     assert c.label == "critical"
 
 
+def test_api_versioned_admin_is_critical():
+    """iter-27 fix: `/api/v1/admin/*` paths must classify as
+    critical. The original regex only matched the top-level
+    `/admin/*` pattern, so `/api/v1/admin/users` returned `normal`
+    — surfaced by the F.4 maximal-finding test which had to use
+    `/admin/users/42` instead of `/api/v1/admin/users/42`.
+    """
+    for path in (
+        "https://app.example.com/api/v1/admin/users",
+        "https://app.example.com/api/v2/admin/dashboard",
+        "https://app.example.com/api/v3/admin/",
+        "https://app.example.com/api/admin/users",  # no version
+    ):
+        c = classify_surface(path)
+        assert c.label == "critical", (
+            f"{path} should classify as critical; got {c.label}"
+        )
+
+
 def test_payment_api_is_critical():
     c = classify_surface("https://api.example.com/api/v1/payment/charge")
     assert c.label == "critical"

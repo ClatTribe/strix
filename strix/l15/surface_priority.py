@@ -56,6 +56,7 @@ _DEPTH_MULTIPLIER: dict[str, float] = {
 _CRITICAL_PATH_RE = re.compile(
     r"""(?ix) ^/?(
           admin/?
+        | api/(?:v\d+/)?admin     # iter-27 fix — was missing; /api/v1/admin/* now critical
         | api/(?:v\d+/)?(?:auth|authn|authz|login|logout|signin|signout
                           |password|passwd|account|session|sso|saml|oauth)
         | api/(?:v\d+/)?(?:payment|billing|invoice|charge|subscription
