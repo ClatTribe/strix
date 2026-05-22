@@ -531,6 +531,30 @@ RUN ARCH="$(uname -m)" \
  && install -m 0755 /tmp/feroxbuster /usr/local/bin/feroxbuster \
  && rm -f /tmp/feroxbuster /tmp/feroxbuster.tgz
 
+# iter-24.1 — build-time seed of the ruleset cache. Pull the canonical
+# upstream rule files into /home/pentester/.strix/cache/rules/ so a
+# freshly-pulled sandbox already has every config, even without
+# network. The runtime `update_*` tools refresh these in place once
+# the 24h freshness window expires. Files: gitleaks.toml (secret
+# detection rules), hadolint.yaml (Dockerfile linter rules),
+# wappalyzer-technologies.json (tech fingerprinting DB).
+# Best-effort: failure here MUST NOT break the build; the runtime
+# tools fall back to baked-in defaults.
+RUN mkdir -p /home/pentester/.strix/cache/rules \
+ && (curl -fsSL --connect-timeout 10 --max-time 30 \
+        "https://raw.githubusercontent.com/gitleaks/gitleaks/master/config/gitleaks.toml" \
+        -o /home/pentester/.strix/cache/rules/gitleaks.toml \
+     || echo "[warn] gitleaks.toml seed skipped (no net?)") \
+ && (curl -fsSL --connect-timeout 10 --max-time 30 \
+        "https://raw.githubusercontent.com/hadolint/hadolint/master/.hadolint.yaml" \
+        -o /home/pentester/.strix/cache/rules/hadolint.yaml \
+     || echo "[warn] hadolint.yaml seed skipped (no net?)") \
+ && (curl -fsSL --connect-timeout 10 --max-time 30 \
+        "https://raw.githubusercontent.com/enthec/webappanalyzer/main/src/technologies.json" \
+        -o /home/pentester/.strix/cache/rules/wappalyzer-technologies.json \
+     || echo "[warn] wappalyzer-technologies.json seed skipped (no net?)") \
+ && chown -R pentester:pentester /home/pentester/.strix
+
 # iter-22.3 — testssl.sh (bash-based TLS auditor, ~50 checks).
 # Cloned from upstream and symlinked. Used by
 # `tls_audit_testssl`. Apt's testssl.sh is often stale; cloning

@@ -124,9 +124,21 @@ def scan_dockerfile_hadolint(
             "reason": f"Dockerfile not found: {dockerfile_path!r}",
         }
 
+    cmd: list[str] = [_HADOLINT_BIN, "--format", "json"]
+    # iter-24.1 — prefer the lazily-updated upstream config if
+    # `update_hadolint_config` has populated the cache. Falls back to
+    # hadolint's built-in defaults if the cache is absent.
+    try:
+        from strix.tools.rule_updates import cached_path
+        cached_cfg = cached_path("hadolint.yaml")
+        if cached_cfg.is_file() and cached_cfg.stat().st_size > 0:
+            cmd += ["--config", str(cached_cfg)]
+    except Exception:  # noqa: BLE001
+        pass
+    cmd.append(str(path))
     try:
         result = subprocess.run(  # noqa: S603
-            [_HADOLINT_BIN, "--format", "json", str(path)],
+            cmd,
             check=False, capture_output=True,
             timeout=_DEFAULT_TIMEOUT_SECONDS, text=True,
         )

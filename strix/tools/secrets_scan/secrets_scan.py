@@ -279,6 +279,16 @@ def _run_gitleaks(
         "--report-path", "-",
         "--no-banner",
     ]
+    # iter-24.1 — prefer the lazily-updated upstream ruleset if
+    # `update_gitleaks_rules` has populated the cache. Falls back to
+    # gitleaks' built-in defaults if the cache is absent.
+    try:
+        from strix.tools.rule_updates import cached_path
+        cached_cfg = cached_path("gitleaks.toml")
+        if cached_cfg.is_file() and cached_cfg.stat().st_size > 0:
+            cmd += ["--config", str(cached_cfg)]
+    except Exception:  # noqa: BLE001
+        pass
 
     try:
         proc = subprocess.run(
