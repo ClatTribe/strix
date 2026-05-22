@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 @register_tool(sandbox_execution=False, provenance="framework")
-def drain_amplify_queue() -> dict[str, Any]:
+def drain_amplify_queue(agent_state: Any | None = None) -> dict[str, Any]:
     """Fire all queued L1.5 auto-confirmations and probe bundles.
 
     iter-25 attached `pending_confirmations[]` (SAST→DAST confirmation
@@ -84,8 +84,14 @@ def drain_amplify_queue() -> dict[str, Any]:
 
         # Run inside the existing event loop if any, otherwise spin up
         # a new one. We use the sync wrapper from the orchestrator.
+        # iter-26-fix: plumb agent_state so the underlying tool calls
+        # can reach the sandbox. Without this, every sandbox-resident
+        # confirmation (sqlmap, dalfox, feroxbuster, ...) silently
+        # errored at runtime with "Agent state with a valid sandbox_id
+        # is required". Tests didn't catch it because they mocked
+        # execute_tool itself.
         from strix.l15.amplify_orchestrator import drain_amplify_queue as _drain
-        results = _drain(findings)
+        results = _drain(findings, agent_state=agent_state)
 
         fired = sum(1 for r in results if r.status == "fired")
         skipped = sum(1 for r in results if r.status == "skipped")

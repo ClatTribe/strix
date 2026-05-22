@@ -150,8 +150,22 @@ async def _invoke_tool(
     target: str | None,
     args: dict[str, Any] | None,
     stealth: bool,
+    agent_state: Any | None = None,
 ) -> Any:
-    """Dispatch the tool through the existing executor."""
+    """Dispatch the tool through the existing executor.
+
+    `agent_state` is REQUIRED for sandbox-resident tools (almost
+    every L1 specialist — scan_sqli_sqlmap, scan_xss_dalfox,
+    discover_paths_feroxbuster, etc.). Without it, the executor's
+    `_execute_tool_in_sandbox` will raise ValueError. The caller
+    (`drain_amplify_queue`) plumbs it from the framework-injected
+    `agent_state` parameter on its own signature.
+
+    iter-26-fix correctness fix: the original implementation passed
+    `agent_state=None` unconditionally, so EVERY sandbox-resident
+    auto-confirmation silently errored at runtime. The mocked tests
+    didn't catch it because `execute_tool` itself was the mock.
+    """
     from strix.tools.executor import execute_tool
     kwargs = dict(args or {})
     if target and "target" not in kwargs and "target_url" not in kwargs:
@@ -174,11 +188,12 @@ async def _invoke_tool(
         # accept it will ignore via **kwargs handling or error
         # cleanly (the caller catches).
         pass  # left for iter-26.8 to wire per-specialist
-    return await execute_tool(tool_name, agent_state=None, **kwargs)
+    return await execute_tool(tool_name, agent_state=agent_state, **kwargs)
 
 
 async def _fire_confirmation(
     finding: dict[str, Any], req: dict[str, Any],
+    agent_state: Any | None = None,
 ) -> AmplifyResult:
     tool = (req.get("tool") or "").strip()
     target = req.get("target_url") or req.get("target")
@@ -209,7 +224,9 @@ async def _fire_confirmation(
         args["param"] = req["param"]
 
     try:
-        out = await _invoke_tool(tool, target, args, is_stealth)
+        out = await _invoke_tool(
+            tool, target, args, is_stealth, agent_state=agent_state,
+        )
         _ledger.mark_fired(finding_id, tool, target)
         summary = _summarise_tool_output(out)
 
@@ -261,6 +278,7 @@ async def _fire_confirmation(
 
 async def _fire_bundle_step(
     finding: dict[str, Any], step: dict[str, Any],
+    agent_state: Any | None = None,
 ) -> AmplifyResult:
     tool = (step.get("tool") or "").strip()
     args = dict(step.get("args") or {})
@@ -295,7 +313,9 @@ async def _fire_bundle_step(
     )
 
     try:
-        out = await _invoke_tool(tool, target, args, is_stealth)
+        out = await _invoke_tool(
+            tool, target, args, is_stealth, agent_state=agent_state,
+        )
         _ledger.mark_fired(finding_id, tool, target)
         summary = _summarise_tool_output(out)
         # Stitch the result onto the source finding under bundle_results
@@ -323,6 +343,7 @@ async def _fire_bundle_step(
 
 async def drain_amplify_queue_async(
     findings: list[dict[str, Any]],
+    agent_state: Any | None = None,
 ) -> list[AmplifyResult]:
     """Walk the findings list, fire pending_confirmations[] and
     triggered_probes[] entries that haven't fired yet, return one
@@ -331,6 +352,10 @@ async def drain_amplify_queue_async(
     Mutates findings in place: each fired confirmation may flip
     `confirmed_by_dast`, adjust severity, append to `reasoning_trace`.
     Bundle results land on `bundle_results[]`.
+
+    `agent_state` is required for sandbox-resident tools (most L1
+    specialists). Pass the framework-provided agent state through
+    from the calling tool.
     """
     results: list[AmplifyResult] = []
     for f in findings:
@@ -339,14 +364,14 @@ async def drain_amplify_queue_async(
         for req in (f.get("pending_confirmations") or []):
             if not isinstance(req, dict):
                 continue
-            r = await _fire_confirmation(f, req)
+            r = await _fire_confirmation(f, req, agent_state=agent_state)
             results.append(r)
             if r.status == "cap_exceeded":
                 return results  # short-circuit
         for step in (f.get("triggered_probes") or []):
             if not isinstance(step, dict):
                 continue
-            r = await _fire_bundle_step(f, step)
+            r = await _fire_bundle_step(f, step, agent_state=agent_state)
             results.append(r)
             if r.status == "cap_exceeded":
                 return results
@@ -355,6 +380,7 @@ async def drain_amplify_queue_async(
 
 def drain_amplify_queue(
     findings: list[dict[str, Any]],
+    agent_state: Any | None = None,
 ) -> list[AmplifyResult]:
     """Sync wrapper for `drain_amplify_queue_async`."""
     try:
@@ -366,13 +392,15 @@ def drain_amplify_queue(
             import concurrent.futures
 
             def _run_in_thread() -> list[AmplifyResult]:
-                return asyncio.run(drain_amplify_queue_async(findings))
+                return asyncio.run(
+                    drain_amplify_queue_async(findings, agent_state),
+                )
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
                 return ex.submit(_run_in_thread).result()
     except RuntimeError:
         pass
-    return asyncio.run(drain_amplify_queue_async(findings))
+    return asyncio.run(drain_amplify_queue_async(findings, agent_state))
 
 
 # ---- Severity adjustment ---------------------------------------------

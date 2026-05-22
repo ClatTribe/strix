@@ -134,18 +134,28 @@ def dispatch_specialist(
     effective_max_iterations = max_iterations
     if effective_max_iterations is None and target:
         try:
-            from strix.l15.surface_priority import depth_multiplier_for
+            from strix.agents.specialist_orchestrator import (
+                get_max_iterations,
+                get_profile,
+            )
             from strix.l15.hygiene import hygiene_ledger
+            from strix.l15.surface_priority import depth_multiplier_for
 
             surface_mult = depth_multiplier_for(target)
             hygiene_mult = hygiene_ledger.compute().depth_multiplier
             combined = max(0.2, min(5.0, surface_mult * hygiene_mult))
-            # 50 = current default in _orchestrator().dispatch_specialist
-            effective_max_iterations = max(5, int(round(50 * combined)))
+            # iter-26-fix: base on the EFFECTIVE per-scan cap rather
+            # than a hardcoded 50 — respects both env override
+            # (STRIX_SPECIALIST_MAX_ITERATIONS) and per-profile
+            # `profile.max_iterations` overrides. Without this,
+            # raising the env cap silently capped at the old default.
+            profile = get_profile(category)
+            base = profile.max_iterations or get_max_iterations()
+            effective_max_iterations = max(5, int(round(base * combined)))
             logger.debug(
-                "l1.5 dispatch budget: target=%s surface=%.2f hygiene=%.2f "
-                "combined=%.2f → max_iterations=%d",
-                target, surface_mult, hygiene_mult,
+                "l1.5 dispatch budget: target=%s base=%d surface=%.2f "
+                "hygiene=%.2f combined=%.2f → max_iterations=%d",
+                target, base, surface_mult, hygiene_mult,
                 combined, effective_max_iterations,
             )
         except Exception as e:  # noqa: BLE001
