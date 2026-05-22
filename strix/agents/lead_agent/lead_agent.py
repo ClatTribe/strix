@@ -273,6 +273,60 @@ _SKIP_LEAD_THINK_DIRECTIVE = (
 )
 
 
+# iter-26.1 — L1.5 vocab + prioritization rules.
+#
+# Every emitted finding now carries deterministic enrichment fields
+# from the L1.5 layer (iter-25). The Lead needs to know what these
+# fields mean and how to prioritize off them, otherwise it falls back
+# to "process findings in emission order" and burns tokens reasoning
+# about findings L1.5 already triaged.
+#
+# This addendum is intentionally short — about 350 tokens. The
+# `list_pending_findings` tool (iter-26.2) does the actual ranking and
+# the structured output explains itself; this paragraph just sets the
+# expectation that the LLM should call that tool instead of scanning
+# raw findings.
+_LEAD_L15_AWARENESS_DIRECTIVE = (
+    "L1.5 ENRICHMENT — every emitted finding carries these "
+    "deterministic fields (no LLM produced them; trust them):\n\n"
+    "  • `surface_priority.label` ∈ {critical, high, normal, low} — "
+    "an immutable-signal classification of the affected URL "
+    "(/admin/, /auth/, /payment/ → critical; /static/, /health/ → "
+    "low). Critical surfaces ALWAYS take precedence over higher-"
+    "severity findings on low surfaces.\n"
+    "  • `exploitability.composite` ∈ 0.0-1.0 — the product of "
+    "(code_reachable × route_reachable × auth_bypassable × "
+    "data_sensitivity). Findings ≥ 0.80 are pre-promoted; findings "
+    "< 0.10 are pre-demoted to `noise=true` (they will NOT appear in "
+    "your default catalog).\n"
+    "  • `corroborated_by: [vuln_id, ...]` — when ≥ 2 different "
+    "L1 tools agreed on this surface+CWE, the parent's severity "
+    "was already bumped one tier. The corroborator-role findings "
+    "are hidden from the default catalog; don't dispatch against "
+    "them independently.\n"
+    "  • `pending_confirmations: [{tool, target_url, param, ...}]` — "
+    "deterministic DAST follow-ups planned by L1.5. The auto-confirm "
+    "middleware fires them in the background; don't dispatch the "
+    "same probe yourself unless it failed.\n"
+    "  • `triggered_probes: [{tool, args, stealth, ...}]` — "
+    "finding-triggered probe bundles (admin-burst, sqli-burst, "
+    "verified-secret-burst, tech-burst). Already firing via the "
+    "amplify orchestrator; skip duplicating.\n"
+    "  • `git_blame.{author, commit_date, days_since_change}` — "
+    "available on code-anchored findings. New code (< 30 days) "
+    "deserves more attention than year-old hardened code.\n\n"
+    "PRIORITIZATION RULE — call `list_pending_findings()` between "
+    "specialist dispatches. The result is already sorted: dispatch "
+    "the FIRST row first. Don't re-sort by severity alone; the "
+    "L1.5 sort key (surface → composite → severity) is what an "
+    "engineer would pick.\n\n"
+    "DEMOTED FINDINGS — `noise=true` or `role=corroborator` are "
+    "hidden by default. Surface them only with "
+    "`list_pending_findings(include_demoted=true)` and only when "
+    "asked to audit the demotion."
+)
+
+
 # Compose the final addendum used by `LeadAgent.augment_system_prompt_context`
 # (see `_LEAD_OPERATING_DIRECTIVE` reference below).
 _LEAD_SYSTEM_PROMPT_ADDENDUM = (
@@ -283,6 +337,8 @@ _LEAD_SYSTEM_PROMPT_ADDENDUM = (
     + _FAN_OUT_DIRECTIVE
     + "\n\n"
     + _SKIP_LEAD_THINK_DIRECTIVE
+    + "\n\n"
+    + _LEAD_L15_AWARENESS_DIRECTIVE
 )
 
 
