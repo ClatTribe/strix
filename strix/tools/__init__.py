@@ -120,6 +120,11 @@ from .hibp_runner import *             # noqa: F403  # scan_credential_leaks_hib
 from .subfinder_runner import *        # noqa: F403  # enumerate_subdomains_subfinder
 from .httpx_runner import *            # noqa: F403  # probe_hosts_httpx
 from .nmap_runner import *             # noqa: F403  # fingerprint_services_nmap
+# iter-23.2 — deterministic SQLi at L1. sqlmap covers in-band /
+# boolean-blind / time-based blind / stacked queries across all the
+# usual DBMS. Moves standard SQLi verification out of expensive L2
+# conversational specialist loops, sparing them for bypass logic.
+from .sqlmap_runner import *           # noqa: F403  # scan_sqli_sqlmap
 
 # SCA / supply-chain analysis (Phase 6) — registers
 # `scan_sca_lockfiles`.
