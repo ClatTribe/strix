@@ -186,3 +186,22 @@ def test_iter_cap_never_below_5(mock_orchestrator):
     )
     # 0.3 × 0.6 = 0.18 → clamps to 0.2 → 50 × 0.2 = 10 ≥ 5 floor
     assert mock_orchestrator["max_iterations"] >= 5
+
+
+def test_iter_cap_respects_env_override(mock_orchestrator, monkeypatch):
+    """iter-26-fix regression: when STRIX_SPECIALIST_MAX_ITERATIONS
+    is set, the L1.5 scaler must use it as the base instead of the
+    hardcoded DEFAULT_MAX_ITERATIONS=50.
+
+    Without this fix, raising the env cap silently capped scaling
+    at the old default — operator's intent ignored.
+    """
+    monkeypatch.setenv("STRIX_SPECIALIST_MAX_ITERATIONS", "120")
+    dispatch_specialist(
+        category="auth",
+        objective="critical surface with env cap",
+        target="https://app.example.com/admin/users",
+    )
+    # 120 base × 3.0 critical × 0.6 (empty-ledger neutral hygiene)
+    # = 1.8 combined → 120 × 1.8 = 216
+    assert mock_orchestrator["max_iterations"] == 216

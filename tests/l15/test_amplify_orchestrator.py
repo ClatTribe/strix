@@ -262,3 +262,47 @@ def test_drain_amplify_queue_registered():
 def test_drain_amplify_queue_in_lead_core_tools():
     from strix.agents.lead_agent.tool_catalog import _CORE_TOOLS
     assert "drain_amplify_queue" in _CORE_TOOLS
+
+
+# --------------------------------------------------------------------
+# iter-26-fix correctness regression — agent_state plumbing
+# --------------------------------------------------------------------
+
+def test_agent_state_plumbed_to_executor(monkeypatch):
+    """iter-26-fix regression: drain_amplify_queue must pass its
+    framework-injected `agent_state` through to `execute_tool`,
+    otherwise sandbox-resident specialists (sqlmap, dalfox,
+    feroxbuster, ...) error with 'Agent state with a valid
+    sandbox_id is required'.
+
+    The original Wave 3 implementation passed `agent_state=None`,
+    which meant every auto-confirmation against a sandbox tool
+    silently errored — the mock-based tests didn't catch it because
+    they mocked execute_tool itself.
+    """
+    seen_agent_states: list = []
+
+    async def _capture_agent_state(tool_name, agent_state=None, **kwargs):
+        seen_agent_states.append(agent_state)
+        return {"status": "ok", "total_findings": 0, "findings": []}
+
+    monkeypatch.setattr(
+        "strix.tools.executor.execute_tool", _capture_agent_state,
+    )
+    monkeypatch.setattr(
+        "strix.tools.registry.get_tool_by_name",
+        lambda n: (lambda **k: None),
+    )
+
+    finding = {
+        "id": "vuln-0001",
+        "cwe": "CWE-89",
+        "pending_confirmations": [{
+            "tool": "scan_sqli_sqlmap",
+            "target_url": "https://e.com/x",
+        }],
+    }
+    # Pass a sentinel agent_state through and assert it reaches the executor
+    fake_state = type("S", (), {"sandbox_id": "abc", "sandbox_token": "tok"})()
+    _run(drain_amplify_queue_async([finding], agent_state=fake_state))
+    assert seen_agent_states == [fake_state]
