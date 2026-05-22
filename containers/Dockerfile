@@ -86,7 +86,10 @@ RUN go install -ldflags="-s -w" github.com/projectdiscovery/httpx/cmd/httpx@late
  # iter-22.4 — Dockle (CIS Docker Benchmark auditor). Pure Go.
  # Hadolint is Haskell upstream — installed below via prebuilt
  # release tarball alongside trufflehog/gitleaks.
- && go install -ldflags="-s -w" github.com/goodwithtech/dockle/cmd/dockle@latest
+ && go install -ldflags="-s -w" github.com/goodwithtech/dockle/cmd/dockle@latest \
+ # iter-22.8 — dalfox (Go XSS scanner). 100+ payloads + filter
+ # bypass. Wrapped by `scan_xss_dalfox`.
+ && go install -ldflags="-s -w" github.com/hahwul/dalfox/v2@latest
 
 # =============================================================================
 # Stage: node-builder
@@ -510,6 +513,14 @@ RUN ARCH="$(uname -m)" \
  && curl -fsSL "https://github.com/hadolint/hadolint/releases/download/${TAG}/hadolint-Linux-${HADOLINT_ARCH}" \
         -o /usr/local/bin/hadolint \
  && chmod 0755 /usr/local/bin/hadolint
+
+# iter-22.3 — testssl.sh (bash-based TLS auditor, ~50 checks).
+# Cloned from upstream and symlinked. Used by
+# `tls_audit_testssl`. Apt's testssl.sh is often stale; cloning
+# the release branch gets the latest CVE-test coverage.
+RUN git clone --depth 1 --branch 3.2 https://github.com/drwetter/testssl.sh.git /opt/testssl.sh \
+ && ln -sf /opt/testssl.sh/testssl.sh /usr/local/bin/testssl.sh \
+ && find /opt/testssl.sh -name '.git' -type d -exec rm -rf {} + 2>/dev/null || true
 
 # trivy + grype — installed via vendor scripts. Vuln DBs are NOT downloaded
 # at build time (A4): the entrypoint lazy-fetches them on first start if no
