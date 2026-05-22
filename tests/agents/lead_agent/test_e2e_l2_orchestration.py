@@ -247,18 +247,31 @@ def test_stealth_addendum_renders_into_sqli_specialist_prompt():
 # F.3 — dispatch_specialist_batch threads dispatch_target for stealth
 # =========================================================================
 
+class _BuildPromptIntercepted(Exception):
+    """Sentinel raised by the intercepted `_build_system_prompt` so
+    we exit the batch dispatch path cleanly after capturing the
+    `dispatch_target` arg."""
+
+
 def test_dispatch_batch_uses_first_target_for_stealth_guidance(monkeypatch):
-    """When `dispatch_specialist_batch` is invoked with N objectives,
-    the per-batch specialist prompt uses the FIRST target for stealth-
-    posture lookup. The single-dispatch path is covered by
-    test_dispatch_specialist_scales_by_surface; the batch path has
-    its OWN dispatch_target threading.
+    """REAL batch-path test: invoke `dispatch_specialist_batch(...)`
+    and intercept `_build_system_prompt` to capture the
+    `dispatch_target` it receives.
+
+    The batch path's wiring is `_batch_target = pending[0].get("target")`
+    in `dispatch_specialist_batch`. A regression that sets
+    `_batch_target = None` (i.e. doesn't pick from `pending`) must
+    be caught by this test. The previous version of this test bypassed
+    `dispatch_specialist_batch` and called `_build_system_prompt`
+    directly — which always passed regardless of the batch wiring.
+    Audit caught this; this version fixes it.
     """
     from strix.l15.posture import (
         SecurityPosture,
         clear_cache as _clear_posture_cache,
         set_posture,
     )
+    import strix.agents.specialist_orchestrator as so
 
     _clear_posture_cache()
     set_posture(SecurityPosture(
@@ -267,21 +280,47 @@ def test_dispatch_batch_uses_first_target_for_stealth_guidance(monkeypatch):
         stealth_mode_required=True, rate_limit_rps=10,
     ))
 
-    # Build the prompt directly with the same args dispatch_batch
-    # would build internally. This catches the threading wiring
-    # without spawning a real specialist loop.
-    from strix.agents.specialist_orchestrator import (
-        _build_system_prompt, get_profile,
+    captured: dict = {"dispatch_target": "NOT_CAPTURED"}
+
+    def _intercept(**kwargs):
+        captured["dispatch_target"] = kwargs.get("dispatch_target")
+        # Raise to bail out of the batch path cleanly; we only care
+        # about what arg was passed.
+        raise _BuildPromptIntercepted
+
+    monkeypatch.setattr(so, "_build_system_prompt", _intercept)
+
+    from strix.tools.workflow.specialist_dispatch import (
+        dispatch_specialist_batch,
     )
-    prompt = _build_system_prompt(
-        profile=get_profile("sqli"),
-        scope_context=None,
-        relevant_findings=None,
-        dispatch_target="https://wafd.example.com/api/v1/foo",
+
+    try:
+        dispatch_specialist_batch(
+            category="sqli",
+            objectives=[
+                {
+                    "target": "https://wafd.example.com/api/v1/foo",
+                    "objective": "probe foo",
+                },
+                {
+                    "target": "https://different.example.com/bar",
+                    "objective": "probe bar",
+                },
+            ],
+        )
+    except _BuildPromptIntercepted:
+        pass  # expected
+
+    # The batch path's `_batch_target = pending[0].get("target")`
+    # MUST propagate the FIRST target to `_build_system_prompt`.
+    # If a regression sets `_batch_target = None`, this assertion
+    # fails.
+    assert captured["dispatch_target"] == (
+        "https://wafd.example.com/api/v1/foo"
+    ), (
+        f"batch dispatch_target threading broken; got "
+        f"{captured['dispatch_target']!r}"
     )
-    assert "STEALTH MODE" in prompt
-    # rate-limit cap (10 rps observed → 5 rps cap)
-    assert "5 rps" in prompt
     _clear_posture_cache()
 
 
