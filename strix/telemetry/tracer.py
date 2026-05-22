@@ -1599,6 +1599,133 @@ class Tracer:
         except Exception:  # noqa: BLE001
             logger.warning("canonical-finding validation failed", exc_info=True)
 
+        # iter-25 L1.5 — three deterministic post-enrichment hooks
+        # run before fingerprint-dedup and before the row is persisted:
+        #   25.1  pre-emission FP filter   (drop / demote obvious FPs)
+        #   25.2  root-cause collapse      (coalesce rule×file×func dupes)
+        #   25.3  mid-scan corroborator    (cross-tool ≥2-signal boost)
+        # Each hook is recall-safe: any internal exception falls back
+        # to passthrough semantics so a buggy L1.5 step never makes L2
+        # worse off than no-L1.5. See docs/L2-optimization.md §7.
+        try:
+            from strix.l15 import (
+                corroborator_ledger,
+                pre_emission_fp_filter,
+                root_cause_ledger,
+            )
+            from strix.l15.fp_filter import demoted_severity
+
+            # ---- 25.1 — FP filter ----
+            fp = pre_emission_fp_filter(report)
+            if fp.is_drop:
+                # Emit a telemetry event so the run still shows the
+                # signal got produced + filtered, but don't persist.
+                self._emit_event(
+                    "finding.l15_filtered_out",
+                    payload={
+                        "report_id": report_id,
+                        "title": report.get("title"),
+                        "reason": fp.reason,
+                    },
+                    status="info",
+                    source="strix.l15.fp_filter",
+                )
+                return report_id
+            if fp.is_demote:
+                old = report.get("severity") or "info"
+                report["severity"] = demoted_severity(old)
+                trace = report.get("reasoning_trace") or []
+                if isinstance(trace, str):
+                    trace = [trace]
+                report["reasoning_trace"] = list(trace) + [
+                    f"l1.5: severity demoted {old} → {report['severity']} "
+                    f"({fp.reason})"
+                ]
+
+            # ---- 25.2 — root-cause collapse ----
+            rc = root_cause_ledger.check(
+                report, proposed_finding_id=report_id,
+            )
+            if rc.action in ("skip_with_merge", "promote_systemic"):
+                target = next(
+                    (
+                        r for r in self.vulnerability_reports
+                        if r.get("id") == rc.target_id
+                    ),
+                    None,
+                )
+                if target is not None:
+                    occs = list(target.get("occurrences") or [])
+                    if rc.occurrence:
+                        occs.append(rc.occurrence)
+                        target["occurrences"] = occs
+                    if rc.action == "promote_systemic" and rc.new_severity:
+                        target["severity"] = rc.new_severity
+                        tr = target.get("reasoning_trace") or []
+                        if isinstance(tr, str):
+                            tr = [tr]
+                        if rc.trace_line:
+                            target["reasoning_trace"] = list(tr) + [
+                                rc.trace_line,
+                            ]
+                    self._emit_event(
+                        "finding.l15_collapsed",
+                        payload={
+                            "parent_id": rc.target_id,
+                            "duplicate_title": report.get("title"),
+                            "occurrence": rc.occurrence,
+                            "promoted_systemic":
+                                rc.action == "promote_systemic",
+                        },
+                        status="info",
+                        source="strix.l15.root_cause",
+                    )
+                    return rc.target_id
+                # Parent record vanished (shouldn't happen) — fall
+                # through and persist as a new row.
+
+            # ---- 25.3 — corroborator ----
+            cb = corroborator_ledger.check(
+                report, proposed_finding_id=report_id,
+            )
+            if cb.action == "boost_parent" and cb.parent_id:
+                target = next(
+                    (
+                        r for r in self.vulnerability_reports
+                        if r.get("id") == cb.parent_id
+                    ),
+                    None,
+                )
+                if target is not None:
+                    if cb.new_parent_severity:
+                        target["severity"] = cb.new_parent_severity
+                    corrob_by = list(target.get("corroborated_by") or [])
+                    corrob_by.append(report_id)
+                    target["corroborated_by"] = corrob_by
+                    tr = target.get("reasoning_trace") or []
+                    if isinstance(tr, str):
+                        tr = [tr]
+                    if cb.trace_line:
+                        target["reasoning_trace"] = list(tr) + [cb.trace_line]
+                    # This finding itself is now a corroborator —
+                    # demote it to info with a role flag so L2
+                    # doesn't waste cycles on it independently.
+                    report["severity"] = "info"
+                    report["role"] = "corroborator"
+                    report["corroborates"] = cb.parent_id
+                    self._emit_event(
+                        "finding.l15_corroborated",
+                        payload={
+                            "parent_id": cb.parent_id,
+                            "corroborator_id": report_id,
+                            "new_parent_severity": cb.new_parent_severity,
+                        },
+                        status="info",
+                        source="strix.l15.corroborator",
+                    )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("L1.5 hooks failed: %s — passthrough", e)
+
         # Roadmap §9 cross-tool dedup. When a new finding shares the
         # stable fingerprint of an existing one, MERGE rather than
         # create a duplicate row. The accumulated `detected_by` list
