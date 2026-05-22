@@ -112,6 +112,14 @@ from .katana_runner import *           # noqa: F403  # crawl_with_katana
 from .testssl_runner import *          # noqa: F403  # tls_audit_testssl
 from .dalfox_runner import *           # noqa: F403  # scan_xss_dalfox
 from .hibp_runner import *             # noqa: F403  # scan_credential_leaks_hibp
+# iter-23.1 — recon bedrock: passive subdomain harvest (subfinder),
+# concurrent HTTP probing (httpx), service/version fingerprinting (nmap).
+# Replaces slow single-threaded in-house DNS bruteforce + bfs_crawl with
+# Go-based concurrent tooling. httpx's -tech-detect gives Wappalyzer-style
+# tech fingerprinting inline.
+from .subfinder_runner import *        # noqa: F403  # enumerate_subdomains_subfinder
+from .httpx_runner import *            # noqa: F403  # probe_hosts_httpx
+from .nmap_runner import *             # noqa: F403  # fingerprint_services_nmap
 
 # SCA / supply-chain analysis (Phase 6) — registers
 # `scan_sca_lockfiles`.
