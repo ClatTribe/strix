@@ -581,7 +581,17 @@ _PHASE_AGNOSTIC_TOOLS: frozenset[str] = frozenset({
 _PHASE_TOOLS: dict[Phase, frozenset[str]] = {
     "recon": frozenset({
         # Crawl + sitemap + tech-stack
-        "fingerprint_tech_stack", "bfs_crawl", "well_known_harvest",
+        # iter-25.11 follow-up: bfs_crawl + fingerprint_tech_stack
+        # superseded by crawl_with_katana + probe_hosts_httpx (per
+        # docs/L2-optimization.md §5.3). The legacy tools STAY in the
+        # phase set for backwards-compat with custom rule packs that
+        # name them directly, but the per-target catalog no longer
+        # advertises them to the Lead — so they're effectively dead.
+        "fingerprint_tech_stack", "bfs_crawl",
+        "crawl_with_katana", "probe_hosts_httpx",
+        "enumerate_subdomains_subfinder", "fingerprint_services_nmap",
+        "discover_paths_feroxbuster",
+        "well_known_harvest",
         "webapp_recon_pipeline", "extract_dom", "list_sitemap",
         # HTTP primitives (recon makes baseline requests)
         "send_request", "browser_action",

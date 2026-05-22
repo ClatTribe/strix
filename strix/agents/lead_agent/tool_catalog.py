@@ -179,8 +179,27 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # web_application target type before the lead loop begins).
         # Net effect: ~3K of duplicate schema tokens removed from
         # every web_application run; production behavior unchanged.
-        "fingerprint_tech_stack", "bfs_crawl",
         "well_known_harvest",
+        # iter-22.1 / iter-23.1 / iter-23.3 — OSS recon wraps (Go-based
+        # tooling, much faster than the in-house bfs_crawl /
+        # fingerprint_tech_stack which they supersede). Surfaced by
+        # E2E-test-proposal.md tests as a real catalog gap — the tools
+        # had been registered since iter-22 but never wired into the
+        # per-target catalog, so the LLM couldn't reach them.
+        # Note: bfs_crawl + fingerprint_tech_stack DROPPED here (per
+        # docs/L2-optimization.md §5.3) because:
+        #   * crawl_with_katana strictly supersedes bfs_crawl
+        #     (concurrent + JS-aware)
+        #   * probe_hosts_httpx -tech-detect ships the same Wappalyzer
+        #     signature DB inline; fingerprint_tech_stack is redundant
+        # Keeps the catalog under the 90-tool prompt-token budget.
+        "crawl_with_katana",            # iter-22.1 — JS-aware crawler
+        "probe_hosts_httpx",            # iter-23.1 — concurrent HTTP probe + tech-detect
+        "discover_paths_feroxbuster",   # iter-23.3 — recursive path discovery
+        "scan_xss_dalfox",              # iter-22.8 — Go XSS scanner
+        "scan_sqli_sqlmap",             # iter-23.2 — sqlmap batch wrapper
+        "map_graphql_inql",             # iter-23.3 — GraphQL introspection
+        "scan_credential_leaks_hibp",   # iter-22.6 — domain breach lookup
         # HTTP / browser primitives
         "send_request", "browser_action", "extract_dom",
         # HAR / Burp ingestion (#141)
@@ -217,6 +236,13 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # Phase 11 — IaC / cloud posture (vercel.json / netlify.toml
         # / wrangler.toml / Dockerfile / docker-compose.yml).
         "scan_iac",
+        # iter-22.4 — Dockerfile linter (when repo contains Docker
+        # build files). Surfaced as a catalog gap by E2E tests.
+        "scan_dockerfile_hadolint",
+        # iter-23.3 — trufflehog `--only-verified` mode: actively
+        # verifies discovered secrets via API pings (AWS STS, Stripe
+        # /balance, GitHub /user). Drops FPs before L2 ever sees them.
+        "verify_credentials_trufflehog",
         # File primitives
         "terminal_execute",
         # Threat-intel — provided via `_CORE_TOOLS` /
@@ -284,6 +310,14 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "race_check", "sqli_check", "graphql_specialist_check",
         "websocket_audit", "authz_matrix_check",
         "cookie_jwt_scoping_check",
+        # iter-22/23 — OSS wraps usable on API surfaces. Surfaced as a
+        # catalog gap by docs/E2E-test-proposal.md tests.
+        "scan_sqli_sqlmap",             # iter-23.2 — sqlmap batch
+        "scan_xss_dalfox",              # iter-22.8 — for hybrid REST/JSON
+        "tls_audit_testssl",            # iter-22.3 — deeper TLS audit
+        "probe_hosts_httpx",            # iter-23.1 — HTTP probe
+        "map_graphql_inql",             # iter-23.3 — GraphQL introspection
+        "scan_credential_leaks_hibp",   # iter-22.6 — domain-level breach
         # Threat-intel.
         "vt_reputation", "greynoise_classify",
     }),
@@ -305,6 +339,15 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # IP / network
         "send_request", "terminal_execute",
         "tls_audit", "websocket_audit",
+        # iter-23.1 — nmap service-version fingerprinting; feeds the KG
+        # `Service` nodes for L2 CVE hypothesis formation. Surfaced as
+        # a real catalog gap by docs/E2E-test-proposal.md tests — was
+        # registered but never reachable by the LLM.
+        "fingerprint_services_nmap",
+        # iter-23.1 — concurrent HTTP probe on discovered ports.
+        "probe_hosts_httpx",
+        # iter-22.3 — TLS audit on the wider scan port set.
+        "tls_audit_testssl",
         # Threat-intel
         "vt_reputation", "greynoise_classify",
     }),
@@ -319,6 +362,9 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # synthesise an exploit automatically (same path repository
         # targets use).
         "scan_container_image",
+        # iter-22.4 — dockle container-image linter (privilege
+        # escalation vectors, root execution, leaked env credentials).
+        "scan_image_dockle",
         # iter-22.9: CVE lookup via _CORE_TOOLS / query_threat_intel.
         # SBOM extraction — when the wrapper wants the full
         # image manifest separately from the vuln list.

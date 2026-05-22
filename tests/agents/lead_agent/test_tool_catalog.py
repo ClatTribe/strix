@@ -349,19 +349,30 @@ def test_iter_22_9_paired_web_plus_repo_has_sast_sca() -> None:
 def test_iter_22_9_webapp_recon_pipeline_dropped_from_catalog() -> None:
     """Per `docs/l2-architecture-evaluation.md §5.3`: composite
     `webapp_recon_pipeline` removed from the lead catalog —
-    `fingerprint_tech_stack` + `bfs_crawl` + `well_known_harvest`
-    are orchestrated explicitly. The tool STAYS registered (anchor
-    prepass phase-2 calls it directly) but the lead doesn't see
-    its schema."""
+    primitives are orchestrated explicitly. The tool STAYS registered
+    (anchor prepass phase-2 calls it directly) but the lead doesn't
+    see its schema.
+
+    iter-25.11 / iter-26.12 follow-up (landed via E2E-test-proposal.md
+    Phase D): `bfs_crawl` + `fingerprint_tech_stack` further
+    superseded by `crawl_with_katana` (concurrent, JS-aware) and
+    `probe_hosts_httpx` (with -tech-detect bundling the same
+    Wappalyzer signature DB). Old primitives DROPPED from web_app
+    catalog to stay under the 90-tool prompt-token budget.
+    """
     catalog = get_lead_tool_catalog(target_types=["web_application"])
     assert "webapp_recon_pipeline" not in catalog
-    # The decomposed primitives stay
-    assert "fingerprint_tech_stack" in catalog
-    assert "bfs_crawl" in catalog
+    # The successor primitives — iter-22/23 OSS wraps
+    assert "crawl_with_katana" in catalog
+    assert "probe_hosts_httpx" in catalog
     assert "well_known_harvest" in catalog
+    # Legacy primitives DROPPED from web_app catalog (still registered
+    # globally for direct anchor_prepass invocation)
+    assert "bfs_crawl" not in catalog
+    assert "fingerprint_tech_stack" not in catalog
 
-    # And the tool stays in the global registry for direct
-    # anchor_prepass invocation
+    # And the original composite stays in the global registry for
+    # direct anchor_prepass invocation
     import strix.tools  # noqa: F401
     from strix.tools.registry import get_tool_by_name
     assert callable(get_tool_by_name("webapp_recon_pipeline"))

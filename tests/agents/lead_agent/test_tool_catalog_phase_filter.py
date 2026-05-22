@@ -36,9 +36,11 @@ def test_phase_none_returns_full_target_type_catalog() -> None:
     # All probe-phase tools are present.
     assert "scan_sqli" in unfiltered
     assert "scan_xss" in unfiltered
-    # All recon-phase tools are present.
-    assert "bfs_crawl" in unfiltered
-    assert "webapp_recon_pipeline" in unfiltered
+    # All recon-phase tools are present (iter-25.11 follow-up:
+    # bfs_crawl + fingerprint_tech_stack DROPPED from per-target
+    # catalog; replaced by crawl_with_katana + probe_hosts_httpx).
+    assert "crawl_with_katana" in unfiltered
+    assert "probe_hosts_httpx" in unfiltered
 
 
 # ---------------------------------------------------------------------------
@@ -57,10 +59,12 @@ def test_recon_phase_hides_probe_specialists() -> None:
     assert "scan_xss" not in catalog
     assert "scan_idor" not in catalog
     assert "scan_path_traversal" not in catalog
-    # Recon tools ARE present:
-    assert "bfs_crawl" in catalog
-    assert "webapp_recon_pipeline" in catalog
-    assert "fingerprint_tech_stack" in catalog
+    # Recon tools ARE present. iter-25.11: bfs_crawl +
+    # fingerprint_tech_stack dropped; succeeded by crawl_with_katana
+    # + probe_hosts_httpx.
+    assert "crawl_with_katana" in catalog
+    assert "probe_hosts_httpx" in catalog
+    assert "well_known_harvest" in catalog
 
 
 def test_probe_phase_hides_pure_recon_tools() -> None:
@@ -70,7 +74,9 @@ def test_probe_phase_hides_pure_recon_tools() -> None:
     catalog = get_lead_tool_catalog(
         target_types=["web_application"], phase="probe",
     )
-    assert "bfs_crawl" not in catalog
+    # iter-25.11 follow-up: bfs_crawl + crawl_with_katana are both
+    # recon-phase tools and must be absent during probe.
+    assert "crawl_with_katana" not in catalog
     assert "webapp_recon_pipeline" not in catalog
     # Specialists ARE present:
     assert "scan_sqli" in catalog
@@ -173,7 +179,8 @@ def test_phase_filter_intersects_with_multi_target_union() -> None:
         phase="recon",
     )
     # Recon-phase tools from BOTH target types should be present.
-    assert "bfs_crawl" in catalog            # web-app recon
+    # iter-25.11: crawl_with_katana succeeds bfs_crawl for web recon.
+    assert "crawl_with_katana" in catalog    # web-app recon
     assert "build_code_map" in catalog       # repo recon
     # Probe-phase specialists hidden.
     assert "scan_sqli" not in catalog
