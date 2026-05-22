@@ -53,13 +53,18 @@ _CORE_TOOLS: frozenset[str] = frozenset({
     # Findings
     "create_vulnerability_report", "update_finding", "dismiss_finding",
     "check_budget",
-    # Threat intel — always-on (read-only, framework provenance)
-    "cve_lookup", "nvd_lookup",
-    # Local threat-intel cache (CISA KEV + FIRST EPSS + NVD recent).
-    # Always-on so any specialist that fingerprints a tech stack can
-    # pivot to "what known CVEs apply?".
-    "lookup_known_cves", "lookup_cve_by_id",
-    "list_actively_exploited_cves", "threat_intel_status",
+    # Threat intel — always-on (read-only, framework provenance).
+    # iter-22.9: `cve_lookup` / `nvd_lookup` / `lookup_known_cves` /
+    # `lookup_cve_by_id` / `list_actively_exploited_cves` were five
+    # tools doing similar CVE-data queries (~3K of duplicate schema
+    # tokens). Consolidated into `query_threat_intel(...)` per
+    # `docs/l2-architecture-evaluation.md §5.1`. The unified tool
+    # dispatches by which kwarg is supplied:
+    #   cve_id → single-CVE; component → component lookup;
+    #   actively_exploited=True → KEV/EPSS list.
+    # `threat_intel_status()` remains separately registered as a
+    # cache-freshness diagnostic.
+    "query_threat_intel", "threat_intel_status",
     # Reasoning
     "think",
     # Termination
@@ -114,19 +119,22 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # daily-updated). Single-tool fan-out across CVE / exposed-
         # panel / default-cred / misconfig templates.
         "scan_nuclei_templates",
-        # Phase 6 — SCA / dependency CVE detection. Useful for web-app
-        # targets when the repo is co-located with the deployed URL
-        # (typical vibe-coded SaaS workflow).
-        "scan_sca_lockfiles",
-        # Phase 7 — SAST. Same co-location rationale as scan_sca_lockfiles:
-        # web-app target with a checked-in repo means we can flag
-        # source-level bugs that DAST might miss.
-        "scan_sast",
-        # Phase 11 — IaC / cloud posture. Vercel / Netlify /
-        # Cloudflare / Docker configs land in the repo for vibe-
-        # coded SaaS; SAST rules don't cover them. Cross-asset:
-        # IaC misconfigs (CORS-credentials, open redirects)
-        # become DAST hypotheses for the deployed URL.
+        # iter-22.9: removed `scan_sca_lockfiles` + `scan_sast` from
+        # the web_application catalog per
+        # `docs/l2-architecture-evaluation.md §5.4` —
+        # `web_application` is by-definition a deployed live URL and
+        # does not natively expose lockfiles or source code. When a
+        # repository is paired with a deployed URL (the vibe-coded
+        # SaaS pattern), the run uses paired targets
+        # (`web_application` + `additional_targets=[repository]`)
+        # and the catalog union restores SAST/SCA via the
+        # repository entry. Keeping them here doubled the catalog
+        # tokens AND let the LLM attempt source reads on live URLs.
+        #
+        # `scan_iac` stays — IaC config files (vercel.json,
+        # netlify.toml, .well-known/*) are occasionally exposed via
+        # live URLs, not strictly repo-bound.
+        # Phase 11 — IaC / cloud posture.
         "scan_iac",
         # Phase 9 — behavioural anomaly diff + timing oracle.
         # Used as complementary signals alongside the static-
@@ -135,17 +143,29 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # injection via 50-sample statistical fit.
         "scan_response_anomaly",
         "scan_timing_oracle",
-        # Recon
+        # Recon.
+        # iter-22.9: dropped `webapp_recon_pipeline` from the lead
+        # tool catalog per `docs/l2-architecture-evaluation.md §5.3`
+        # — the composite pipeline duplicated the work the lead can
+        # already orchestrate by calling `fingerprint_tech_stack` +
+        # `bfs_crawl` + `well_known_harvest` directly. The tool
+        # STAYS registered in `strix.tools` (iter-18 / iter-20
+        # anchor_prepass phase-2 invokes it directly for the
+        # web_application target type before the lead loop begins).
+        # Net effect: ~3K of duplicate schema tokens removed from
+        # every web_application run; production behavior unchanged.
         "fingerprint_tech_stack", "bfs_crawl",
-        "well_known_harvest", "webapp_recon_pipeline",
+        "well_known_harvest",
         # HTTP / browser primitives
         "send_request", "browser_action", "extract_dom",
         # HAR / Burp ingestion (#141)
         "ingest_har_file", "ingest_burp_file",
-        # Replay-with-mutation orchestrator — Phase 5.5
-        "replay_mutation_on_endpoints",
-        "replay_mutation_from_har_file",
-        "replay_mutation_from_burp_file",
+        # Replay-with-mutation orchestrator — Phase 5.5.
+        # iter-22.9: three source-specific tools consolidated into
+        # one `replay_mutation(source=...)` per
+        # `docs/l2-architecture-evaluation.md §5.2`. The unified
+        # tool routes by `source="endpoints"|"har"|"burp"`.
+        "replay_mutation",
         # Web-app deterministic checks
         "http_security_headers_audit", "tls_audit",
         "csrf_check", "cors_deep_check", "session_entropy_check",
@@ -174,8 +194,8 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_iac",
         # File primitives
         "terminal_execute",
-        # Threat-intel for code targets
-        "lookup_known_cves", "lookup_cve_by_id",
+        # Threat-intel — provided via `_CORE_TOOLS` /
+        # `query_threat_intel` (iter-22.9). No per-target dup.
     }),
     "local_code": frozenset({
         "scan_misconfig",
@@ -185,7 +205,7 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_sast",            # Phase 7 — SAST
         "scan_iac",             # Phase 11 — IaC
         "terminal_execute",
-        "lookup_known_cves", "lookup_cve_by_id",
+        # iter-22.9: threat-intel via _CORE_TOOLS / query_threat_intel
     }),
     "api": frozenset({
         # API targets — REST / GraphQL / gRPC HTTP-shaped endpoints
@@ -228,11 +248,9 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # HTTP primitive + HAR/Burp ingestion (replaces browser).
         "send_request",
         "ingest_har_file", "ingest_burp_file",
-        # Replay-mutation orchestrators (HAR / Burp / endpoint-
-        # list) — useful regardless of HTML rendering.
-        "replay_mutation_on_endpoints",
-        "replay_mutation_from_har_file",
-        "replay_mutation_from_burp_file",
+        # Replay-mutation orchestrator (consolidated iter-22.9 —
+        # see web_application catalog comment).
+        "replay_mutation",
         # Deterministic checks that still apply to APIs.
         "http_security_headers_audit", "tls_audit",
         "csrf_check", "cors_deep_check", "session_entropy_check",
@@ -276,9 +294,7 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # synthesise an exploit automatically (same path repository
         # targets use).
         "scan_container_image",
-        # CVE lookup for cross-reference / "tell me about CVE-X"
-        # follow-ups.
-        "lookup_known_cves", "lookup_cve_by_id",
+        # iter-22.9: CVE lookup via _CORE_TOOLS / query_threat_intel.
         # SBOM extraction — when the wrapper wants the full
         # image manifest separately from the vuln list.
         "sbom_extract",
@@ -337,9 +353,8 @@ _ORCHESTRATOR_ALLOWED_TOOLS: frozenset[str] = frozenset({
     "check_budget",
     # Threat-intel lookups (lead may need these for orchestration
     # decisions — "what CVEs apply to this tech stack?")
-    "cve_lookup", "nvd_lookup", "lookup_known_cves",
-    "lookup_cve_by_id", "list_actively_exploited_cves",
-    "threat_intel_status",
+    # iter-22.9: 5 redundant lookup tools collapsed into one.
+    "query_threat_intel", "threat_intel_status",
     # Reasoning + notes
     "think", "create_note", "list_notes", "get_note",
     "update_note", "delete_note",

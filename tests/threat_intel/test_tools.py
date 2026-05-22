@@ -190,20 +190,36 @@ def test_threat_intel_status_error_feed_surfaces_in_hint(tmp_cache) -> None:
 
 
 def test_tools_in_lead_web_application_catalog() -> None:
+    """iter-22.9: `lookup_known_cves` + `lookup_cve_by_id` +
+    `list_actively_exploited_cves` consolidated into the unified
+    `query_threat_intel` per
+    `docs/l2-architecture-evaluation.md §5.1`. The unified tool
+    + the diagnostic must appear in the catalog."""
     from strix.agents.lead_agent.tool_catalog import get_lead_tool_catalog
     catalog = get_lead_tool_catalog(target_types=["web_application"])
-    assert "lookup_known_cves" in catalog
-    assert "lookup_cve_by_id" in catalog
-    assert "list_actively_exploited_cves" in catalog
+    assert "query_threat_intel" in catalog
     assert "threat_intel_status" in catalog
+    # Pin the consolidated-away variants stay out
+    assert "lookup_known_cves" not in catalog
+    assert "lookup_cve_by_id" not in catalog
+    assert "list_actively_exploited_cves" not in catalog
 
 
 def test_tools_registered_with_framework_provenance() -> None:
+    """iter-22.9: the surviving tools (`query_threat_intel` +
+    `threat_intel_status`) must be registered with
+    `provenance='framework'`. Old per-shape lookup tools stay as
+    in-module helpers but no longer carry the registration."""
     from strix.tools.registry import get_tool_by_name, get_tool_provenance
-    for tool_name in (
-        "lookup_known_cves", "lookup_cve_by_id",
-        "list_actively_exploited_cves", "threat_intel_status",
-    ):
+    for tool_name in ("query_threat_intel", "threat_intel_status"):
         fn = get_tool_by_name(tool_name)
         assert fn is not None, f"{tool_name} not registered"
         assert get_tool_provenance(tool_name) == "framework"
+    # And pin the consolidated-away variants stay unregistered
+    for tool_name in (
+        "lookup_known_cves", "lookup_cve_by_id",
+        "list_actively_exploited_cves",
+    ):
+        assert get_tool_by_name(tool_name) is None, (
+            f"{tool_name} should be unregistered per iter-22.9"
+        )
