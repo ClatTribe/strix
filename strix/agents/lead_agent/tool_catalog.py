@@ -68,6 +68,9 @@ _CORE_TOOLS: frozenset[str] = frozenset({
     # For the unforeseen 30% of follow-ups not covered by the
     # deterministic probe-bundle dispatcher.
     "execute_adaptive_probe",
+    # iter-25.12 — narrative remediation plan output. Surfaced as a
+    # catalog gap by E2E-test-proposal.md Phase F.1 meta-invariant.
+    "generate_remediation_plan",
     # Threat intel — always-on (read-only, framework provenance).
     # iter-22.9: `cve_lookup` / `nvd_lookup` / `lookup_known_cves` /
     # `lookup_cve_by_id` / `list_actively_exploited_cves` were five
@@ -200,6 +203,14 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_sqli_sqlmap",             # iter-23.2 — sqlmap batch wrapper
         "map_graphql_inql",             # iter-23.3 — GraphQL introspection
         "scan_credential_leaks_hibp",   # iter-22.6 — domain breach lookup
+        # F.1 meta-invariant gaps — these specialists were registered
+        # for years but never wired into the web catalog. The LLM
+        # had no way to dispatch them.
+        "scan_cache_deception",         # web-cache poisoning
+        "scan_prototype_pollution",     # JS prototype pollution
+        "scan_websocket_auth",          # WebSocket auth bypass
+        "scan_race_condition",          # race condition specialist
+        "scan_authn_metadata",          # OIDC/JWKS metadata audit
         # HTTP / browser primitives
         "send_request", "browser_action", "extract_dom",
         # HAR / Burp ingestion (#141)
@@ -329,6 +340,14 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "subdomain_takeover_check", "reverse_ip", "mail_recon",
         "saas_leaks", "well_known_harvest",
         "scan_subdomain_takeover_active",  # Phase 2.9 — active CNAME takeover (CWE-1390)
+        # iter-22.6 / iter-23.1 / iter-23.3 — OSINT + domain-specific
+        # OSS wraps surfaced as catalog gaps by F.1 meta-invariant.
+        "enumerate_subdomains_subfinder",     # iter-23.1 — passive subdomains
+        "scan_typosquats_dnstwist",           # iter-22.6 — typosquat detection
+        "scan_dns_hygiene_checkdmarc",        # iter-22.4 — checkdmarc DMARC/SPF
+        "scan_iocs_for_target_threatfox",     # iter-22.6 — ThreatFox IOC lookup
+        "scan_credential_leaks_hibp",         # iter-22.6 — HIBP breach domain
+        "scan_buckets_via_bbot",              # iter-21.6.1 — bbot bucket disco
         # HTTP primitives for spotting web-app on domain targets
         "send_request",
         # Threat-intel
@@ -348,6 +367,8 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "probe_hosts_httpx",
         # iter-22.3 — TLS audit on the wider scan port set.
         "tls_audit_testssl",
+        # iter-21.6.2 — IMDS passthrough probe (cloud-hosted IPs).
+        "scan_cloud_imds_passthrough",
         # Threat-intel
         "vt_reputation", "greynoise_classify",
     }),
