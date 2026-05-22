@@ -90,6 +90,12 @@ from .cloud_exposure_audit import *   # noqa: F403  # scan_cloud_imds_passthroug
 # pattern. Subprocess wrapper around the bbot CLI installed
 # via pipx in the sandbox image.
 from .bbot_runner import *             # noqa: F403  # scan_buckets_via_bbot
+# iter-22.4 — Dockerfile lint (hadolint), container CIS bench
+# (dockle), DNS/email hygiene (checkdmarc). All small OSS wraps
+# per `docs/L1-optimization.md §3.3 / §3.4 / §3.10`.
+from .hadolint_runner import *         # noqa: F403  # scan_dockerfile_hadolint
+from .dockle_runner import *           # noqa: F403  # scan_image_dockle
+from .checkdmarc_runner import *       # noqa: F403  # scan_dns_hygiene_checkdmarc
 
 # SCA / supply-chain analysis (Phase 6) — registers
 # `scan_sca_lockfiles`.

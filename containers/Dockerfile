@@ -82,7 +82,11 @@ RUN go install -ldflags="-s -w" github.com/projectdiscovery/httpx/cmd/httpx@late
  # ~950-line integration was silently dead. Building from source
  # rather than fetching the GitHub release tarball keeps the
  # go-builder pattern uniform with the other PD tools.
- && go install -ldflags="-s -w" github.com/sigstore/cosign/v2/cmd/cosign@latest
+ && go install -ldflags="-s -w" github.com/sigstore/cosign/v2/cmd/cosign@latest \
+ # iter-22.4 — Dockle (CIS Docker Benchmark auditor). Pure Go.
+ # Hadolint is Haskell upstream — installed below via prebuilt
+ # release tarball alongside trufflehog/gitleaks.
+ && go install -ldflags="-s -w" github.com/goodwithtech/dockle/cmd/dockle@latest
 
 # =============================================================================
 # Stage: node-builder
@@ -148,7 +152,11 @@ RUN pipx install semgrep \
  # same pattern. bbot is a substantial install (~50MB+ of
  # transitive deps including httpx / dnspython / deepdiff /
  # mmh3 / lxml) — pipx-isolated like the other Python CLIs.
- && pipx install bbot
+ && pipx install bbot \
+ # iter-22.4 — `checkdmarc` pure-Python DNS/email-hygiene
+ # auditor. Wrapped by `scan_dns_hygiene_checkdmarc`. Audits
+ # SPF / DKIM / DMARC / MX / CAA / MTA-STS records.
+ && pipx install checkdmarc
 
 # =============================================================================
 # Stage: clone-builder
@@ -483,6 +491,20 @@ RUN ARCH="$(uname -m)" \
  && tar -xzf /tmp/gitleaks.tgz -C /tmp \
  && install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks \
  && rm -f /tmp/gitleaks /tmp/gitleaks.tgz
+
+# iter-22.4 — Hadolint (Haskell-built Dockerfile linter). Same
+# release-binary pattern as gitleaks. Used by
+# `scan_dockerfile_hadolint`.
+RUN ARCH="$(uname -m)" \
+ && case "$ARCH" in \
+        x86_64) HADOLINT_ARCH="x86_64" ;; \
+        aarch64|arm64) HADOLINT_ARCH="arm64" ;; \
+        *) echo "Unsupported architecture for hadolint: $ARCH" >&2; exit 1 ;; \
+    esac \
+ && TAG="$(curl -fsSL https://api.github.com/repos/hadolint/hadolint/releases/latest | jq -r .tag_name)" \
+ && curl -fsSL "https://github.com/hadolint/hadolint/releases/download/${TAG}/hadolint-Linux-${HADOLINT_ARCH}" \
+        -o /usr/local/bin/hadolint \
+ && chmod 0755 /usr/local/bin/hadolint
 
 # trivy + grype — installed via vendor scripts. Vuln DBs are NOT downloaded
 # at build time (A4): the entrypoint lazy-fetches them on first start if no
