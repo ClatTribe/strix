@@ -365,3 +365,31 @@ def test_iter_22_9_webapp_recon_pipeline_dropped_from_catalog() -> None:
     import strix.tools  # noqa: F401
     from strix.tools.registry import get_tool_by_name
     assert callable(get_tool_by_name("webapp_recon_pipeline"))
+
+
+# ---------------------------------------------------------------------------
+# iter-22.10 — L2 cognitive gaps: kg_query_* promoted from
+# patcher-only to Lead Orchestrator catalog
+# ---------------------------------------------------------------------------
+
+
+def test_iter_22_10_kg_query_in_lead_core_tools() -> None:
+    """Per `docs/l2-architecture-evaluation.md §4`: kg_query_nodes
+    + kg_query_paths previously lived ONLY in the patcher
+    specialist's catalog. Promoted to `_CORE_TOOLS` so the lead
+    orchestrator can answer "which Assets is this finding
+    attached to?" / "is there a path from Surface X to Vuln Y?"
+    without spawning a patcher dispatch just to query the KG."""
+    core = list_core_tools()
+    assert "kg_query_nodes" in core
+    assert "kg_query_paths" in core
+
+
+def test_iter_22_10_kg_query_visible_per_target() -> None:
+    """Verify the promotion actually flows through to per-target
+    catalogs via the _CORE_TOOLS union."""
+    for tt in ("web_application", "repository", "api",
+               "container_image", "domain", "ip_address"):
+        catalog = get_lead_tool_catalog(target_types=[tt])
+        assert "kg_query_nodes" in catalog, tt
+        assert "kg_query_paths" in catalog, tt
