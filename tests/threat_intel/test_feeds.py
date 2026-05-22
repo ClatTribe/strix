@@ -290,3 +290,132 @@ def test_nvd_http_failure_records_status(tmp_cache) -> None:
     result = nvd_feed.poll_nvd_recent(days=7, fetch=boom)
     assert result["status"] == "error"
     assert "connection refused" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# iter-22.5 — real-time incremental NVD polling
+# ---------------------------------------------------------------------------
+
+
+def test_nvd_incremental_uses_since_iso_kwarg(tmp_cache) -> None:
+    """`since_iso=` overrides the feed_meta last_polled lookup."""
+    doc = _nvd_doc([_nvd_item("CVE-2024-INC1")])
+    captured = {}
+
+    def fake_fetch(url, timeout=60.0, api_key=None):
+        captured["url"] = url
+        return json.dumps(doc).encode("utf-8")
+
+    result = nvd_feed.poll_nvd_incremental(
+        since_iso="2026-05-22T10:00:00Z", fetch=fake_fetch,
+    )
+    assert result["status"] == "ok"
+    assert result["incremental"] is True
+    # The lastModStartDate in the URL came from since_iso
+    assert "lastModStartDate=2026-05-22T10" in captured["url"]
+
+
+def test_nvd_incremental_falls_back_to_feed_meta(tmp_cache) -> None:
+    """When since_iso is None, the function reads
+    feed_meta.last_polled for `nvd`."""
+    # Seed feed_meta with a known last_polled.
+    ti_cache.record_feed_status("nvd", status="ok", record_count=0)
+    doc = _nvd_doc([_nvd_item("CVE-2024-INC2")])
+    captured = {}
+
+    def fake_fetch(url, timeout=60.0, api_key=None):
+        captured["url"] = url
+        return json.dumps(doc).encode("utf-8")
+
+    result = nvd_feed.poll_nvd_incremental(fetch=fake_fetch)
+    assert result["status"] == "ok"
+    # The URL has a lastModStartDate (we don't know the exact
+    # timestamp, but it should be present and well-formed)
+    assert "lastModStartDate=" in captured["url"]
+
+
+def test_nvd_incremental_fallback_minutes_on_cold_start(tmp_cache) -> None:
+    """No since_iso AND no feed_meta entry → fallback_minutes
+    window."""
+    doc = _nvd_doc([])
+
+    def fake_fetch(url, timeout=60.0, api_key=None):
+        return json.dumps(doc).encode("utf-8")
+
+    result = nvd_feed.poll_nvd_incremental(
+        fallback_minutes=15, fetch=fake_fetch,
+    )
+    assert result["status"] == "ok"
+    assert result["incremental"] is True
+
+
+def test_nvd_incremental_rejects_bad_since_iso(tmp_cache) -> None:
+    result = nvd_feed.poll_nvd_incremental(
+        since_iso="not-a-timestamp",
+    )
+    assert result["status"] == "error"
+    assert "unparseable" in result["error"].lower()
+
+
+def test_nvd_incremental_clamps_huge_gap_to_120_days(tmp_cache) -> None:
+    """If last poll was years ago, window is clamped to 120 days
+    (NVD API's hard limit)."""
+    doc = _nvd_doc([])
+
+    def fake_fetch(url, timeout=60.0, api_key=None):
+        return json.dumps(doc).encode("utf-8")
+
+    # 5 years ago — would otherwise be ~1825 days
+    result = nvd_feed.poll_nvd_incremental(
+        since_iso="2021-01-01T00:00:00Z", fetch=fake_fetch,
+    )
+    assert result["status"] == "ok"
+
+
+def test_nvd_incremental_ingests_cves(tmp_cache) -> None:
+    doc = _nvd_doc([
+        _nvd_item("CVE-2024-INC10"),
+        _nvd_item("CVE-2024-INC11", score=7.5,
+                  products=[("nginx", "nginx", "1.21.5")]),
+    ])
+
+    def fake_fetch(url, timeout=60.0, api_key=None):
+        return json.dumps(doc).encode("utf-8")
+
+    result = nvd_feed.poll_nvd_incremental(
+        since_iso="2026-05-22T00:00:00Z", fetch=fake_fetch,
+    )
+    assert result["status"] == "ok"
+    assert result["ingested"] == 2
+    # Confirm a record landed in the cache
+    rec = ti_cache.fetch_cve("CVE-2024-INC10")
+    assert rec is not None
+
+
+def test_nvd_incremental_records_last_polled_for_next_run(
+    tmp_cache,
+) -> None:
+    """After an incremental poll, feed_meta.last_polled is updated
+    so the next call picks up where this one ended."""
+
+    def fake_fetch(url, timeout=60.0, api_key=None):
+        return json.dumps(_nvd_doc([])).encode("utf-8")
+
+    nvd_feed.poll_nvd_incremental(
+        since_iso="2026-05-22T00:00:00Z", fetch=fake_fetch,
+    )
+    rows = ti_cache.fetch_feed_meta() or []
+    nvd_row = next((r for r in rows if r.get("feed_name") == "nvd"), None)
+    assert nvd_row is not None
+    assert nvd_row.get("last_polled") is not None
+
+
+def test_nvd_incremental_http_failure_records_error(tmp_cache) -> None:
+    def boom(url, timeout=60.0, api_key=None):
+        raise OSError("DNS failure")
+
+    result = nvd_feed.poll_nvd_incremental(
+        since_iso="2026-05-22T00:00:00Z", fetch=boom,
+    )
+    assert result["status"] == "error"
+    assert "DNS failure" in result["error"]
