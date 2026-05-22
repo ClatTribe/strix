@@ -1609,7 +1609,10 @@ class Tracer:
         # worse off than no-L1.5. See docs/L2-optimization.md §7.
         try:
             from strix.l15 import (
+                classify_surface,
                 corroborator_ledger,
+                enrich_finding_with_blame,
+                hygiene_ledger,
                 plan_dast_confirmation,
                 pre_emission_fp_filter,
                 root_cause_ledger,
@@ -1688,6 +1691,32 @@ class Tracer:
                     return rc.target_id
                 # Parent record vanished (shouldn't happen) — fall
                 # through and persist as a new row.
+
+            # ---- 25.6 — observe for hygiene prior ----
+            try:
+                hygiene_ledger.observe(report)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("hygiene_ledger.observe failed: %s", e)
+
+            # ---- 25.7 — surface priority label ----
+            try:
+                surface_hint = (
+                    report.get("endpoint")
+                    or report.get("url")
+                    or report.get("target")
+                    or ""
+                )
+                if surface_hint:
+                    cls = classify_surface(surface_hint)
+                    report["surface_priority"] = cls.to_dict()
+            except Exception as e:  # noqa: BLE001
+                logger.debug("classify_surface failed: %s", e)
+
+            # ---- 25.8 — git-blame enrichment on code findings ----
+            try:
+                enrich_finding_with_blame(report)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("enrich_finding_with_blame failed: %s", e)
 
             # ---- 25.5 — composite exploitability ----
             try:
