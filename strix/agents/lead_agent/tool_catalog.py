@@ -53,6 +53,12 @@ _CORE_TOOLS: frozenset[str] = frozenset({
     # Findings
     "create_vulnerability_report", "update_finding", "dismiss_finding",
     "check_budget",
+    # iter-26.2 / 26.7 — L1.5-aware catalog listing. Returns the
+    # current finding set ranked by surface_priority → exploitability
+    # composite → severity, with noise=True / role=corroborator hidden
+    # by default. The Lead calls this between specialist dispatches to
+    # pick the highest-leverage next target.
+    "list_pending_findings",
     # Threat intel — always-on (read-only, framework provenance).
     # iter-22.9: `cve_lookup` / `nvd_lookup` / `lookup_known_cves` /
     # `lookup_cve_by_id` / `list_actively_exploited_cves` were five
@@ -361,6 +367,8 @@ _ORCHESTRATOR_ALLOWED_TOOLS: frozenset[str] = frozenset({
     # "coverage gap" or "scope violation")
     "create_vulnerability_report", "update_finding", "dismiss_finding",
     "check_budget",
+    # iter-26.2 / 26.7 — L1.5-aware ranked catalog.
+    "list_pending_findings",
     # Threat-intel lookups (lead may need these for orchestration
     # decisions — "what CVEs apply to this tech stack?")
     # iter-22.9: 5 redundant lookup tools collapsed into one.

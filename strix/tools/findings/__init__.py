@@ -15,3 +15,5 @@ __all__: list[str] = []
 # Import side-effects register tools.
 from strix.tools.findings import check_budget as _check_budget  # noqa: F401
 from strix.tools.findings import update_finding as _update_finding  # noqa: F401
+# iter-26.2 / 26.7 — L1.5-aware catalog listing for Lead Orchestrator
+from strix.tools.findings import list_findings as _list_findings  # noqa: F401
