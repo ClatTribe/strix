@@ -296,3 +296,198 @@ def poll_nvd_recent(
         "window_days": days,
         "error": None,
     }
+
+
+def poll_nvd_incremental(
+    *,
+    since_iso: str | None = None,
+    fallback_minutes: int = 30,
+    page_size: int = 2000,
+    api_key: str | None = None,
+    fetch: callable | None = None,
+) -> dict[str, Any]:
+    """iter-22.5 — real-time NVD CVE polling. Cuts the
+    `poll_nvd_recent` 14-day batch window down to minutes by
+    using NVD API v2's `lastModStartDate=` for true incremental
+    updates. Cron-driven daily polls become 5-minute cron jobs;
+    CVE arrival latency goes from ~24h to ~5min.
+
+    Args:
+        since_iso: ISO-8601 starting timestamp. When None,
+            falls back to the cache's `feed_meta.last_polled`
+            for the `nvd` feed, OR to `now - fallback_minutes`
+            on first run.
+        fallback_minutes: window size used when `since_iso` and
+            `feed_meta.last_polled` are both unavailable.
+            Default 30min — paired with a 5-10min cron, this gives
+            sufficient overlap to absorb cron-skew without
+            re-ingesting weeks of history.
+        page_size: NVD `resultsPerPage` (max 2000).
+        api_key: NVD API key. Falls back to `NVD_API_KEY` env.
+        fetch: optional test injection point.
+
+    Returns:
+        {"status", "ingested", "pages", "since", "until",
+         "incremental": True, "error"}
+
+    Compatibility: this is a NEW function added alongside
+    `poll_nvd_recent` (which stays for full-window backfills /
+    air-gapped first-run loads). The CLI / refresh.py daemon
+    will route to `poll_nvd_incremental` by default after the
+    initial seed is in place.
+    """
+    fetch = fetch or _http_get
+    api_key = api_key or os.environ.get("NVD_API_KEY")
+
+    end = datetime.now(timezone.utc)
+
+    # Resolve the start timestamp. Priority:
+    #   1. Explicit `since_iso` kwarg
+    #   2. feed_meta.last_polled for `nvd` feed
+    #   3. `end - fallback_minutes`
+    start_dt = None
+    if since_iso:
+        try:
+            s = since_iso.rstrip("Z")
+            start_dt = datetime.fromisoformat(s)
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=timezone.utc)
+        except ValueError as e:
+            return {
+                "status": "error", "ingested": 0, "pages": 0,
+                "since": since_iso, "until": _iso_utc(end),
+                "incremental": True,
+                "error": f"unparseable since_iso: {e}",
+            }
+    if start_dt is None:
+        try:
+            rows = ti_cache.fetch_feed_meta() or []
+            for row in rows:
+                if (row.get("feed_name") or "").lower() == "nvd":
+                    lp = row.get("last_polled")
+                    if isinstance(lp, str) and lp:
+                        try:
+                            s = lp.rstrip("Z")
+                            start_dt = datetime.fromisoformat(s)
+                            if start_dt.tzinfo is None:
+                                start_dt = start_dt.replace(tzinfo=timezone.utc)
+                            break
+                        except ValueError:
+                            pass
+        except Exception:  # noqa: BLE001
+            start_dt = None
+    if start_dt is None:
+        start_dt = end - timedelta(minutes=fallback_minutes)
+
+    # NVD's lastModStartDate accepts UP TO 120 days — clamp +
+    # surface as fallback when the gap is huge (e.g. cold-start).
+    window = (end - start_dt).total_seconds() / 86400
+    if window > 120:
+        start_dt = end - timedelta(days=120)
+
+    base_qs = {
+        "lastModStartDate": _iso_utc(start_dt),
+        "lastModEndDate": _iso_utc(end),
+        "resultsPerPage": str(page_size),
+    }
+
+    pages = 0
+    total_ingested = 0
+    last_modified_seen: str | None = None
+    start_index = 0
+    sleep_between = 0.5 if api_key else 6.5  # respect rate limit
+
+    while True:
+        qs = "&".join(
+            f"{k}={v}"
+            for k, v in {**base_qs, "startIndex": str(start_index)}.items()
+        )
+        url = f"{NVD_BASE}?{qs}"
+        try:
+            raw = fetch(url, timeout=60.0, api_key=api_key)
+        except Exception as e:  # noqa: BLE001
+            msg = (
+                f"NVD incremental fetch failed at "
+                f"startIndex={start_index}: {type(e).__name__}: {e}"
+            )
+            logger.warning(msg)
+            ti_cache.record_feed_status(
+                "nvd", status="error", error=msg,
+                record_count=total_ingested,
+            )
+            return {
+                "status": "error", "ingested": total_ingested,
+                "pages": pages, "since": base_qs["lastModStartDate"],
+                "until": base_qs["lastModEndDate"],
+                "incremental": True, "error": msg,
+            }
+
+        try:
+            doc = json.loads(raw)
+        except Exception as e:  # noqa: BLE001
+            msg = f"NVD JSON parse failed: {type(e).__name__}: {e}"
+            ti_cache.record_feed_status(
+                "nvd", status="error", error=msg,
+                record_count=total_ingested,
+            )
+            return {
+                "status": "error", "ingested": total_ingested,
+                "pages": pages, "since": base_qs["lastModStartDate"],
+                "until": base_qs["lastModEndDate"],
+                "incremental": True, "error": msg,
+            }
+
+        items = doc.get("vulnerabilities") or []
+        if not isinstance(items, list):
+            break
+        normalized = [_normalize_cve(it) for it in items]
+        normalized = [n for n in normalized if n is not None]
+        if normalized:
+            try:
+                n = ti_cache.upsert_cves(normalized, source="nvd")
+                total_ingested += n
+                for r in normalized:
+                    m = r.get("modified")
+                    if m and (
+                        last_modified_seen is None or m > last_modified_seen
+                    ):
+                        last_modified_seen = m
+            except Exception as e:  # noqa: BLE001
+                msg = f"NVD upsert failed: {type(e).__name__}: {e}"
+                ti_cache.record_feed_status(
+                    "nvd", status="error", error=msg,
+                    record_count=total_ingested,
+                )
+                return {
+                    "status": "error", "ingested": total_ingested,
+                    "pages": pages,
+                    "since": base_qs["lastModStartDate"],
+                    "until": base_qs["lastModEndDate"],
+                    "incremental": True, "error": msg,
+                }
+
+        pages += 1
+        total_results = int(doc.get("totalResults") or len(items))
+        start_index += len(items)
+        if start_index >= total_results or len(items) < page_size:
+            break
+        time.sleep(sleep_between)
+
+    # Record the poll. `record_feed_status` sets `last_polled` to
+    # "now" automatically — that's what subsequent incremental
+    # polls read to compute their start window.
+    ti_cache.record_feed_status(
+        "nvd", status="ok",
+        record_count=total_ingested,
+        last_updated_at=last_modified_seen,
+    )
+
+    return {
+        "status": "ok",
+        "ingested": total_ingested,
+        "pages": pages,
+        "since": base_qs["lastModStartDate"],
+        "until": base_qs["lastModEndDate"],
+        "incremental": True,
+        "error": None,
+    }
