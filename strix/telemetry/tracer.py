@@ -460,6 +460,14 @@ class Tracer:
         self.interrupted_content: dict[str, str] = {}
 
         self.vulnerability_reports: list[dict[str, Any]] = []
+        # iter-25-fix: monotonic counter that advances on every call to
+        # add_vulnerability_report, NOT on every persisted record. Without
+        # this, FP-filter drops (and root-cause merges) caused ID
+        # collisions: dropped finding `vuln-0001` doesn't get appended,
+        # next real finding generates the same `vuln-0001`, breaking
+        # anything keyed on report_id (update_finding, dismiss_finding,
+        # patcher chain).
+        self._next_report_seq: int = 0
         self.final_scan_result: str | None = None
 
         # engine-wishlist §6 — `STRIX_PROJECT_ID` (or `--project-id`)
@@ -1012,7 +1020,12 @@ class Tracer:
         discovery_method: str | None = None,
         discovery_source_tool: str | None = None,
     ) -> str:
-        report_id = f"vuln-{len(self.vulnerability_reports) + 1:04d}"
+        # iter-25-fix: use a monotonic per-call counter instead of
+        # len(vulnerability_reports)+1. The latter would generate the
+        # same id for the next call when L1.5 drops or merges the
+        # current finding (the list doesn't grow).
+        self._next_report_seq += 1
+        report_id = f"vuln-{self._next_report_seq:04d}"
 
         # Auto-infer category from CWE if not explicitly provided. Keeps the
         # field populated even when older agent prompts don't supply it.

@@ -97,6 +97,53 @@ def test_root_cause_collapse_e2e(tracer, monkeypatch):
     assert occs[0]["line"] == 17
 
 
+def test_dropped_finding_does_not_collide_id(tracer, monkeypatch):
+    """iter-25-fix regression: when L1.5's FP filter drops a finding,
+    the next real finding must NOT inherit the dropped ID.
+
+    Original bug: report_id was computed from
+    len(vulnerability_reports)+1, but dropped findings never get
+    appended → counter doesn't advance → next call generates the
+    same ID. Anything keyed on report_id (update_finding,
+    dismiss_finding, patcher chain) would now operate on the wrong
+    record.
+    """
+    monkeypatch.setattr(
+        "strix.telemetry.tracer.posthog.finding", lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "strix.telemetry.tracer._emit_kg_auto_for_finding",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "strix.llm.kev_enrichment.resolve_kev_block", lambda **_k: {},
+    )
+    monkeypatch.setattr(
+        "strix.llm.campaign_enrichment.resolve_campaign_block",
+        lambda **_k: {"matched_pulse_count": 0, "matched_pulses": []},
+    )
+
+    # First call — L1.5 will DROP this (file under examples/, severity
+    # not critical)
+    id1 = tracer.add_vulnerability_report(
+        title="Drop me",
+        severity="high",
+        code_locations=[{"file": "examples/demo.py", "line": 1}],
+        cwe="CWE-798",
+    )
+    # Second call — real finding, must persist with DIFFERENT id
+    id2 = tracer.add_vulnerability_report(
+        title="Real finding",
+        severity="high",
+        code_locations=[{"file": "src/auth.py", "line": 1}],
+        cwe="CWE-89",
+        endpoint="https://e.com/login",
+    )
+    assert id1 != id2, "FP-dropped finding must not collide with next"
+    assert len(tracer.vulnerability_reports) == 1
+    assert tracer.vulnerability_reports[0]["id"] == id2
+
+
 def test_corroborator_boost_e2e(tracer, monkeypatch):
     """SAST + DAST hit on same CWE+surface → parent severity bumps to
     critical, second finding becomes corroborator."""
