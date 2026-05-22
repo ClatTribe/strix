@@ -176,6 +176,42 @@ CREATE INDEX IF NOT EXISTS ix_campaign_cve_links_cve
     ON campaign_cve_links(cve_id);
 CREATE INDEX IF NOT EXISTS ix_campaign_cve_links_campaign
     ON campaign_cve_links(campaign_id);
+
+-- iter-22.7 — exploit-availability cache.
+--
+-- For each CVE, track whether a public PoC / Metasploit module /
+-- Exploit-DB entry exists. Operationally, "is there a working
+-- exploit?" is the single biggest prioritization signal AFTER
+-- KEV (Tenable's data: ~78% of breaches use CVEs with public
+-- PoCs vs ~12% with KEV-only).
+--
+-- Sources (poll separately; this cache just stores the facts):
+--   * PoC-in-GitHub (nomi-sec/PoC-in-GitHub) — daily-refreshed,
+--     ~50% high-EPSS CVEs have a GitHub PoC entry within 24h.
+--   * Metasploit module catalog — local `msfconsole search` output
+--     OR cached `~/.msf4/db.tsv`-style export.
+--   * Exploit-DB via `searchsploit --json -e <CVE>`.
+--   * Vulncheck Initial Access (premium tier; optional).
+CREATE TABLE IF NOT EXISTS cve_exploit_availability (
+    cve_id TEXT PRIMARY KEY,
+    has_public_poc INTEGER NOT NULL DEFAULT 0,
+    poc_count INTEGER NOT NULL DEFAULT 0,
+    poc_top_url TEXT,                 -- highest-stars PoC repo URL
+    has_msf_module INTEGER NOT NULL DEFAULT 0,
+    msf_module_name TEXT,
+    has_exploit_db INTEGER NOT NULL DEFAULT 0,
+    exploit_db_id TEXT,
+    sources_json TEXT,                -- JSON array: which feeds populated this row
+    last_seen TEXT,                   -- ISO-8601 of most-recent feed-poll update
+    raw_json TEXT                     -- per-source raw blobs (for audit)
+);
+
+CREATE INDEX IF NOT EXISTS ix_cve_exploit_avail_has_poc
+    ON cve_exploit_availability(has_public_poc)
+    WHERE has_public_poc=1;
+CREATE INDEX IF NOT EXISTS ix_cve_exploit_avail_has_msf
+    ON cve_exploit_availability(has_msf_module)
+    WHERE has_msf_module=1;
 """
 
 
@@ -946,6 +982,106 @@ def link_campaign_to_cves(
     except Exception as e:  # noqa: BLE001
         logger.warning("link_campaign_to_cves failed: %s", e, exc_info=True)
         return 0
+
+
+def upsert_exploit_availability(record: dict[str, Any]) -> bool:
+    """Insert / update one cve_exploit_availability row. iter-22.7.
+
+    Expected keys: `cve_id` (required); any of `has_public_poc`,
+    `poc_count`, `poc_top_url`, `has_msf_module`, `msf_module_name`,
+    `has_exploit_db`, `exploit_db_id`, `sources` (list[str]),
+    `last_seen` (ISO-8601), `raw` (dict — serialised to JSON).
+    Returns True on success.
+    """
+    cve_id = record.get("cve_id")
+    if not isinstance(cve_id, str) or not cve_id.strip():
+        return False
+    src = record.get("sources")
+    src_json = json.dumps(src) if isinstance(src, list) else None
+    raw = record.get("raw")
+    raw_json = json.dumps(raw) if isinstance(raw, dict) else None
+    try:
+        with connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO cve_exploit_availability
+                    (cve_id, has_public_poc, poc_count, poc_top_url,
+                     has_msf_module, msf_module_name, has_exploit_db,
+                     exploit_db_id, sources_json, last_seen, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cve_id) DO UPDATE SET
+                    has_public_poc  = excluded.has_public_poc,
+                    poc_count       = excluded.poc_count,
+                    poc_top_url     = COALESCE(excluded.poc_top_url,
+                                               cve_exploit_availability.poc_top_url),
+                    has_msf_module  = excluded.has_msf_module,
+                    msf_module_name = COALESCE(excluded.msf_module_name,
+                                               cve_exploit_availability.msf_module_name),
+                    has_exploit_db  = excluded.has_exploit_db,
+                    exploit_db_id   = COALESCE(excluded.exploit_db_id,
+                                               cve_exploit_availability.exploit_db_id),
+                    sources_json    = COALESCE(excluded.sources_json,
+                                               cve_exploit_availability.sources_json),
+                    last_seen       = COALESCE(excluded.last_seen,
+                                               cve_exploit_availability.last_seen),
+                    raw_json        = COALESCE(excluded.raw_json,
+                                               cve_exploit_availability.raw_json)
+                """,
+                (
+                    cve_id.strip().upper(),
+                    1 if record.get("has_public_poc") else 0,
+                    int(record.get("poc_count") or 0),
+                    record.get("poc_top_url"),
+                    1 if record.get("has_msf_module") else 0,
+                    record.get("msf_module_name"),
+                    1 if record.get("has_exploit_db") else 0,
+                    record.get("exploit_db_id"),
+                    src_json,
+                    record.get("last_seen"),
+                    raw_json,
+                ),
+            )
+            return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("upsert_exploit_availability failed: %s", e, exc_info=True)
+        return False
+
+
+def fetch_exploit_availability(cve_id: str) -> dict[str, Any] | None:
+    """Return the exploit-availability row for a CVE, or None when
+    no entry exists in the cache. iter-22.7.
+    """
+    if not isinstance(cve_id, str) or not cve_id.strip():
+        return None
+    try:
+        with connect() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM cve_exploit_availability WHERE cve_id=?",
+                (cve_id.strip().upper(),),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            d = dict(row)
+            srcs = d.pop("sources_json", None)
+            raw = d.pop("raw_json", None)
+            try:
+                d["sources"] = json.loads(srcs) if srcs else []
+            except (ValueError, TypeError):
+                d["sources"] = []
+            try:
+                d["raw"] = json.loads(raw) if raw else {}
+            except (ValueError, TypeError):
+                d["raw"] = {}
+            # Coerce SQLite bool columns to Python bool
+            for k in ("has_public_poc", "has_msf_module", "has_exploit_db"):
+                d[k] = bool(d.get(k))
+            return d
+    except Exception as e:  # noqa: BLE001
+        logger.debug("fetch_exploit_availability(%s) failed: %s", cve_id, e)
+        return None
 
 
 def fetch_campaigns_for_cve(

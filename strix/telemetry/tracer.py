@@ -1204,6 +1204,63 @@ class Tracer:
         except Exception as e:  # noqa: BLE001
             logger.debug("campaign severity nudge failed: %s", e)
 
+        # iter-22.7 — exploit-availability enrichment. Attaches an
+        # `exploit_availability` block to every CVE-bearing finding,
+        # indicating whether public PoCs (PoC-in-GitHub),
+        # Metasploit modules, or Exploit-DB entries are known.
+        # "Is there a working exploit?" is the single biggest
+        # prioritization signal after KEV — Tenable data shows
+        # ~78% of breaches use CVEs with public PoCs.
+        #
+        # Same attestation discipline as KEV/EPSS/campaign: block
+        # ALWAYS present, `reason` field carries the explanation
+        # when data is missing.
+        try:
+            from strix.llm.exploit_availability_enrichment import (
+                resolve_exploit_availability_block,
+            )
+            report["exploit_availability"] = (
+                resolve_exploit_availability_block(cve=cve)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("exploit-availability enrichment failed: %s", e)
+            report["exploit_availability"] = {
+                "has_public_poc": False,
+                "poc_count": 0,
+                "poc_top_url": None,
+                "has_msf_module": False,
+                "msf_module_name": None,
+                "has_exploit_db": False,
+                "exploit_db_id": None,
+                "sources_seen": [],
+                "last_updated": None,
+                "reason": "cache_unavailable",
+            }
+
+        # iter-22.7 — severity nudge when a working exploit is known.
+        # One-tier bump capped at `high` (KEV path is reserved for
+        # critical promotion).
+        try:
+            from strix.llm.exploit_availability_enrichment import (
+                maybe_nudge_severity_for_exploit_availability,
+            )
+            new_sev, exploit_trace_line = (
+                maybe_nudge_severity_for_exploit_availability(
+                    current_severity=report.get("severity"),
+                    exploit_block=report.get("exploit_availability") or {},
+                )
+            )
+            if new_sev is not None:
+                report["severity"] = new_sev
+                _existing_trace = report.get("reasoning_trace") or []
+                if isinstance(_existing_trace, str):
+                    _existing_trace = [_existing_trace]
+                if isinstance(_existing_trace, list) and exploit_trace_line:
+                    _existing_trace = list(_existing_trace) + [exploit_trace_line]
+                    report["reasoning_trace"] = _existing_trace
+        except Exception as e:  # noqa: BLE001
+            logger.debug("exploit-availability severity nudge failed: %s", e)
+
         # MA-S2 P0-CVS-D — discovery_method block for novel-vuln
         # attestation. CVS-0.3 requires demonstrating that novel,
         # zero-day-class vulnerabilities (no CVE matched) are
