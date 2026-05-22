@@ -46,9 +46,25 @@ from strix.l15.root_cause import (
     RootCauseLedger,
     root_cause_ledger,
 )
+from strix.l15.git_blame import (
+    GitBlame,
+    enrich_finding_with_blame,
+    get_blame,
+)
+from strix.l15.hygiene import (
+    HygieneLedger,
+    HygieneScore,
+    hygiene_ledger,
+)
 from strix.l15.sast_to_dast import (
     ConfirmationRequest,
     plan_dast_confirmation,
+)
+from strix.l15.surface_priority import (
+    SurfaceClassification,
+    SurfaceLabel,
+    classify_surface,
+    depth_multiplier_for,
 )
 
 
@@ -72,4 +88,15 @@ __all__ = [
     "score_exploitability",
     "set_posture",
     "stealth_required",
+    # Wave 3 — context / depth / authorship
+    "GitBlame",
+    "HygieneLedger",
+    "HygieneScore",
+    "SurfaceClassification",
+    "SurfaceLabel",
+    "classify_surface",
+    "depth_multiplier_for",
+    "enrich_finding_with_blame",
+    "get_blame",
+    "hygiene_ledger",
 ]
