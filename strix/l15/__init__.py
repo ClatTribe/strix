@@ -59,6 +59,7 @@ from strix.l15.probe_bundles import (
     plan_probe_bundle,
     record_planned_bundle,
 )
+from strix.l15.stealth_guidance import stealth_addendum_for
 from strix.l15.hygiene import (
     HygieneLedger,
     HygieneScore,
@@ -114,4 +115,6 @@ __all__ = [
     "execute_adaptive_probe",
     "plan_probe_bundle",
     "record_planned_bundle",
+    # iter-26.8 — stealth payload guidance
+    "stealth_addendum_for",
 ]
