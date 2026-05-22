@@ -85,6 +85,16 @@ _CORE_TOOLS: frozenset[str] = frozenset({
     # consumes the artifact for compliance dashboards / auditor
     # handoff.
     "emit_compliance_evidence",
+    # iter-22.10 — promote knowledge-graph query primitives from
+    # patcher-only to the Lead Orchestrator catalog per
+    # `docs/l2-architecture-evaluation.md §4`. Without these in
+    # the lead's view the orchestrator can't ask "which Assets is
+    # this finding attached to?" / "is there a path from Surface
+    # X to Vuln Y?" — the prior workaround was for the lead to
+    # spawn a patcher specialist just to query the KG, which
+    # burned an extra dispatch + fresh-context loop. Read-only
+    # tools; no destructive surface.
+    "kg_query_nodes", "kg_query_paths",
 })
 
 
