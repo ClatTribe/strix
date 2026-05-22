@@ -135,6 +135,13 @@ from .sqlmap_runner import *           # noqa: F403  # scan_sqli_sqlmap
 from .trufflehog_runner import *       # noqa: F403  # verify_credentials_trufflehog
 from .feroxbuster_runner import *      # noqa: F403  # discover_paths_feroxbuster
 from .inql_runner import *             # noqa: F403  # map_graphql_inql
+# iter-24.1 — ruleset/signature lazy-refresh infra. Three @register_tool
+# updaters that refresh ~/.strix/cache/rules/<file> from upstream
+# (gitleaks.toml, wappalyzer-technologies.json, hadolint.yaml), with a
+# 24h ETag-guarded freshness window. secrets_scan + scan_dockerfile_hadolint
+# auto-pick up the cached config if present, falling back to baked-in
+# defaults — recall-safe per L1-optimization §5.1.
+from .rule_updates import *            # noqa: F403
 
 # SCA / supply-chain analysis (Phase 6) — registers
 # `scan_sca_lockfiles`.
