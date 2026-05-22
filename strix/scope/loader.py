@@ -13,6 +13,9 @@ from typing import Any
 
 from strix.scope.spec import (
     AuthConfig,
+    CustomDockerfileRules,
+    CustomSecretRule,
+    CustomSignatures,
     EngagementScope,
     OpSecLevel,
     ScopeTarget,
@@ -29,6 +32,12 @@ _VALID_TARGET_TYPES = {
 }
 _VALID_OPSEC = {"quiet", "standard", "loud"}
 _VALID_AUTH_METHODS = {"bearer", "basic", "cookie", "none"}
+# iter-24.2 — hadolint maps severities to one of these labels. We
+# reject anything else so users get a clear error instead of a silent
+# pass-through that hadolint then crashes on.
+_VALID_HADOLINT_SEVERITIES = {
+    "error", "warning", "info", "style", "ignore",
+}
 
 
 class ScopeValidationError(ValueError):
@@ -163,6 +172,11 @@ def parse_scope_yaml(text: str) -> EngagementScope:
         )
         escal = None
 
+    # --- custom_signatures (optional, iter-24.2) ---
+    custom_sigs = _parse_custom_signatures(
+        data.get("custom_signatures"), errors,
+    )
+
     if errors:
         raise ScopeValidationError(errors)
 
@@ -175,6 +189,155 @@ def parse_scope_yaml(text: str) -> EngagementScope:
         auth=auth,
         acceptance_criteria=criteria,
         escalation_contact=escal,
+        custom_signatures=custom_sigs,
+    )
+
+
+def _parse_custom_signatures(
+    raw: Any, errors: list[str],
+) -> CustomSignatures:
+    """Parse `custom_signatures:` block — user L1 rule extensions.
+
+    Schema:
+        custom_signatures:
+          secrets:
+            - id: <str>
+              regex: <str>      # python re-syntax; compiled to validate
+              description: <str optional>
+          dockerfile:
+            exclude_rules: [DL3008, ...]
+            severity_overrides:
+              DL3000: warning
+              DL4006: error
+    """
+    if raw is None:
+        return CustomSignatures()
+    if not isinstance(raw, dict):
+        errors.append(
+            f"`custom_signatures` must be a mapping, got "
+            f"{type(raw).__name__}",
+        )
+        return CustomSignatures()
+
+    # --- secrets ---
+    raw_secrets = raw.get("secrets")
+    secrets_out: list[CustomSecretRule] = []
+    if raw_secrets is not None:
+        if not isinstance(raw_secrets, list):
+            errors.append(
+                f"`custom_signatures.secrets` must be a list, got "
+                f"{type(raw_secrets).__name__}",
+            )
+        else:
+            seen_ids: set[str] = set()
+            for i, entry in enumerate(raw_secrets):
+                rule = _parse_secret_rule(entry, i, errors)
+                if rule is None:
+                    continue
+                if rule.id in seen_ids:
+                    errors.append(
+                        f"`custom_signatures.secrets[{i}].id` duplicate: "
+                        f"{rule.id!r}",
+                    )
+                    continue
+                seen_ids.add(rule.id)
+                secrets_out.append(rule)
+
+    # --- dockerfile ---
+    raw_df = raw.get("dockerfile") or {}
+    excl_rules: tuple[str, ...] = ()
+    sev_overrides: list[tuple[str, str]] = []
+    if not isinstance(raw_df, dict):
+        errors.append(
+            f"`custom_signatures.dockerfile` must be a mapping, got "
+            f"{type(raw_df).__name__}",
+        )
+    else:
+        excl_rules = _parse_str_list(
+            raw_df.get("exclude_rules"),
+            "custom_signatures.dockerfile.exclude_rules",
+            errors,
+        )
+        raw_sev = raw_df.get("severity_overrides")
+        if raw_sev is not None:
+            if not isinstance(raw_sev, dict):
+                errors.append(
+                    f"`custom_signatures.dockerfile.severity_overrides` "
+                    f"must be a mapping, got {type(raw_sev).__name__}",
+                )
+            else:
+                for rule_id, sev in raw_sev.items():
+                    if not isinstance(rule_id, str) or not rule_id.strip():
+                        errors.append(
+                            "`custom_signatures.dockerfile."
+                            "severity_overrides` keys must be non-empty "
+                            f"strings; got {rule_id!r}",
+                        )
+                        continue
+                    if (
+                        not isinstance(sev, str)
+                        or sev not in _VALID_HADOLINT_SEVERITIES
+                    ):
+                        errors.append(
+                            f"`custom_signatures.dockerfile."
+                            f"severity_overrides[{rule_id}]` must be one "
+                            f"of {sorted(_VALID_HADOLINT_SEVERITIES)}, "
+                            f"got {sev!r}",
+                        )
+                        continue
+                    sev_overrides.append((rule_id, sev))
+
+    return CustomSignatures(
+        secrets=tuple(secrets_out),
+        dockerfile=CustomDockerfileRules(
+            exclude_rules=excl_rules,
+            severity_overrides=tuple(sev_overrides),
+        ),
+    )
+
+
+def _parse_secret_rule(
+    entry: Any, idx: int, errors: list[str],
+) -> CustomSecretRule | None:
+    import re
+    if not isinstance(entry, dict):
+        errors.append(
+            f"`custom_signatures.secrets[{idx}]` must be a mapping, "
+            f"got {type(entry).__name__}",
+        )
+        return None
+    rid = entry.get("id")
+    regex = entry.get("regex")
+    desc = entry.get("description", "")
+    if not isinstance(rid, str) or not rid.strip():
+        errors.append(
+            f"`custom_signatures.secrets[{idx}].id` must be a "
+            f"non-empty string, got {rid!r}",
+        )
+        return None
+    if not isinstance(regex, str) or not regex.strip():
+        errors.append(
+            f"`custom_signatures.secrets[{idx}].regex` must be a "
+            f"non-empty string, got {regex!r}",
+        )
+        return None
+    # Validate compile so the user gets the error at scope-load time
+    # instead of at gitleaks invocation.
+    try:
+        re.compile(regex)
+    except re.error as e:
+        errors.append(
+            f"`custom_signatures.secrets[{idx}].regex` is invalid: {e}",
+        )
+        return None
+    if not isinstance(desc, str):
+        errors.append(
+            f"`custom_signatures.secrets[{idx}].description` must be "
+            f"a string, got {type(desc).__name__}",
+        )
+        desc = ""
+    return CustomSecretRule(
+        id=rid.strip(), regex=regex, description=desc.strip(),
     )
 
 
