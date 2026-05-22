@@ -15,9 +15,6 @@ from opentelemetry.sdk.trace.export import (
     SpanExporter,
     SpanExportResult,
 )
-from scrubadub import Scrubber
-from scrubadub.detectors import RegexDetector
-from scrubadub.filth import Filth
 
 
 logger = logging.getLogger(__name__)
@@ -60,7 +57,6 @@ _SENSITIVE_TOKEN_PATTERN = re.compile(
     r"xox[baprs]-[a-z0-9-]{12,}"
     r")\b"
 )
-_SCRUBADUB_PLACEHOLDER_PATTERN = re.compile(r"\{\{[^}]+\}\}")
 _EVENTS_FILE_LOCKS_LOCK = threading.Lock()
 _EVENTS_FILE_LOCKS: dict[str, threading.Lock] = {}
 _NOISY_OTEL_CONTENT_PREFIXES = (
@@ -77,19 +73,15 @@ _NOISY_OTEL_EXACT_KEYS = {
 }
 
 
-class _SecretFilth(Filth):  # type: ignore[misc]
-    type = "secret"
-
-
-class _SecretTokenDetector(RegexDetector):  # type: ignore[misc]
-    name = "strix_secret_token_detector"
-    filth_cls = _SecretFilth
-    regex = _SENSITIVE_TOKEN_PATTERN
-
-
 class TelemetrySanitizer:
-    def __init__(self) -> None:
-        self._scrubber = Scrubber(detector_list=[_SecretTokenDetector])
+    """Redacts sensitive values from telemetry events before they hit
+    disk or remote exporters.
+
+    Previously routed string scrubbing through `scrubadub` with a single
+    `RegexDetector`. scrubadub pulled a ~256 MB transitive footprint
+    (scipy, sklearn, matplotlib, phonenumbers, pandas, ...) into the
+    sandbox image for what amounted to a `re.sub` — replaced inline.
+    """
 
     def sanitize(self, data: Any, key_hint: str | None = None) -> Any:  # noqa: PLR0911
         if data is None:
@@ -124,8 +116,7 @@ class TelemetrySanitizer:
             ):
                 return _REDACTED
 
-            cleaned = self._scrubber.clean(data)
-            return _SCRUBADUB_PLACEHOLDER_PATTERN.sub(_REDACTED, cleaned)
+            return _SENSITIVE_TOKEN_PATTERN.sub(_REDACTED, data)
 
         if isinstance(data, int | float | bool):
             return data
