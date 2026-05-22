@@ -59,6 +59,10 @@ _CORE_TOOLS: frozenset[str] = frozenset({
     # by default. The Lead calls this between specialist dispatches to
     # pick the highest-leverage next target.
     "list_pending_findings",
+    # iter-26.5 + 26.6 — dequeue & fire L1.5 auto-confirmations
+    # (SAST→DAST) and finding-triggered probe bundles. Idempotent;
+    # safe to call repeatedly between dispatches.
+    "drain_amplify_queue",
     # iter-26.11 — adaptive-probe escape hatch. Routes through the
     # POSTURE gate (stealth-aware) and is per-scan call-capped at 10.
     # For the unforeseen 30% of follow-ups not covered by the
@@ -374,6 +378,8 @@ _ORCHESTRATOR_ALLOWED_TOOLS: frozenset[str] = frozenset({
     "check_budget",
     # iter-26.2 / 26.7 — L1.5-aware ranked catalog.
     "list_pending_findings",
+    # iter-26.5 + 26.6 — auto-fire L1.5 confirmations + probe bundles.
+    "drain_amplify_queue",
     # iter-26.11 — adaptive-probe escape hatch (stealth-aware,
     # call-capped).
     "execute_adaptive_probe",
