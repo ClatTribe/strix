@@ -21,25 +21,55 @@ Subsequent waves will add:
   Wave 4 — finding_triggered_probes + execute_adaptive_probe
 """
 
+from strix.l15.corroborator import (
+    CorroboratorLedger,
+    corroborator_ledger,
+)
+from strix.l15.exploitability import (
+    ExploitabilityScore,
+    apply_exploitability_to_severity,
+    score_exploitability,
+)
 from strix.l15.fp_filter import (
     FpFilterDecision,
     pre_emission_fp_filter,
+)
+from strix.l15.posture import (
+    SecurityPosture,
+    get_posture,
+    probe_defensive_posture,
+    rate_limit_cap,
+    set_posture,
+    stealth_required,
 )
 from strix.l15.root_cause import (
     RootCauseLedger,
     root_cause_ledger,
 )
-from strix.l15.corroborator import (
-    CorroboratorLedger,
-    corroborator_ledger,
+from strix.l15.sast_to_dast import (
+    ConfirmationRequest,
+    plan_dast_confirmation,
 )
 
 
 __all__ = [
-    "FpFilterDecision",
-    "pre_emission_fp_filter",
-    "RootCauseLedger",
-    "root_cause_ledger",
+    # Wave 1 — prune
     "CorroboratorLedger",
+    "FpFilterDecision",
+    "RootCauseLedger",
     "corroborator_ledger",
+    "pre_emission_fp_filter",
+    "root_cause_ledger",
+    # Wave 2 — posture / exploitability / sast→dast
+    "ConfirmationRequest",
+    "ExploitabilityScore",
+    "SecurityPosture",
+    "apply_exploitability_to_severity",
+    "get_posture",
+    "plan_dast_confirmation",
+    "probe_defensive_posture",
+    "rate_limit_cap",
+    "score_exploitability",
+    "set_posture",
+    "stealth_required",
 ]

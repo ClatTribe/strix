@@ -1610,8 +1610,13 @@ class Tracer:
         try:
             from strix.l15 import (
                 corroborator_ledger,
+                plan_dast_confirmation,
                 pre_emission_fp_filter,
                 root_cause_ledger,
+                score_exploitability,
+            )
+            from strix.l15.exploitability import (
+                apply_exploitability_to_severity,
             )
             from strix.l15.fp_filter import demoted_severity
 
@@ -1683,6 +1688,37 @@ class Tracer:
                     return rc.target_id
                 # Parent record vanished (shouldn't happen) — fall
                 # through and persist as a new row.
+
+            # ---- 25.5 — composite exploitability ----
+            try:
+                expl = score_exploitability(report)
+                report["exploitability"] = expl.to_dict()
+                if expl.action != "leave":
+                    old_sev = report.get("severity") or "info"
+                    new_sev = apply_exploitability_to_severity(old_sev, expl)
+                    if new_sev != old_sev:
+                        report["severity"] = new_sev
+                        trace = report.get("reasoning_trace") or []
+                        if isinstance(trace, str):
+                            trace = [trace]
+                        report["reasoning_trace"] = list(trace) + [
+                            f"l1.5: exploitability {expl.action} "
+                            f"{old_sev} → {new_sev} ({expl.reason})",
+                        ]
+                        if expl.action == "demote":
+                            report["noise"] = True
+            except Exception as e:  # noqa: BLE001
+                logger.debug("exploitability scoring failed: %s", e)
+
+            # ---- 25.9 — SAST-sink → DAST-confirm planner ----
+            try:
+                cr = plan_dast_confirmation(report)
+                if cr is not None:
+                    pending = list(report.get("pending_confirmations") or [])
+                    pending.append(cr.to_dict())
+                    report["pending_confirmations"] = pending
+            except Exception as e:  # noqa: BLE001
+                logger.debug("DAST confirmation planning failed: %s", e)
 
             # ---- 25.3 — corroborator ----
             cb = corroborator_ledger.check(
