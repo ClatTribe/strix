@@ -96,6 +96,12 @@ from .bbot_runner import *             # noqa: F403  # scan_buckets_via_bbot
 from .hadolint_runner import *         # noqa: F403  # scan_dockerfile_hadolint
 from .dockle_runner import *           # noqa: F403  # scan_image_dockle
 from .checkdmarc_runner import *       # noqa: F403  # scan_dns_hygiene_checkdmarc
+# iter-22.6 — OSINT aggregator (commercial-feed-equivalent layer).
+# Wraps free OSS / zero-auth threat-intel feeds:
+#   * dnstwist — typosquat / brand-impersonation domain detection
+#   * abuse.ch ThreatFox — active-malware IoC API (zero auth)
+# Deferred follow-ups: ransomwatch, HIBP, GreyNoise, CertStream.
+from .osint_aggregator import *        # noqa: F403
 
 # SCA / supply-chain analysis (Phase 6) — registers
 # `scan_sca_lockfiles`.

@@ -156,7 +156,12 @@ RUN pipx install semgrep \
  # iter-22.4 — `checkdmarc` pure-Python DNS/email-hygiene
  # auditor. Wrapped by `scan_dns_hygiene_checkdmarc`. Audits
  # SPF / DKIM / DMARC / MX / CAA / MTA-STS records.
- && pipx install checkdmarc
+ && pipx install checkdmarc \
+ # iter-22.6 — `dnstwist` typosquat / brand-impersonation
+ # domain discovery. Wrapped by `scan_typosquats_dnstwist`.
+ # Commercial-feed-equivalent (Cyble / ZeroFOX brand protection
+ # tier) but free + zero-auth.
+ && pipx install dnstwist
 
 # =============================================================================
 # Stage: clone-builder
