@@ -1749,6 +1749,18 @@ class Tracer:
             except Exception as e:  # noqa: BLE001
                 logger.debug("DAST confirmation planning failed: %s", e)
 
+            # ---- 25.10 — finding-triggered probe bundles ----
+            try:
+                from strix.l15.probe_bundles import (
+                    plan_probe_bundle,
+                    record_planned_bundle,
+                )
+                steps = plan_probe_bundle(report)
+                if steps:
+                    record_planned_bundle(report, steps)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("plan_probe_bundle failed: %s", e)
+
             # ---- 25.3 — corroborator ----
             cb = corroborator_ledger.check(
                 report, proposed_finding_id=report_id,

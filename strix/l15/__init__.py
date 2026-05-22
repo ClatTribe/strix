@@ -51,6 +51,14 @@ from strix.l15.git_blame import (
     enrich_finding_with_blame,
     get_blame,
 )
+from strix.l15.probe_bundles import (
+    ProbeStep,
+    adaptive_call_log,
+    clear_adaptive_log,
+    execute_adaptive_probe,
+    plan_probe_bundle,
+    record_planned_bundle,
+)
 from strix.l15.hygiene import (
     HygieneLedger,
     HygieneScore,
@@ -99,4 +107,11 @@ __all__ = [
     "enrich_finding_with_blame",
     "get_blame",
     "hygiene_ledger",
+    # Wave 4 — amplify
+    "ProbeStep",
+    "adaptive_call_log",
+    "clear_adaptive_log",
+    "execute_adaptive_probe",
+    "plan_probe_bundle",
+    "record_planned_bundle",
 ]

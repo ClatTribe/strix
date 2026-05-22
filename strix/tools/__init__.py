@@ -132,6 +132,7 @@ from .sqlmap_runner import *           # noqa: F403  # scan_sqli_sqlmap
 #     and more thorough than the in-house bfs_crawl.
 #   inql                         : GraphQL schema mapping (introspection
 #     reachable case). Complements the in-house graphql_introspect.
+from .remediation_plan import *        # noqa: F403  # iter-25.12 — generate_remediation_plan
 from .trufflehog_runner import *       # noqa: F403  # verify_credentials_trufflehog
 from .feroxbuster_runner import *      # noqa: F403  # discover_paths_feroxbuster
 from .inql_runner import *             # noqa: F403  # map_graphql_inql
