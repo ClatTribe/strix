@@ -125,6 +125,16 @@ from .nmap_runner import *             # noqa: F403  # fingerprint_services_nmap
 # usual DBMS. Moves standard SQLi verification out of expensive L2
 # conversational specialist loops, sparing them for bypass logic.
 from .sqlmap_runner import *           # noqa: F403  # scan_sqli_sqlmap
+# iter-23.3 — three lower-priority L1 wraps:
+#   trufflehog --only-verified  : live credential verification (active API
+#     pings — drops FP from regex matches that aren't current).
+#   feroxbuster                  : Rust recursive path-discovery, faster
+#     and more thorough than the in-house bfs_crawl.
+#   inql                         : GraphQL schema mapping (introspection
+#     reachable case). Complements the in-house graphql_introspect.
+from .trufflehog_runner import *       # noqa: F403  # verify_credentials_trufflehog
+from .feroxbuster_runner import *      # noqa: F403  # discover_paths_feroxbuster
+from .inql_runner import *             # noqa: F403  # map_graphql_inql
 
 # SCA / supply-chain analysis (Phase 6) — registers
 # `scan_sca_lockfiles`.
