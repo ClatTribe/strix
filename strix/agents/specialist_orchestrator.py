@@ -389,7 +389,19 @@ _PROFILES: dict[str, SpecialistDispatchProfile] = {
             "  * Commit messages are conventional-commit shape: "
             "    `fix(<scope>): <one-line summary>`.\n"
             "  * Never claim a patch is verified without an "
-            "    `auto_verify_patch` or `verify_patch` PASSED result."
+            "    `auto_verify_patch` or `verify_patch` PASSED result.\n\n"
+            "iter-26.10 — when the finding carries a `git_blame` block "
+            "(L1.5-enriched code findings), include the original "
+            "author for review routing in the commit-message BODY "
+            "(not the title). Suggested body shape:\n"
+            "    fix(<scope>): <one-line summary>\n"
+            "\n"
+            "    The vulnerable code at <file>:<line> was introduced "
+            "    by <git_blame.author> on <git_blame.commit_date> "
+            "    (\"<git_blame.commit_subject>\"). Please CC them on "
+            "    review for context.\n"
+            "Skip the body block when git_blame is absent (DAST-only "
+            "findings, freshly-vendored deps, etc.)."
         ),
         allowed_tool_subset=[
             "propose_patch", "mark_patch_applied", "verify_patch",
@@ -695,6 +707,7 @@ def _build_system_prompt(
     *, profile: SpecialistDispatchProfile, scope_context: str | None,
     relevant_findings: list[dict[str, Any]] | None,
     skills_override: list[str] | None = None,
+    dispatch_target: str | None = None,
 ) -> str:
     """Compose the specialist's system prompt — fresh, scope-
     bound, no inherited chat history.
@@ -723,6 +736,21 @@ def _build_system_prompt(
         all skill injection.
     """
     parts = [profile.system_prompt_addendum]
+
+    # iter-26.8 — posture-aware stealth-payload guidance. When the
+    # dispatch target is on a SecurityPosture-flagged host (WAF
+    # detected), append per-category guidance so the specialist
+    # uses tamper-encoded, throttled, low-noise payloads instead of
+    # standard fan-out. No-op when posture is clean or absent.
+    if dispatch_target:
+        try:
+            from strix.l15.stealth_guidance import stealth_addendum_for
+
+            stealth = stealth_addendum_for(profile.category, dispatch_target)
+            if stealth:
+                parts.append(stealth)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("stealth guidance lookup failed: %s", e)
 
     # Phase 1C — auto-attach paired skill bodies. Best-effort: a
     # missing skill name / unreadable file is logged and skipped;
@@ -1025,6 +1053,7 @@ def dispatch_specialist(
         scope_context=scope_context,
         relevant_findings=relevant_findings,
         skills_override=skills_override,
+        dispatch_target=target,
     )
 
     # Clear any stale exit signal from a previous dispatch. Note:
@@ -1370,11 +1399,18 @@ def dispatch_specialist_batch(
 
     scope_context = _resolve_scope_context()
     relevant_findings = _resolve_relevant_findings(category)
+    # iter-26.8 — in the batch path, pick the first pending target's
+    # URL to drive stealth-guidance lookup. If multiple targets in
+    # the batch are on different hosts, posture guidance keys off
+    # the first; the per-payload throttle behaviour from the
+    # guidance applies broadly anyway.
+    _batch_target = pending[0].get("target") if pending else None
     system_prompt = _build_system_prompt(
         profile=profile,
         scope_context=scope_context,
         relevant_findings=relevant_findings,
         skills_override=skills_override,
+        dispatch_target=_batch_target,
     )
 
     # Initial user message — the lead's batch objective. Lists
