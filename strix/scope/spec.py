@@ -45,6 +45,43 @@ class AuthConfig:
 
 
 @dataclass(frozen=True)
+class CustomSecretRule:
+    """One user-defined regex rule injected into the gitleaks corpus
+    via `strix.scope.yml` `custom_signatures.secrets:`. iter-24.2."""
+    id: str
+    regex: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class CustomDockerfileRules:
+    """User-defined hadolint overrides via `strix.scope.yml`
+    `custom_signatures.dockerfile:`. iter-24.2.
+
+    `exclude_rules` becomes hadolint's `ignored:` list (e.g. DL3008
+    for unpinned apt). `severity_overrides` maps rule_id → one of
+    `error/warning/info/style/ignore`."""
+    exclude_rules: tuple[str, ...] = ()
+    severity_overrides: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class CustomSignatures:
+    """User-defined L1 detection extensions. iter-24.2."""
+    secrets: tuple[CustomSecretRule, ...] = ()
+    dockerfile: CustomDockerfileRules = field(
+        default_factory=CustomDockerfileRules,
+    )
+
+    def is_empty(self) -> bool:
+        return (
+            not self.secrets
+            and not self.dockerfile.exclude_rules
+            and not self.dockerfile.severity_overrides
+        )
+
+
+@dataclass(frozen=True)
 class EngagementScope:
     """Parsed `strix.scope.yml` — what the agent enforces every spawn.
 
@@ -61,6 +98,11 @@ class EngagementScope:
     auth: AuthConfig = field(default_factory=AuthConfig)
     acceptance_criteria: tuple[str, ...] = ()
     escalation_contact: str | None = None
+    # iter-24.2 — user-defined L1 detection extensions injected on top
+    # of the gitleaks/hadolint rule corpora before binary execution.
+    custom_signatures: CustomSignatures = field(
+        default_factory=CustomSignatures,
+    )
 
     def has_exclusions(self) -> bool:
         return bool(self.exclusion_paths or self.exclusion_hosts)

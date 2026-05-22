@@ -282,11 +282,17 @@ def _run_gitleaks(
     # iter-24.1 — prefer the lazily-updated upstream ruleset if
     # `update_gitleaks_rules` has populated the cache. Falls back to
     # gitleaks' built-in defaults if the cache is absent.
+    # iter-24.2 — if `gitleaks.toml.compiled` exists (the scope merged
+    # in custom_signatures.secrets), prefer that compiled variant.
     try:
         from strix.tools.rule_updates import cached_path
-        cached_cfg = cached_path("gitleaks.toml")
-        if cached_cfg.is_file() and cached_cfg.stat().st_size > 0:
-            cmd += ["--config", str(cached_cfg)]
+        compiled = cached_path("gitleaks.toml.compiled")
+        if compiled.is_file() and compiled.stat().st_size > 0:
+            cmd += ["--config", str(compiled)]
+        else:
+            cached_cfg = cached_path("gitleaks.toml")
+            if cached_cfg.is_file() and cached_cfg.stat().st_size > 0:
+                cmd += ["--config", str(cached_cfg)]
     except Exception:  # noqa: BLE001
         pass
 

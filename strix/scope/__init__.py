@@ -69,6 +69,9 @@ from strix.scope.loader import (
 from strix.scope.render import render_for_prompt
 from strix.scope.spec import (
     AuthConfig,
+    CustomDockerfileRules,
+    CustomSecretRule,
+    CustomSignatures,
     EngagementScope,
     OpSecLevel,
     ScopeTarget,
@@ -78,6 +81,9 @@ from strix.scope.spec import (
 
 __all__ = [
     "AuthConfig",
+    "CustomDockerfileRules",
+    "CustomSecretRule",
+    "CustomSignatures",
     "EngagementScope",
     "OpSecLevel",
     "ScopeTarget",

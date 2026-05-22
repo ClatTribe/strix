@@ -1037,6 +1037,27 @@ Examples:
         except ScopeValidationError as e:
             parser.error(str(e))
 
+        # iter-24.2 — compile custom_signatures into the cached rule
+        # files so gitleaks / hadolint subprocesses see the user's
+        # injections on their first invocation. Best-effort: a failed
+        # compile MUST NOT block the scan; the runners just keep
+        # using the base config.
+        if args.scope is not None and not args.scope.custom_signatures.is_empty():
+            try:
+                from strix.tools.rule_updates._compile import compile_all
+                compiled = compile_all(args.scope.custom_signatures)
+                if compiled:
+                    import logging as _logging
+                    _logging.getLogger(__name__).info(
+                        "iter-24.2: compiled custom_signatures into %s",
+                        {k: str(v) for k, v in compiled.items()},
+                    )
+            except Exception as e:  # noqa: BLE001
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "iter-24.2: custom_signatures compile skipped: %s", e,
+                )
+
     args.targets_info = []
     # engine-wishlist §1 — when --target-list is supplied, the
     # targets_info list is populated from the batch manifest
