@@ -102,6 +102,16 @@ from .checkdmarc_runner import *       # noqa: F403  # scan_dns_hygiene_checkdma
 #   * abuse.ch ThreatFox — active-malware IoC API (zero auth)
 # Deferred follow-ups: ransomwatch, HIBP, GreyNoise, CertStream.
 from .osint_aggregator import *        # noqa: F403
+# iter-22 final omnibus — OSS-wrap completions per
+# `docs/L1-optimization.md §6`:
+#   iter-22.1 katana  — Go JS-aware crawler (replaces bfs_crawl)
+#   iter-22.3 testssl — TLS posture audit (~50 checks vs ~5 in-house)
+#   iter-22.8 dalfox  — Go XSS scanner (100+ payloads + filter bypass)
+#   iter-22.6 HIBP    — domain credential-leak check
+from .katana_runner import *           # noqa: F403  # crawl_with_katana
+from .testssl_runner import *          # noqa: F403  # tls_audit_testssl
+from .dalfox_runner import *           # noqa: F403  # scan_xss_dalfox
+from .hibp_runner import *             # noqa: F403  # scan_credential_leaks_hibp
 
 # SCA / supply-chain analysis (Phase 6) — registers
 # `scan_sca_lockfiles`.
