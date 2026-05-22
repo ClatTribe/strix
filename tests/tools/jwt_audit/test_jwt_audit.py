@@ -541,3 +541,162 @@ def test_crack_hmac_secret_skips_non_hs256() -> None:
     token = f"{h}.{p}.{sig}"
     cracked = ja_module.crack_hmac_secret(token, deadline=1.0)
     assert cracked is None
+
+
+# ---------------------------------------------------------------------------
+# iter-22.2 — jwt_tool subprocess fallback (deeper HMAC brute)
+# ---------------------------------------------------------------------------
+
+
+def test_jwt_tool_fallback_disabled_when_binary_missing(
+    monkeypatch, tmp_path,
+) -> None:
+    """Returns None when jwt_tool binary isn't on PATH — never
+    raises, never leaks an exception to the caller."""
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda _b: None)
+    # Need a "would-have-cracked-this-with-a-bigger-dict" token —
+    # secret outside _HMAC_DICTIONARY.
+    token = _make_jwt(secret="obscure_secret_not_in_dict_abc123")
+    result = ja_module._crack_hmac_secret_via_jwt_tool(
+        token=token, timeout_s=1.0,
+    )
+    assert result is None
+
+
+def test_jwt_tool_fallback_disabled_when_wordlist_missing(
+    monkeypatch, tmp_path,
+) -> None:
+    """Binary present but wordlist file isn't reachable → return
+    None gracefully."""
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda _b: "/usr/bin/jwt_tool")
+    monkeypatch.setenv("STRIX_JWT_TOOL_WORDLIST", str(tmp_path / "doesntexist.txt"))
+    token = _make_jwt(secret="x")
+    result = ja_module._crack_hmac_secret_via_jwt_tool(
+        token=token, timeout_s=1.0,
+    )
+    assert result is None
+
+
+def test_jwt_tool_fallback_parses_correct_key_found_line(
+    monkeypatch, tmp_path,
+) -> None:
+    """When jwt_tool's stdout contains the canonical
+    `CORRECT key found: 'secret'` line, the wrapper extracts the
+    quoted value."""
+    import shutil
+    import subprocess
+
+    monkeypatch.setattr(shutil, "which", lambda _b: "/usr/bin/jwt_tool")
+    # Provide a wordlist that exists (content doesn't matter — mock)
+    wordlist = tmp_path / "wl.txt"
+    wordlist.write_text("password\nsecret\n")
+    monkeypatch.setenv("STRIX_JWT_TOOL_WORDLIST", str(wordlist))
+
+    fake = type("R", (), {})()
+    fake.returncode = 0
+    fake.stdout = (
+        "jwt_tool banner...\n"
+        "[*] Loaded keys file...\n"
+        "[+] CORRECT key found: 'leaked_secret_xyz'\n"
+    )
+    fake.stderr = ""
+    monkeypatch.setattr(
+        subprocess, "run", lambda *a, **k: fake,
+    )
+    token = _make_jwt(secret="anything")
+    result = ja_module._crack_hmac_secret_via_jwt_tool(
+        token=token, timeout_s=1.0,
+    )
+    assert result == "leaked_secret_xyz"
+
+
+def test_jwt_tool_fallback_parses_old_style_plus_line(
+    monkeypatch, tmp_path,
+) -> None:
+    """Older jwt_tool versions print `[+] <secret>` on success."""
+    import shutil
+    import subprocess
+
+    monkeypatch.setattr(shutil, "which", lambda _b: "/usr/bin/jwt_tool")
+    wordlist = tmp_path / "wl.txt"
+    wordlist.write_text("a\nb\n")
+    monkeypatch.setenv("STRIX_JWT_TOOL_WORDLIST", str(wordlist))
+
+    fake = type("R", (), {})()
+    fake.returncode = 0
+    fake.stdout = "[+] correctpassword\n"
+    fake.stderr = ""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: fake)
+    token = _make_jwt(secret="anything")
+    result = ja_module._crack_hmac_secret_via_jwt_tool(
+        token=token, timeout_s=1.0,
+    )
+    assert result == "correctpassword"
+
+
+def test_jwt_tool_fallback_returns_none_on_subprocess_timeout(
+    monkeypatch, tmp_path,
+) -> None:
+    """Subprocess timeout must NOT propagate — return None."""
+    import shutil
+    import subprocess
+
+    monkeypatch.setattr(shutil, "which", lambda _b: "/usr/bin/jwt_tool")
+    wordlist = tmp_path / "wl.txt"
+    wordlist.write_text("x\n")
+    monkeypatch.setenv("STRIX_JWT_TOOL_WORDLIST", str(wordlist))
+
+    def _boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="jwt_tool", timeout=1)
+    monkeypatch.setattr(subprocess, "run", _boom)
+
+    token = _make_jwt(secret="x")
+    result = ja_module._crack_hmac_secret_via_jwt_tool(
+        token=token, timeout_s=1.0,
+    )
+    assert result is None
+
+
+def test_jwt_tool_fallback_returns_none_on_no_match(
+    monkeypatch, tmp_path,
+) -> None:
+    """jwt_tool output without success marker → None."""
+    import shutil
+    import subprocess
+
+    monkeypatch.setattr(shutil, "which", lambda _b: "/usr/bin/jwt_tool")
+    wordlist = tmp_path / "wl.txt"
+    wordlist.write_text("a\n")
+    monkeypatch.setenv("STRIX_JWT_TOOL_WORDLIST", str(wordlist))
+
+    fake = type("R", (), {})()
+    fake.returncode = 0
+    fake.stdout = "Tested 1000 keys. No match found.\n"
+    fake.stderr = ""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: fake)
+
+    token = _make_jwt(secret="x")
+    result = ja_module._crack_hmac_secret_via_jwt_tool(
+        token=token, timeout_s=1.0,
+    )
+    assert result is None
+
+
+def test_crack_hmac_secret_falls_through_to_jwt_tool_when_dict_misses(
+    monkeypatch, tmp_path,
+) -> None:
+    """End-to-end: in-house dict misses → wrapper attempts
+    jwt_tool fallback. We assert the fallback was invoked by
+    monkeypatching it to return a known secret and observing
+    that secret in the result."""
+    monkeypatch.setattr(
+        ja_module,
+        "_crack_hmac_secret_via_jwt_tool",
+        lambda token, timeout_s: "fallback_caught_this",
+    )
+    # secret NOT in _HMAC_DICTIONARY so the in-house brute misses
+    token = _make_jwt(secret="genuinely_obscure_secret_xyz_42")
+    result = ja_module.crack_hmac_secret(token, deadline=5.0)
+    assert result == "fallback_caught_this"
