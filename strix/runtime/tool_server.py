@@ -24,8 +24,14 @@ parser.add_argument("--port", type=int, required=True, help="Port to bind to")
 parser.add_argument(
     "--timeout",
     type=int,
-    default=120,
-    help="Hard timeout in seconds for each request execution (default: 120)",
+    default=300,
+    help=(
+        "Hard timeout in seconds for each request execution "
+        "(default: 300). iter-27.5 raised from 120s to fit "
+        "trivy/sqlmap/nuclei/dalfox heavy scans; nginx-vuln "
+        "container_image bench fixture had been timing out at 120s "
+        "on every run."
+    ),
 )
 
 args = parser.parse_args()

@@ -198,7 +198,15 @@ echo "Starting tool server..."
 cd /app
 export PYTHONPATH=/app
 export STRIX_SANDBOX_MODE=true
-export TOOL_SERVER_TIMEOUT="${STRIX_SANDBOX_EXECUTION_TIMEOUT:-120}"
+# iter-27.5: bump default from 120s → 300s. The 120s default dated
+# from when L1 tools were lightweight HTTP probes; modern tools
+# (trivy with DB init, sqlmap --batch --level 3, full nuclei template
+# fan-out, dalfox payload set) routinely need 3-5 minutes. nginx-vuln
+# container_image fixture timed out at 120s on every bench run
+# despite the underlying trivy scan being well under its own 600s
+# tool-side cap. Operators can override via
+# STRIX_SANDBOX_EXECUTION_TIMEOUT env var.
+export TOOL_SERVER_TIMEOUT="${STRIX_SANDBOX_EXECUTION_TIMEOUT:-300}"
 TOOL_SERVER_LOG="/tmp/tool_server.log"
 
 sudo -E -u pentester \
