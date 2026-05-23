@@ -220,6 +220,27 @@ class StrixAgent(BaseAgent):
         # from running the OSS layer first.
         #
         # Kill switch: `STRIX_OSS_PREPASS_DISABLED=1` skips this entirely.
+        #
+        # iter-27.11 (2026-05-24): initialize the sandbox BEFORE the
+        # prepass runs. Tools with `sandbox_execution=True` —
+        # scan_container_image is the obvious one, but also scan_sast
+        # / scan_sca_lockfiles / scan_iac / secrets_scan when invoked
+        # through the sandbox tool server — need `state.sandbox_id`
+        # to be populated. Previously the prepass ran first with
+        # `state.sandbox_id=None`, every sandbox-bound L1 tool
+        # error'd with `ValueError: Agent state with a valid
+        # sandbox_id is required for sandbox execution.`, and the
+        # downstream LLM saw zero L1 findings on container_image
+        # targets. The agent_loop's own sandbox init is idempotent
+        # so the post-prepass call below is a no-op.
+        try:
+            await self._initialize_sandbox_and_state(task_description)
+        except Exception as _sandbox_init_e:  # noqa: BLE001
+            import logging as _lg_si
+            _lg_si.getLogger(__name__).warning(
+                "Pre-prepass sandbox init failed (will retry inside "
+                "agent_loop): %s", _sandbox_init_e,
+            )
         try:
             from strix.agents.lead_agent.anchor_prepass import (  # noqa: PLC0415
                 run_oss_anchor_prepass,
