@@ -1543,24 +1543,33 @@ def scan_container_image(
         )
         if report_id:
             emitted_count += 1
-            drafts.append(FindingDraft(
-                title=f"{cve_id}: {pkg_name}@{installed_version}",
-                severity=adjusted_sev,
-                cwe=(vuln.get("CweIDs") or [None])[0],
-                endpoint=image_ref,
-                category="sca",
-                verification_status="pattern_match",
-                confidence=0.92,
-                description=(
-                    f"{cve_id} affects {pkg_name}@{installed_version} "
-                    f"in {image_ref}"
-                ),
-            ))
-            evidence.append(
-                f"{cve_id} → {pkg_name}@{installed_version} "
-                f"(severity={adjusted_sev}, kev={kev}, "
-                f"epss={epss if epss is not None else 'n/a'})"
-            )
+        # iter-27.8: drafts populate regardless of tracer outcome.
+        # When this tool runs inside the sandbox tool-server,
+        # get_global_tracer() returns None (the tool-server doesn't
+        # initialize one), so _emit_image_finding returns None and
+        # the previous gating dropped EVERY draft. Bench saw 0/4 on
+        # nginx-vuln despite trivy finding 189 vulns. SpecialistResult
+        # contract: drafts are the return-shape payload; tracer
+        # emission is bookkeeping. scan_sast already follows this
+        # pattern — bringing scan_container_image in line.
+        drafts.append(FindingDraft(
+            title=f"{cve_id}: {pkg_name}@{installed_version}",
+            severity=adjusted_sev,
+            cwe=(vuln.get("CweIDs") or [None])[0],
+            endpoint=image_ref,
+            category="sca",
+            verification_status="pattern_match",
+            confidence=0.92,
+            description=(
+                f"{cve_id} affects {pkg_name}@{installed_version} "
+                f"in {image_ref}"
+            ),
+        ))
+        evidence.append(
+            f"{cve_id} → {pkg_name}@{installed_version} "
+            f"(severity={adjusted_sev}, kev={kev}, "
+            f"epss={epss if epss is not None else 'n/a'})"
+        )
 
     # Phase 3: emit one finding per Dockerfile / docker-compose /
     # Kubernetes misconfiguration. Trivy's `Status=FAIL` filter is
@@ -1591,25 +1600,26 @@ def scan_container_image(
         )
         if report_id:
             misconfig_emitted += 1
-            drafts.append(FindingDraft(
-                title=(
-                    f"{rule_id}: {str(mc.get('Title') or '')[:60]}"
-                ),
-                severity=trivy_sev,
-                cwe=None,
-                endpoint=image_ref,
-                category="misconfiguration",
-                verification_status="pattern_match",
-                confidence=0.92,
-                description=(
-                    f"Misconfig {rule_id} in {target_layer} of "
-                    f"{image_ref}"
-                ),
-            ))
-            evidence.append(
-                f"misconfig: {rule_id} ({target_layer}) "
-                f"severity={trivy_sev}"
-            )
+        # iter-27.8: drafts populate regardless of tracer outcome.
+        drafts.append(FindingDraft(
+            title=(
+                f"{rule_id}: {str(mc.get('Title') or '')[:60]}"
+            ),
+            severity=trivy_sev,
+            cwe=None,
+            endpoint=image_ref,
+            category="misconfiguration",
+            verification_status="pattern_match",
+            confidence=0.92,
+            description=(
+                f"Misconfig {rule_id} in {target_layer} of "
+                f"{image_ref}"
+            ),
+        ))
+        evidence.append(
+            f"misconfig: {rule_id} ({target_layer}) "
+            f"severity={trivy_sev}"
+        )
 
     # Phase 4: emit one finding per secret-leak detection. Dedup by
     # (rule_id, target_path, start_line) so the same leak isn't
@@ -1641,27 +1651,28 @@ def scan_container_image(
         )
         if report_id:
             secret_emitted += 1
-            category_short = str(s.get("Category") or "secret")
-            drafts.append(FindingDraft(
-                title=(
-                    f"Leaked {category_short} ({rule_id}) at "
-                    f"{target_path}"
-                ),
-                severity=trivy_sev,
-                cwe="CWE-798",
-                endpoint=image_ref,
-                category="secrets",
-                verification_status="pattern_match",
-                confidence=0.92,
-                description=(
-                    f"{rule_id} secret detected at "
-                    f"{target_path}:{start_line} in {image_ref}"
-                ),
-            ))
-            evidence.append(
-                f"secret: {rule_id} at {target_path}:{start_line} "
-                f"(category={category_short}, severity={trivy_sev})"
-            )
+        # iter-27.8: drafts populate regardless of tracer outcome.
+        category_short = str(s.get("Category") or "secret")
+        drafts.append(FindingDraft(
+            title=(
+                f"Leaked {category_short} ({rule_id}) at "
+                f"{target_path}"
+            ),
+            severity=trivy_sev,
+            cwe="CWE-798",
+            endpoint=image_ref,
+            category="secrets",
+            verification_status="pattern_match",
+            confidence=0.92,
+            description=(
+                f"{rule_id} secret detected at "
+                f"{target_path}:{start_line} in {image_ref}"
+            ),
+        ))
+        evidence.append(
+            f"secret: {rule_id} at {target_path}:{start_line} "
+            f"(category={category_short}, severity={trivy_sev})"
+        )
 
     # ---- Phase 5: cosign signature + SLSA provenance ----
     # Optional layer — runs when cosign is installed AND not
@@ -1694,19 +1705,20 @@ def scan_container_image(
             )
             if rid:
                 sig_emitted += 1
-                drafts.append(FindingDraft(
-                    title=f"Unsigned container image: {image_ref}",
-                    severity=severity,
-                    cwe="CWE-345",
-                    endpoint=image_ref,
-                    category="image_signing",
-                    verification_status="verified",
-                    confidence=0.95,
-                    description=(
-                        f"cosign verify failed on {image_ref}: "
-                        f"{sig_err or '(no detail)'}"
-                    ),
-                ))
+            # iter-27.8: drafts populate regardless of tracer outcome.
+            drafts.append(FindingDraft(
+                title=f"Unsigned container image: {image_ref}",
+                severity=severity,
+                cwe="CWE-345",
+                endpoint=image_ref,
+                category="image_signing",
+                verification_status="verified",
+                confidence=0.95,
+                description=(
+                    f"cosign verify failed on {image_ref}: "
+                    f"{sig_err or '(no detail)'}"
+                ),
+            ))
             evidence.append(
                 f"cosign verify: FAIL severity={severity} "
                 f"err={sig_err or '(none)'}"
@@ -1729,22 +1741,23 @@ def scan_container_image(
             )
             if rid:
                 slsa_emitted += 1
-                drafts.append(FindingDraft(
-                    title=(
-                        f"Missing SLSA provenance attestation: "
-                        f"{image_ref}"
-                    ),
-                    severity="medium",
-                    cwe="CWE-345",
-                    endpoint=image_ref,
-                    category="image_signing",
-                    verification_status="verified",
-                    confidence=0.92,
-                    description=(
-                        f"cosign verify-attestation failed on "
-                        f"{image_ref}: {slsa_err or '(no detail)'}"
-                    ),
-                ))
+            # iter-27.8: drafts populate regardless of tracer outcome.
+            drafts.append(FindingDraft(
+                title=(
+                    f"Missing SLSA provenance attestation: "
+                    f"{image_ref}"
+                ),
+                severity="medium",
+                cwe="CWE-345",
+                endpoint=image_ref,
+                category="image_signing",
+                verification_status="verified",
+                confidence=0.92,
+                description=(
+                    f"cosign verify-attestation failed on "
+                    f"{image_ref}: {slsa_err or '(no detail)'}"
+                ),
+            ))
             evidence.append(
                 f"cosign verify-attestation slsaprovenance: FAIL "
                 f"err={slsa_err or '(none)'}"
@@ -1764,24 +1777,26 @@ def scan_container_image(
             rid = _emit_missing_sbom_attestation_finding(
                 image_ref=image_ref, error=sbom_err,
             )
-            if rid:
-                drafts.append(FindingDraft(
-                    title=(
-                        f"Missing CycloneDX SBOM attestation: "
-                        f"{image_ref}"
-                    ),
-                    severity="info",
-                    cwe="CWE-1357",
-                    endpoint=image_ref,
-                    category="image_signing",
-                    verification_status="verified",
-                    confidence=0.9,
-                    description=(
-                        f"cosign verify-attestation (cyclonedx) "
-                        f"failed on {image_ref}: "
-                        f"{sbom_err or '(no detail)'}"
-                    ),
-                ))
+            # iter-27.8: drafts populate regardless of tracer outcome.
+            # (No emitted counter here — kept symmetry with original.)
+            _ = rid
+            drafts.append(FindingDraft(
+                title=(
+                    f"Missing CycloneDX SBOM attestation: "
+                    f"{image_ref}"
+                ),
+                severity="info",
+                cwe="CWE-1357",
+                endpoint=image_ref,
+                category="image_signing",
+                verification_status="verified",
+                confidence=0.9,
+                description=(
+                    f"cosign verify-attestation (cyclonedx) "
+                    f"failed on {image_ref}: "
+                    f"{sbom_err or '(no detail)'}"
+                ),
+            ))
             evidence.append(
                 f"cosign verify-attestation cyclonedx: FAIL "
                 f"err={sbom_err or '(none)'}"
@@ -1801,24 +1816,25 @@ def scan_container_image(
             rid = _emit_missing_vex_attestation_finding(
                 image_ref=image_ref, error=vex_err,
             )
-            if rid:
-                drafts.append(FindingDraft(
-                    title=(
-                        f"Missing VEX (vulnerability exploitability) "
-                        f"attestation: {image_ref}"
-                    ),
-                    severity="info",
-                    cwe="CWE-1357",
-                    endpoint=image_ref,
-                    category="image_signing",
-                    verification_status="verified",
-                    confidence=0.9,
-                    description=(
-                        f"cosign verify-attestation (vuln/VEX) "
-                        f"failed on {image_ref}: "
-                        f"{vex_err or '(no detail)'}"
-                    ),
-                ))
+            # iter-27.8: drafts populate regardless of tracer outcome.
+            _ = rid
+            drafts.append(FindingDraft(
+                title=(
+                    f"Missing VEX (vulnerability exploitability) "
+                    f"attestation: {image_ref}"
+                ),
+                severity="info",
+                cwe="CWE-1357",
+                endpoint=image_ref,
+                category="image_signing",
+                verification_status="verified",
+                confidence=0.9,
+                description=(
+                    f"cosign verify-attestation (vuln/VEX) "
+                    f"failed on {image_ref}: "
+                    f"{vex_err or '(no detail)'}"
+                ),
+            ))
             evidence.append(
                 f"cosign verify-attestation vuln (VEX): FAIL "
                 f"err={vex_err or '(none)'}"

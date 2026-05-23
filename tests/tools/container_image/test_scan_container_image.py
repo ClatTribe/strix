@@ -371,6 +371,42 @@ def test_same_cve_pkg_dedup_within_image(monkeypatch) -> None:
     assert cve_ids.count("CVE-2023-12345") == 1
 
 
+def test_drafts_populate_when_tracer_unavailable(monkeypatch) -> None:
+    """iter-27.8 — the drafts list (the SpecialistResult return-shape
+    payload) must be populated regardless of whether the tracer-side
+    emit succeeds.
+
+    When this tool runs inside the sandbox tool-server,
+    `get_global_tracer()` returns None (the tool-server doesn't
+    init one), so `_emit_image_finding` returns None. The old
+    code gated draft creation behind `if report_id:`, which meant
+    the SpecialistResult shipped back with `findings=[]` despite
+    trivy finding hundreds of CVEs. Caught 2026-05-24 during the
+    iter-27.6/27.7 nginx-vuln re-bench: 0/4 recall despite 189
+    raw trivy hits.
+
+    scan_sast already follows the "draft always, tracer maybe"
+    pattern — this regression-guards parity.
+    """
+    import strix.telemetry.tracer as tracer_mod
+    monkeypatch.setattr(tracer_mod, "get_global_tracer", lambda: None)
+
+    _mock_trivy_run(monkeypatch)
+    result = scan_container_image(image_ref="nginx:1.25")
+
+    # The registry-level wrapper coerces SpecialistResult to a dict
+    # before returning. Access either way.
+    status = result["status"] if isinstance(result, dict) else result.status
+    findings = (
+        result["findings"] if isinstance(result, dict) else result.findings
+    )
+    assert status == "ok"
+    assert len(findings) > 0, (
+        "drafts must populate even when tracer is unavailable "
+        "(scan_sast already does this — see iter-27.8 fix)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Pure-function tests — no subprocess
 # ---------------------------------------------------------------------------
