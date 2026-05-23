@@ -42,7 +42,14 @@ class Config:
     # Runtime Configuration
     strix_image = "ghcr.io/usestrix/strix-sandbox:0.1.13"
     strix_runtime_backend = "docker"
-    strix_sandbox_execution_timeout = "120"
+    # iter-27.5 raised this from 120s to 300s (entrypoint + tool_server).
+    # iter-27.9: also raise the host-side Config default. The bench
+    # harness and any host process that imports strix.tools.executor
+    # reads `Config.get("strix_sandbox_execution_timeout")` at import
+    # time. Without this, the client-side request timeout stays at
+    # 120s and the bench reports `Tool timed out after 120s` even
+    # though the sandbox-side tool server itself is set to 300s.
+    strix_sandbox_execution_timeout = "300"
     strix_sandbox_connect_timeout = "10"
 
     # Telemetry
