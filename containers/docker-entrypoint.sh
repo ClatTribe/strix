@@ -47,22 +47,40 @@ if [ "${STRIX_SKIP_CACHE_INIT:-0}" != "1" ]; then
       echo "WARNING: nuclei template fetch failed; signature scans will be empty."
   fi
 
-  TRIVY_DB_PATH="${HOME}/.cache/trivy/db/trivy.db"
-  if [ ! -f "$TRIVY_DB_PATH" ]; then
-    echo "Lazy-init: fetching trivy vuln DB (one-time, ~10s)..."
-    trivy image --download-db-only --quiet 2>&1 | tail -3 || \
+  # iter-27.10: pre-fetch trivy DBs AS the pentester user directly,
+  # not as root with a follow-up `cp -rn`. trivy's bolt-db files
+  # contain page-aligned mmapable structures that the cp wasn't
+  # preserving — the iter-27.8 nginx-vuln re-bench tripped a
+  # `panic: assertion failed: Page expected to be: 269803, but
+  # self identifies as 0` when the tool server (running as pentester)
+  # tried to read root's cp'd DB. Running the fetch as pentester
+  # writes the DB directly to the right location in the right format.
+  PENTESTER_HAS_TRIVY_DB=0
+  if id pentester >/dev/null 2>&1; then
+    sudo -u pentester mkdir -p /home/pentester/.cache/trivy 2>/dev/null || true
+    if [ -f /home/pentester/.cache/trivy/db/trivy.db ]; then
+      PENTESTER_HAS_TRIVY_DB=1
+    fi
+  fi
+  if [ "$PENTESTER_HAS_TRIVY_DB" = "0" ] && id pentester >/dev/null 2>&1; then
+    echo "Lazy-init: fetching trivy vuln DB as pentester (one-time, ~10s)..."
+    sudo -E -u pentester trivy image --download-db-only --quiet 2>&1 | tail -3 || \
       echo "WARNING: trivy DB fetch failed; container CVE scans may be slow or empty."
   fi
 
-  # iter-27.6: pre-fetch trivy Java DB. Without this, the first
-  # scan against ANY image (even non-JVM ones like nginx) triggers
-  # a JIT Java DB pull mid-pipeline; if interrupted by proxy
-  # truncation the whole scan aborts. `--skip-java-db-update` is
-  # not a workaround because trivy 0.70 refuses it on first run.
-  TRIVY_JAVA_DB_DIR="${HOME}/.cache/trivy/java-db"
-  if [ ! -d "$TRIVY_JAVA_DB_DIR" ] || [ -z "$(ls -A "$TRIVY_JAVA_DB_DIR" 2>/dev/null)" ]; then
-    echo "Lazy-init: fetching trivy Java DB (one-time, ~30s)..."
-    trivy image --download-java-db-only --quiet 2>&1 | tail -3 || \
+  # iter-27.6 + 27.10: pre-fetch trivy Java DB as pentester too.
+  # Without this, the first scan against ANY image (even non-JVM
+  # ones like nginx) triggers a JIT Java DB pull mid-pipeline; if
+  # interrupted by proxy truncation the whole scan aborts.
+  PENTESTER_HAS_JAVA_DB=0
+  if id pentester >/dev/null 2>&1 && \
+     [ -d /home/pentester/.cache/trivy/java-db ] && \
+     [ -n "$(ls -A /home/pentester/.cache/trivy/java-db 2>/dev/null)" ]; then
+    PENTESTER_HAS_JAVA_DB=1
+  fi
+  if [ "$PENTESTER_HAS_JAVA_DB" = "0" ] && id pentester >/dev/null 2>&1; then
+    echo "Lazy-init: fetching trivy Java DB as pentester (one-time, ~30s)..."
+    sudo -E -u pentester trivy image --download-java-db-only --quiet 2>&1 | tail -3 || \
       echo "WARNING: trivy Java DB fetch failed; JAR-bearing CVE scans may abort."
   fi
 
@@ -71,15 +89,6 @@ if [ "${STRIX_SKIP_CACHE_INIT:-0}" != "1" ]; then
     echo "Lazy-init: fetching grype vuln DB (one-time, ~10s)..."
     grype db update 2>&1 | tail -3 || \
       echo "WARNING: grype DB fetch failed; reachability-filtered SCA may be incomplete."
-  fi
-
-  # Mirror the trivy cache to the pentester user — the tool server
-  # runs `sudo -E -u pentester` so it reads from /home/pentester
-  # not /root. Without this, every first scan re-pays the DB fetch.
-  if id pentester >/dev/null 2>&1; then
-    sudo -u pentester mkdir -p /home/pentester/.cache/trivy 2>/dev/null || true
-    sudo cp -rn "${HOME}/.cache/trivy/." /home/pentester/.cache/trivy/ 2>/dev/null || true
-    sudo chown -R pentester:pentester /home/pentester/.cache/trivy 2>/dev/null || true
   fi
 fi
 
