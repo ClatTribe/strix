@@ -29,6 +29,17 @@ fi
 # ---------------------------------------------------------------------------
 
 if [ "${STRIX_SKIP_CACHE_INIT:-0}" != "1" ]; then
+  # iter-27.6: trivy + grype + syft pull DBs from OCI registries
+  # (mirror.gcr.io / ghcr.io). Caido (the egress MITM proxy on
+  # 48080) intermittently truncates OCI artifacts because it
+  # rewrites response bodies. Bypass it for those hosts only — we
+  # still want Caido in the loop for real test traffic (HTTP probes
+  # against the SUT). Without this, the nginx-vuln bench aborted
+  # with `unexpected EOF` mid-Java-DB-download.
+  NO_PROXY_OCI="localhost,127.0.0.1,mirror.gcr.io,ghcr.io,docker.io,registry-1.docker.io,index.docker.io,public.ecr.aws,quay.io"
+  export NO_PROXY="$NO_PROXY_OCI"
+  export no_proxy="$NO_PROXY_OCI"
+
   NUCLEI_TEMPLATES_DIR="${HOME}/nuclei-templates"
   if [ ! -d "$NUCLEI_TEMPLATES_DIR" ] || [ -z "$(ls -A "$NUCLEI_TEMPLATES_DIR" 2>/dev/null)" ]; then
     echo "Lazy-init: fetching nuclei templates (one-time, ~30s)..."
@@ -43,11 +54,32 @@ if [ "${STRIX_SKIP_CACHE_INIT:-0}" != "1" ]; then
       echo "WARNING: trivy DB fetch failed; container CVE scans may be slow or empty."
   fi
 
+  # iter-27.6: pre-fetch trivy Java DB. Without this, the first
+  # scan against ANY image (even non-JVM ones like nginx) triggers
+  # a JIT Java DB pull mid-pipeline; if interrupted by proxy
+  # truncation the whole scan aborts. `--skip-java-db-update` is
+  # not a workaround because trivy 0.70 refuses it on first run.
+  TRIVY_JAVA_DB_DIR="${HOME}/.cache/trivy/java-db"
+  if [ ! -d "$TRIVY_JAVA_DB_DIR" ] || [ -z "$(ls -A "$TRIVY_JAVA_DB_DIR" 2>/dev/null)" ]; then
+    echo "Lazy-init: fetching trivy Java DB (one-time, ~30s)..."
+    trivy image --download-java-db-only --quiet 2>&1 | tail -3 || \
+      echo "WARNING: trivy Java DB fetch failed; JAR-bearing CVE scans may abort."
+  fi
+
   GRYPE_DB_DIR="${HOME}/.cache/grype/db"
   if [ ! -d "$GRYPE_DB_DIR" ] || [ -z "$(ls -A "$GRYPE_DB_DIR" 2>/dev/null)" ]; then
     echo "Lazy-init: fetching grype vuln DB (one-time, ~10s)..."
     grype db update 2>&1 | tail -3 || \
       echo "WARNING: grype DB fetch failed; reachability-filtered SCA may be incomplete."
+  fi
+
+  # Mirror the trivy cache to the pentester user — the tool server
+  # runs `sudo -E -u pentester` so it reads from /home/pentester
+  # not /root. Without this, every first scan re-pays the DB fetch.
+  if id pentester >/dev/null 2>&1; then
+    sudo -u pentester mkdir -p /home/pentester/.cache/trivy 2>/dev/null || true
+    sudo cp -rn "${HOME}/.cache/trivy/." /home/pentester/.cache/trivy/ 2>/dev/null || true
+    sudo chown -R pentester:pentester /home/pentester/.cache/trivy 2>/dev/null || true
   fi
 fi
 
@@ -155,12 +187,21 @@ echo "✅ Caido project selected successfully."
 
 echo "Configuring system-wide proxy settings..."
 
+# iter-27.6: NO_PROXY for OCI registries so trivy/grype/syft/dockle
+# can pull their vuln DBs without going through Caido (which
+# truncates OCI artifact responses). The list must match the one in
+# the cache-init block above, since the tool server inherits this
+# env (via sudo -E) and re-runs DB fetches when caches expire.
+NO_PROXY_OCI="localhost,127.0.0.1,mirror.gcr.io,ghcr.io,docker.io,registry-1.docker.io,index.docker.io,public.ecr.aws,quay.io"
+
 cat << EOF | sudo tee /etc/profile.d/proxy.sh
 export http_proxy=http://127.0.0.1:${CAIDO_PORT}
 export https_proxy=http://127.0.0.1:${CAIDO_PORT}
 export HTTP_PROXY=http://127.0.0.1:${CAIDO_PORT}
 export HTTPS_PROXY=http://127.0.0.1:${CAIDO_PORT}
 export ALL_PROXY=http://127.0.0.1:${CAIDO_PORT}
+export NO_PROXY=${NO_PROXY_OCI}
+export no_proxy=${NO_PROXY_OCI}
 export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 export CAIDO_API_TOKEN=${TOKEN}
@@ -172,6 +213,8 @@ https_proxy=http://127.0.0.1:${CAIDO_PORT}
 HTTP_PROXY=http://127.0.0.1:${CAIDO_PORT}
 HTTPS_PROXY=http://127.0.0.1:${CAIDO_PORT}
 ALL_PROXY=http://127.0.0.1:${CAIDO_PORT}
+NO_PROXY=${NO_PROXY_OCI}
+no_proxy=${NO_PROXY_OCI}
 CAIDO_API_TOKEN=${TOKEN}
 EOF
 

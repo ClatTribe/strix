@@ -195,6 +195,16 @@ def _run_trivy_scan(
     refreshes once (~30s) and proceeds. Operators still run
     `trivy --download-db-only` in their image build for warm-cache
     behaviour; the flag was a footgun, not a hermetic guarantee.
+
+    iter-27.6 (2026-05-23): the nginx-vuln bench fail-fast'd with
+    `FATAL ... Unable to initialize the Java DB: Java DB update
+    failed: OCI artifact error: failed to download Java DB ...
+    unexpected EOF`. Inside the strix-sandbox the egress proxy
+    (Caido on 127.0.0.1:48080) MITMs OCI pulls and intermittently
+    truncates the trivy-java-db artifact. The fix is sandbox-side
+    — NO_PROXY for OCI registries + lazy-init Java DB as the
+    tool-server user — see containers/docker-entrypoint.sh. The
+    python-side trivy invocation stays unchanged.
     """
     cmd = [
         _TRIVY_BIN, "image",

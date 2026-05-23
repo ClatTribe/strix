@@ -318,6 +318,39 @@ def test_trivy_command_does_not_set_skip_db_update(monkeypatch) -> None:
     assert "--skip-db-update" not in cmd
 
 
+def test_docker_entrypoint_bypasses_oci_proxy(monkeypatch) -> None:
+    """iter-27.6 — the nginx-vuln bench failed with
+    `FATAL ... Unable to initialize the Java DB ... unexpected EOF`
+    because trivy tried to fetch trivy-java-db from mirror.gcr.io
+    through the sandbox's Caido proxy, which truncates OCI
+    artifacts. trivy 0.70.0 doesn't have `--disable-analyzers`,
+    and `--skip-java-db-update` fails on first run. The fix:
+    sandbox-side NO_PROXY for OCI registries so trivy / grype /
+    syft / dockle can bypass Caido entirely when pulling vuln
+    DBs.
+
+    Regression-guards the entrypoint, since the python-side
+    trivy invocation has no knobs that fix this on its own.
+    """
+    from pathlib import Path
+    src = (
+        Path(__file__).resolve().parents[3]
+        / "containers" / "docker-entrypoint.sh"
+    )
+    text = src.read_text()
+    # NO_PROXY must include at least the OCI mirrors trivy and grype
+    # pull from. Without these entries Caido MITMs the OCI artifacts
+    # and truncates them (the original nginx-vuln 0/4 root cause).
+    assert "NO_PROXY" in text, (
+        "docker-entrypoint.sh must export NO_PROXY for OCI registries"
+    )
+    for host in ("mirror.gcr.io", "ghcr.io"):
+        assert host in text, (
+            f"NO_PROXY must include OCI mirror {host!r} so trivy/grype "
+            f"DB fetches don't go through the Caido MITM proxy"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Dedup
 # ---------------------------------------------------------------------------
