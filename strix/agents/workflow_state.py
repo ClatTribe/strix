@@ -386,6 +386,32 @@ def advance_phase(
         record_progress("phase.transitioned", f"{current}->{target}")
     except Exception:  # noqa: BLE001
         pass
+    # iter-27.2 — mid-scan correlate at phase boundary. The existing
+    # `correlate_findings` tool runs only at scan-end; new attack
+    # chains discovered after a phase advance go unused by the Lead.
+    # This hook re-runs the correlator and severity-bumps parents of
+    # NEW chains so L2's next `list_pending_findings()` sees them
+    # ranked higher. Recall-safe: any error logs and the phase
+    # transition still succeeds.
+    try:
+        from strix.agents.lead_agent.mid_scan_correlate import (
+            correlate_at_phase_boundary,
+        )
+        result = correlate_at_phase_boundary(str(current), str(target))
+        if result.new_chains > 0:
+            logger.info(
+                "mid-scan correlate: %d new chains, %d findings promoted "
+                "at %s → %s boundary",
+                result.new_chains, result.findings_promoted,
+                current, target,
+            )
+        if result.error:
+            logger.debug(
+                "mid-scan correlate error at phase boundary: %s",
+                result.error,
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("mid-scan correlate hook failed: %s", e)
     return True, "ok"
 
 
