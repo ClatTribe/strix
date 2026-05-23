@@ -56,6 +56,7 @@ FROM golang:1.25-bookworm AS go-builder
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         libpcap-dev libssl-dev pkg-config ca-certificates \
+        curl jq \
  && rm -rf /var/lib/apt/lists/*
 
 ENV CGO_ENABLED=1 \
@@ -83,13 +84,30 @@ RUN go install -ldflags="-s -w" github.com/projectdiscovery/httpx/cmd/httpx@late
  # rather than fetching the GitHub release tarball keeps the
  # go-builder pattern uniform with the other PD tools.
  && go install -ldflags="-s -w" github.com/sigstore/cosign/v2/cmd/cosign@latest \
- # iter-22.4 — Dockle (CIS Docker Benchmark auditor). Pure Go.
- # Hadolint is Haskell upstream — installed below via prebuilt
- # release tarball alongside trufflehog/gitleaks.
- && go install -ldflags="-s -w" github.com/goodwithtech/dockle/cmd/dockle@latest \
  # iter-22.8 — dalfox (Go XSS scanner). 100+ payloads + filter
  # bypass. Wrapped by `scan_xss_dalfox`.
  && go install -ldflags="-s -w" github.com/hahwul/dalfox/v2@latest
+
+# iter-22.4 — Dockle (CIS Docker Benchmark auditor). Originally
+# installed via `go install` alongside the other Go tools above.
+# Broken since dockle's transitive dep on
+# `github.com/containers/storage` pulled in btrfs build-time
+# headers (`btrfs/version.h`) that aren't in the go-builder stage's
+# base image. iter-27.4 switched to the upstream prebuilt release
+# tarball — same pattern as hadolint / gitleaks / feroxbuster.
+RUN ARCH="$(uname -m)" \
+ && case "$ARCH" in \
+        x86_64) DOCKLE_ARCH="64bit" ;; \
+        aarch64|arm64) DOCKLE_ARCH="ARM64" ;; \
+        *) echo "Unsupported architecture for dockle: $ARCH" >&2; exit 1 ;; \
+    esac \
+ && TAG="$(curl -fsSL https://api.github.com/repos/goodwithtech/dockle/releases/latest | jq -r .tag_name)" \
+ && VER="${TAG#v}" \
+ && curl -fsSL "https://github.com/goodwithtech/dockle/releases/download/${TAG}/dockle_${VER}_Linux-${DOCKLE_ARCH}.tar.gz" \
+        -o /tmp/dockle.tgz \
+ && tar -xzf /tmp/dockle.tgz -C /tmp \
+ && install -m 0755 /tmp/dockle /usr/local/bin/dockle \
+ && rm -f /tmp/dockle /tmp/dockle.tgz /tmp/LICENSE /tmp/README.md 2>/dev/null || true
 
 # =============================================================================
 # Stage: node-builder
@@ -518,18 +536,27 @@ RUN ARCH="$(uname -m)" \
 # iter-23.3 — feroxbuster (Rust recursive content discovery). Same
 # release-binary pattern as gitleaks / hadolint. Used by
 # `discover_paths_feroxbuster`.
+# iter-27.4 — feroxbuster release-asset naming differs by arch:
+# x86_64 has `.tar.gz`; aarch64 only ships `.zip`. The original
+# Dockerfile assumed both arches had tar.gz and the build broke on
+# arm64. Handle both.
 RUN ARCH="$(uname -m)" \
  && case "$ARCH" in \
-        x86_64) FEROX_ARCH="x86_64-linux-feroxbuster.tar.gz" ;; \
-        aarch64|arm64) FEROX_ARCH="aarch64-linux-feroxbuster.tar.gz" ;; \
+        x86_64) FEROX_ASSET="x86_64-linux-feroxbuster.tar.gz"; EXT="tar.gz" ;; \
+        aarch64|arm64) FEROX_ASSET="aarch64-linux-feroxbuster.zip"; EXT="zip" ;; \
         *) echo "Unsupported architecture for feroxbuster: $ARCH" >&2; exit 1 ;; \
     esac \
  && TAG="$(curl -fsSL https://api.github.com/repos/epi052/feroxbuster/releases/latest | jq -r .tag_name)" \
- && curl -fsSL "https://github.com/epi052/feroxbuster/releases/download/${TAG}/${FEROX_ARCH}" \
-        -o /tmp/feroxbuster.tgz \
- && tar -xzf /tmp/feroxbuster.tgz -C /tmp \
+ && apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSL "https://github.com/epi052/feroxbuster/releases/download/${TAG}/${FEROX_ASSET}" \
+        -o /tmp/feroxbuster.archive \
+ && (if [ "$EXT" = "tar.gz" ]; then \
+        tar -xzf /tmp/feroxbuster.archive -C /tmp; \
+    else \
+        unzip -q /tmp/feroxbuster.archive -d /tmp; \
+    fi) \
  && install -m 0755 /tmp/feroxbuster /usr/local/bin/feroxbuster \
- && rm -f /tmp/feroxbuster /tmp/feroxbuster.tgz
+ && rm -f /tmp/feroxbuster /tmp/feroxbuster.archive
 
 # iter-24.1 — build-time seed of the ruleset cache. Pull the canonical
 # upstream rule files into /home/pentester/.strix/cache/rules/ so a
