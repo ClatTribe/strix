@@ -12,10 +12,11 @@
 #   - Python venv with pyyaml installed
 #
 # Usage:
-#   ./run_all.sh                                   # full suite
+#   ./run_all.sh                                   # full suite (per_target + public + l2)
 #   ./run_all.sh --suite per_target                # per_target only
 #   ./run_all.sh --suite public                    # direct-tool only
-#   ./run_all.sh --fixture vampi                   # one fixture
+#   ./run_all.sh --suite l2                        # L2-specific (juiceshop-full, ...)
+#   ./run_all.sh --fixture vampi                   # one fixture (or l2 bench name)
 #   ./run_all.sh --scan-mode standard|quick|deep   # per-fixture scan mode
 #   ./run_all.sh --dry-run                         # print plan, don't execute
 #
@@ -80,6 +81,18 @@ PUBLIC_BENCHMARKS=(
   "iac-dockerfile:public/run_iac_benchmark.py"
 )
 
+# ---------- L2-specific benchmarks ----------
+# These bypass the per-target runner.py and score against an external
+# rubric. Each runs its own docker compose + scoring scaffold.
+#
+# juiceshop-full: Juice Shop 109-challenge auto-scoring via the SUT's
+#   own /api/Challenges/ REST endpoint. Measures L2 chain reasoning +
+#   tier-weighted scoring. Built in iter-27 follow-up after the
+#   per-target bench surfaced that L2's contribution wasn't isolated.
+L2_BENCHMARKS=(
+  "juiceshop-full:per_target/bench_l2_juiceshop_full.py"
+)
+
 FAILED=0
 RAN=0
 
@@ -140,6 +153,35 @@ run_public() {
   RAN=$((RAN + 1))
 }
 
+run_l2() {
+  local name="$1"
+  local script="$2"
+  local runner_path="${ROOT}/${script}"
+
+  if [[ ! -f "${runner_path}" ]]; then
+    echo "[skip] l2/${name}: runner missing (${runner_path})" >&2
+    return 0
+  fi
+
+  echo "[run] l2/${name} (scan_mode=${SCAN_MODE})"
+  echo "      runner=${runner_path}"
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    RAN=$((RAN + 1))
+    return 0
+  fi
+
+  # L2 benches accept --scan-mode and emit their own output paths
+  # under per_target/baseline/. Invoked as a module so the relative
+  # imports + paths resolve from the repo root.
+  if ! (cd "${REPO_ROOT}" && python3 -m "benchmarks.per_target.bench_l2_juiceshop_full" \
+        --scan-mode "${SCAN_MODE}"); then
+    echo "[FAIL] l2/${name} exited non-zero" >&2
+    FAILED=$((FAILED + 1))
+  fi
+  RAN=$((RAN + 1))
+}
+
 # ---------- Dispatch ----------
 if [[ "${SUITE}" == "all" || "${SUITE}" == "per_target" ]]; then
   for entry in "${PER_TARGET_FIXTURES[@]}"; do
@@ -156,6 +198,15 @@ if [[ "${SUITE}" == "all" || "${SUITE}" == "public" ]]; then
     script="${entry##*:}"
     if [[ -n "${SINGLE_FIXTURE}" && "${SINGLE_FIXTURE}" != "${name}" ]]; then continue; fi
     run_public "${name}" "${script}"
+  done
+fi
+
+if [[ "${SUITE}" == "all" || "${SUITE}" == "l2" ]]; then
+  for entry in "${L2_BENCHMARKS[@]}"; do
+    name="${entry%%:*}"
+    script="${entry##*:}"
+    if [[ -n "${SINGLE_FIXTURE}" && "${SINGLE_FIXTURE}" != "${name}" ]]; then continue; fi
+    run_l2 "${name}" "${script}"
   done
 fi
 
