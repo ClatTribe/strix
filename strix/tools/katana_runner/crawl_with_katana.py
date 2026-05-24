@@ -51,35 +51,59 @@ def _katana_available() -> bool:
 def crawl_with_katana(
     target_url: str,
     max_depth: int = 3,
-    headless: bool = False,
+    headless: bool = True,
     max_pages: int = 200,
+    js_crawl: bool = True,
+    extract_forms: bool = True,
 ) -> dict[str, Any]:
     """Katana-driven crawl of a target URL.
 
     Args:
         target_url: starting URL.
         max_depth: BFS depth cap (default 3).
-        headless: when True, runs Chromium-driven crawl to catch
-            JS-routed endpoints (SPAs). Slower (~30-60s vs 5-10s)
-            but covers Angular / React / Vue routing.
+        headless: when True (default — iter-28.3), runs Chromium-driven
+            crawl to catch JS-routed endpoints (SPAs). Slower (~30-60s
+            vs 5-10s) but covers Angular / React / Vue routing.
+            Disabling this regresses SPA coverage hard — only set
+            False for known server-rendered targets.
         max_pages: cap on result count.
+        js_crawl: when True (default — iter-28.3), runs `-jc -jsluice`
+            so katana parses JS bundles for endpoint references. SPA
+            apps stash their API routes in bundled JS; without this,
+            those routes are invisible.
+        extract_forms: when True (default — iter-28.3), runs `-fx` to
+            emit form/input/textarea/select elements alongside endpoints.
+            Surfaces in result["forms"] for downstream auth-seed +
+            form-aware scan_sqli/xss probes.
 
     Returns:
         ```
-        {success, status, target, endpoints_discovered: int,
-         endpoints: [{url, method, params}, ...], reason?}
+        {
+          success, status, target, endpoints_discovered: int,
+          endpoints: [{url, method, params}, ...],
+          forms: [{action, method, inputs: [{name, type}, ...]}, ...],
+          reason?,
+        }
         ```
+
+    iter-28.3 — flipped headless / js-crawl / form-extraction defaults
+    from off-by-default to on-by-default. Rationale: the L2 Juice Shop
+    full-challenge bench (3/109) confirmed that the old defaults left
+    SPA routes (which is most modern webapps) undiscovered. The L1
+    floor for any auth-bearing or SPA-shaped target jumps materially
+    once we see the real surface. Validated via
+    `bench_validate_change.py` across ≥3 fixtures before merge.
     """
     if not target_url or not target_url.strip():
         return {
             "success": False, "status": "error", "target": target_url,
-            "endpoints_discovered": 0, "endpoints": [],
+            "endpoints_discovered": 0, "endpoints": [], "forms": [],
             "reason": "target_url required",
         }
     if not _katana_available():
         return {
             "success": True, "status": "partial", "target": target_url,
-            "endpoints_discovered": 0, "endpoints": [],
+            "endpoints_discovered": 0, "endpoints": [], "forms": [],
             "reason": (
                 "katana binary not on PATH (or STRIX_KATANA_DISABLED=1). "
                 "Install via go: `go install github.com/projectdiscovery"
@@ -96,6 +120,13 @@ def crawl_with_katana(
     ]
     if headless:
         cmd.extend(["-headless", "-no-sandbox"])
+    if js_crawl:
+        # -jc: parse JS files for endpoints.
+        # -jsl: jsluice (memory-intensive but finds endpoints baked
+        #       into bundled webpack/rollup output).
+        cmd.extend(["-jc", "-jsl"])
+    if extract_forms:
+        cmd.append("-fx")
 
     try:
         result = subprocess.run(  # noqa: S603
@@ -110,7 +141,10 @@ def crawl_with_katana(
         }
 
     endpoints: list[dict[str, Any]] = []
+    forms: list[dict[str, Any]] = []
     seen: set[str] = set()
+    seen_forms: set[tuple[str, str]] = set()  # (action, method)
+
     for line in (result.stdout or "").splitlines():
         line = line.strip()
         if not line:
@@ -122,10 +156,41 @@ def crawl_with_katana(
         if not isinstance(rec, dict):
             continue
         # Katana jsonl shape: {"timestamp", "request": {"endpoint",
-        # "method", ...}, ...}
+        # "method", ...}, "response": {...}, "forms": [...]?}
         req = rec.get("request") or {}
         url = req.get("endpoint") or rec.get("endpoint") or rec.get("url")
-        if not url or not isinstance(url, str) or url in seen:
+        if not url or not isinstance(url, str):
+            continue
+
+        # ---- iter-28.3: extract forms from `-fx` output ----
+        # Katana emits forms inline within the response/request record
+        # under keys `forms` or `form`. Each form: {action, method,
+        # enctype, parameters: [{name, type, value}, ...]}.
+        rec_forms = rec.get("forms") or rec.get("form") or []
+        if isinstance(rec_forms, dict):
+            rec_forms = [rec_forms]
+        for f in rec_forms or []:
+            if not isinstance(f, dict):
+                continue
+            action = str(f.get("action") or url).strip()
+            fmethod = str(f.get("method") or "POST").upper()
+            inputs: list[dict[str, str]] = []
+            for p in (f.get("parameters") or f.get("inputs") or []) or []:
+                if not isinstance(p, dict):
+                    continue
+                inputs.append({
+                    "name": str(p.get("name") or "").strip(),
+                    "type": str(p.get("type") or "text").lower(),
+                })
+            key = (action, fmethod)
+            if key in seen_forms:
+                continue
+            seen_forms.add(key)
+            forms.append({
+                "action": action, "method": fmethod, "inputs": inputs,
+            })
+
+        if url in seen:
             continue
         seen.add(url)
         method = (req.get("method") or "GET").upper()
@@ -152,4 +217,6 @@ def crawl_with_katana(
         "target": target_url,
         "endpoints_discovered": len(endpoints),
         "endpoints": endpoints,
+        "forms": forms,
+        "forms_discovered": len(forms),
     }

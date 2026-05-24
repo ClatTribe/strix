@@ -291,6 +291,28 @@ _ANCHORS_API: list[tuple[str, Any]] = [
     #     its own builder `_sbom_extract_kwargs`. Was mis-wired into
     #     `_ANCHORS_CONTAINER`; restored to its real home.
     ("sbom_extract", _sbom_extract_kwargs),
+    # 2c. iter-28.5 — GraphQL endpoint discovery + introspection.
+    #     Probes industry-standard GraphQL paths (`/graphql`,
+    #     `/v1/graphql`, ...) and captures schemas. Surfaces
+    #     Query/Mutation field lists that downstream specialists
+    #     can target per-field. Generic across Apollo / Hasura /
+    #     AppSync / Postgraphile / Strapi. Returns partial when
+    #     target has no GraphQL endpoint (no penalty on REST-only).
+    ("discover_graphql_endpoints", _api_target_url_kwargs),
+    # 2d. iter-28.4 — auth seed: discover registration endpoint by
+    #     shape, register a randomized test account, export captured
+    #     JWT/cookie via STRIX_AUTH_BEARER / STRIX_AUTH_COOKIE for
+    #     downstream auth-aware specialists (scan_idor,
+    #     scan_api_bola, scan_api_bfla, jwt_audit). Universal across
+    #     Django/Rails/Express/FastAPI/Spring auth conventions.
+    #     Idempotent — no-op when STRIX_AUTH_* already set.
+    ("seed_auth", _api_target_url_kwargs),
+    # 2e. iter-28.6 — default-credentials probe (pure-python). Tries
+    #     top SecLists defaults (admin/admin, root/toor, ...) against
+    #     discovered login endpoint. Pure-python — no hydra dep
+    #     required (#449's image-slim direction preserved). Returns
+    #     partial when no default credential accepted.
+    ("probe_default_creds", _api_target_url_kwargs),
     # 3. Signature corpus — nuclei templates for known CVEs in any
     #    fingerprinted product. Highest known-CVE coverage.
     ("scan_nuclei_templates", _api_url_with_severity_kwargs),

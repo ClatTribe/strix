@@ -84,6 +84,94 @@ def test_max_pages_caps(monkeypatch):
     assert out["endpoints_discovered"] == 10
 
 
+def test_iter_28_3_defaults_enable_js_and_forms(monkeypatch):
+    """iter-28.3 — headless + js-crawl + form-extract default on.
+
+    The L2 Juice Shop full-challenge bench (3/109) traced the L1
+    surface gap to katana running HTTP-only, no JS, no form extract.
+    Flipping these defaults to on is a non-overfit change because
+    every SPA needs JS rendering and form extraction.
+
+    Regression-guards against accidental revert: assert the default
+    invocation contains -headless -jc -jsl -fx flags.
+    """
+    import shutil
+    import subprocess
+    monkeypatch.setattr(
+        shutil, "which",
+        lambda b: "/usr/local/bin/katana" if b == "katana" else None,
+    )
+    run_mock = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(subprocess, "run", run_mock)
+
+    crawl_with_katana("https://x.com")  # default args
+
+    cmd = run_mock.call_args[0][0]
+    assert "-headless" in cmd, "headless must default ON post-iter-28.3 (SPA coverage)"
+    assert "-jc" in cmd, "JS-crawl must default ON post-iter-28.3 (bundled-endpoint discovery)"
+    assert "-jsl" in cmd, "jsluice must default ON post-iter-28.3 (webpack/rollup parse)"
+    assert "-fx" in cmd, "form-extract must default ON post-iter-28.3 (auth-seed input)"
+
+
+def test_iter_28_3_forms_surfaced_in_output(monkeypatch):
+    """katana -fx emits forms inline in JSONL; parser surfaces them
+    under result['forms'] for the auth-seed primitive (iter-28.4) +
+    form-aware scan_sqli/xss to consume."""
+    import shutil
+    import subprocess
+    monkeypatch.setattr(
+        shutil, "which",
+        lambda b: "/usr/local/bin/katana" if b == "katana" else None,
+    )
+    lines = [
+        json.dumps({
+            "request": {"endpoint": "https://x.com/register", "method": "GET"},
+            "forms": [{
+                "action": "/api/Users/",
+                "method": "POST",
+                "parameters": [
+                    {"name": "email", "type": "email"},
+                    {"name": "password", "type": "password"},
+                ],
+            }],
+        }),
+    ]
+    fake = MagicMock(returncode=0, stdout="\n".join(lines), stderr="")
+    monkeypatch.setattr(subprocess, "run", MagicMock(return_value=fake))
+
+    out = crawl_with_katana("https://x.com")
+    assert out["forms_discovered"] == 1
+    assert out["forms"][0]["action"] == "/api/Users/"
+    assert out["forms"][0]["method"] == "POST"
+    input_names = {i["name"] for i in out["forms"][0]["inputs"]}
+    assert input_names == {"email", "password"}
+
+
+def test_iter_28_3_opt_out_flags(monkeypatch):
+    """Operators can opt OUT of the heavier crawl for known
+    server-rendered targets via headless=False / js_crawl=False /
+    extract_forms=False."""
+    import shutil
+    import subprocess
+    monkeypatch.setattr(
+        shutil, "which",
+        lambda b: "/usr/local/bin/katana" if b == "katana" else None,
+    )
+    run_mock = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
+    monkeypatch.setattr(subprocess, "run", run_mock)
+
+    crawl_with_katana(
+        "https://x.com",
+        headless=False, js_crawl=False, extract_forms=False,
+    )
+
+    cmd = run_mock.call_args[0][0]
+    assert "-headless" not in cmd
+    assert "-jc" not in cmd
+    assert "-jsl" not in cmd
+    assert "-fx" not in cmd
+
+
 def test_timeout_returns_error(monkeypatch):
     import shutil
     import subprocess
