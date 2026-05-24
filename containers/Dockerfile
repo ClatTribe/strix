@@ -33,13 +33,14 @@
 #   - debian-slim base (now)        ~120 MB
 #   - builder toolchains (was)      ~600 MB (now in builder stages only)
 #   - chromium + playwright         ~400 MB
-#   - zaproxy + JRE                 ~500 MB
 #   - caido-cli                     ~150 MB
 #   - tools (Go + npm + pipx)       ~300 MB total
-#   - venv + strix package          ~250 MB
+#   - venv + strix package          ~250 MB (post-N1 — was 1.34 GB pre-N1)
 #   - chromium runtime libs + fonts ~80 MB
 #
-# Expected runtime image: ~2.5-3 GB (down from ~7 GB pre-Phase-1).
+# Measured runtime image: ~6.4 GB after Section B (8 redundant tools
+# dropped: gospider, JS-Snooper, jsniper.sh, wafw00f, ZAP, JRE, wapiti3,
+# dirsearch). Down from ~19.5 GB Kali baseline.
 
 # =============================================================================
 # Stage: go-builder
@@ -67,7 +68,6 @@ ENV CGO_ENABLED=1 \
 RUN go install -ldflags="-s -w" github.com/projectdiscovery/httpx/cmd/httpx@latest \
  && go install -ldflags="-s -w" github.com/projectdiscovery/katana/cmd/katana@latest \
  && go install -ldflags="-s -w" github.com/projectdiscovery/cvemap/cmd/vulnx@latest \
- && go install -ldflags="-s -w" github.com/jaeles-project/gospider@latest \
  && go install -ldflags="-s -w" github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest \
  && go install -ldflags="-s -w" github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest \
  && go install -ldflags="-s -w" github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
@@ -87,6 +87,9 @@ RUN go install -ldflags="-s -w" github.com/projectdiscovery/httpx/cmd/httpx@late
  # iter-22.8 — dalfox (Go XSS scanner). 100+ payloads + filter
  # bypass. Wrapped by `scan_xss_dalfox`.
  && go install -ldflags="-s -w" github.com/hahwul/dalfox/v2@latest
+# Note: gospider dropped in Section B (image-slim). katana is a strict
+# superset (JS crawling via jsluice, headless mode, deeper recursion) and
+# is the canonical crawler used by anchor_prepass._katana_crawl.
 
 # iter-22.4 — Dockle (CIS Docker Benchmark auditor). Originally
 # installed via `go install` alongside the other Go tools above.
@@ -159,10 +162,6 @@ RUN pipx install semgrep \
  && pipx install bandit \
  && pipx install checkov \
  && pipx install arjun \
- && pipx install dirsearch \
- && pipx inject dirsearch setuptools \
- && pipx install wafw00f \
- && pipx install wapiti3 \
  # iter-21.6.1 — bbot ASM toolkit. Wrapped by
  # `scan_buckets_via_bbot` for multi-cloud bucket discovery
  # (AWS S3 / GCP GCS / Azure Blob / DigitalOcean Spaces /
@@ -184,6 +183,19 @@ RUN pipx install semgrep \
  # tier) but free + zero-auth.
  && pipx install dnstwist \
  && pipx install inql
+# Note: dirsearch / wafw00f / wapiti3 dropped in Section B (image-slim):
+#   * dirsearch is superseded by feroxbuster (Rust-fast, larger default
+#     wordlists; shipped in iter-23.3 / #415).
+#   * wafw00f's WAF fingerprint is weakly covered by fingerprint_tech_stack
+#     (Wappalyzer-based); knowing WAF=X doesn't help bypass deterministically.
+#   * wapiti3's per-vuln scans are subsumed by strix's per-endpoint
+#     scan_sqli / scan_xss / scan_xxe / scan_ssrf / scan_path_traversal /
+#     scan_cmd_injection family, which the prepass hydrates with body
+#     schemas from openapi_spec_ingest (richer signal than wapiti's
+#     URL-only scan).
+# arjun kept — fills the hidden-parameter brute-force gap that nothing
+# else in the stack covers (openapi_spec_ingest only emits documented
+# params; katana only emits linked ones).
 
 # =============================================================================
 # Stage: clone-builder
@@ -204,13 +216,15 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /opt/clones \
- && git clone --depth 1 https://github.com/aravind0x7/JS-Snooper.git /opt/clones/JS-Snooper \
- && chmod +x /opt/clones/JS-Snooper/js_snooper.sh \
- && git clone --depth 1 https://github.com/xchopath/jsniper.sh.git /opt/clones/jsniper.sh \
- && chmod +x /opt/clones/jsniper.sh/jsniper.sh \
  && git clone --depth 1 https://github.com/ticarpi/jwt_tool.git /opt/clones/jwt_tool \
  && chmod +x /opt/clones/jwt_tool/jwt_tool.py \
  && find /opt/clones -name '.git' -type d -exec rm -rf {} + 2>/dev/null || true
+# Note: JS-Snooper + jsniper.sh dropped in Section B (image-slim). JS
+# secret/endpoint extraction is now handled by trufflehog (more accurate
+# secret detection, runs in the secrets_scan tool) + katana with
+# `-jc -jsl` (JS-AST-aware endpoint extraction via jsluice) +
+# source_maps tool. Both upstream paths are LLM-shellable in the existing
+# system_prompt and bench fixtures don't use them.
 
 ENV TS_PARSER_DIR=/opt/tree-sitter/parsers
 RUN mkdir -p "$TS_PARSER_DIR" \
@@ -336,11 +350,13 @@ FROM python:3.12-slim-bookworm AS runtime
 
 LABEL description="AI Agent Penetration Testing Environment with Comprehensive Automated Tools"
 
-# Enable contrib + non-free repos so zaproxy (in contrib/web) is installable.
-# bookworm-slim ships the deb822-format `/etc/apt/sources.list.d/debian.sources`;
-# overwrite it with a single, predictable layout rather than sed'ing the
-# unknown shape we inherited. The classic /etc/apt/sources.list (if any) is
-# cleared so apt only sees the file we control.
+# Overwrite the deb822 apt sources with a single predictable layout.
+# bookworm-slim ships `/etc/apt/sources.list.d/debian.sources`; the
+# classic `/etc/apt/sources.list` (if any) is cleared so apt only sees
+# the file we control. `contrib` + `non-free` repos retained — none of
+# our runtime packages currently need them (zaproxy was pulled in
+# Section B), but keeping them enabled is zero-cost and avoids breakage
+# if a future iter pulls a contrib package.
 RUN rm -f /etc/apt/sources.list \
  && cat > /etc/apt/sources.list.d/debian.sources <<'EOF'
 Types: deb
@@ -364,9 +380,12 @@ EOF
 #   - gcc + libc6-dev for tree-sitter's lazy parser.c compile path
 #     (~80 MB, vs ~600 MB if we kept full build-essential)
 #   - net / dns / shell utilities used by both the agent and tools
-#   - debian-main security tools (nmap, sqlmap). ZAP is NOT in Debian
-#     (Kali-only); installed below via the GitHub release tarball.
-#   - default-jre-headless powers ZAP's Java runtime
+#   - debian-main security tools (nmap, sqlmap). ZAP+JRE dropped in
+#     Section B (image-slim): nuclei + per-endpoint scan_sqli /
+#     scan_xss / scan_xxe / scan_ssrf / scan_path_traversal /
+#     scan_cmd_injection (all hydrated by openapi_spec_ingest) already
+#     cover ZAP's automated-scan ground with better signal:noise.
+#     Bench fixtures don't measure any ZAP catches.
 #   - libcap2-bin for setcap; libnss3-tools for certutil
 #   - chromium runtime .so deps (for playwright-installed chrome)
 #   - fonts (chrome rendering + screenshot tooling)
@@ -381,7 +400,6 @@ RUN apt-get update \
         net-tools dnsutils whois iproute2 iputils-ping netcat-traditional \
         jq parallel ripgrep procps htop tmux gdb \
         nmap ncat ndiff sqlmap \
-        default-jre-headless \
         libcap2-bin libnss3-tools \
         libnss3 libnspr4 libdbus-1-3 \
         libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libatspi2.0-0 \
@@ -392,20 +410,6 @@ RUN apt-get update \
  && apt-get autoremove -y \
  && apt-get autoclean \
  && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-
-# OWASP ZAP — not packaged in Debian (Kali-only). Download the Linux
-# tarball from the upstream GitHub release; the Java app is arch-neutral
-# so the same tarball serves amd64 + arm64. Adds ~300 MB to the runtime
-# stage; the JRE installed above adds ~150 MB. Same footprint as the
-# pre-Phase-1 Kali apt install of zaproxy.
-ARG ZAP_VERSION=2.17.0
-RUN curl -fsSLo /tmp/zap.tar.gz \
-        "https://github.com/zaproxy/zaproxy/releases/download/v${ZAP_VERSION}/ZAP_${ZAP_VERSION}_Linux.tar.gz" \
- && mkdir -p /opt/zap \
- && tar -xzf /tmp/zap.tar.gz -C /opt/zap --strip-components=1 \
- && rm /tmp/zap.tar.gz \
- && ln -sf /opt/zap/zap.sh /usr/local/bin/zaproxy \
- && ln -sf /opt/zap/zap.sh /usr/local/bin/zap.sh
 
 # nmap needs raw-socket + admin caps for SYN scans / OS detection.
 RUN setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip $(which nmap)
