@@ -73,6 +73,50 @@ scan, then `docker compose down`. Make sure Docker is available.
 
 For the `domain` fixture, see [fixtures/domain/README.md](fixtures/domain/README.md) — domain testing requires a real test domain you control.
 
+### L2-specific: Juice Shop full challenge.json bench
+
+`runner.py` scores against a curated 9 must-find list. For L2 we want
+to measure **chain reasoning + reasoning depth**, not L1-friendly OSS
+recall. `bench_l2_juiceshop_full.py` scores against Juice Shop's
+internal `/api/Challenges/` endpoint (109 challenges, 6 difficulty
+tiers, 17 categories) — the SUT auto-marks a challenge as solved when
+its exploit pattern fires, so the score is purely a function of what
+L2 naturally tripped while probing.
+
+```bash
+# Standard L2 scan against juice-shop, score against all 109 challenges
+python -m benchmarks.per_target.bench_l2_juiceshop_full --scan-mode standard
+
+# Deep mode (more LLM iterations, costlier)
+python -m benchmarks.per_target.bench_l2_juiceshop_full --scan-mode deep
+
+# Compare against a prior run
+python -m benchmarks.per_target.bench_l2_juiceshop_full --scan-mode standard \
+    --compare-to benchmarks/per_target/baseline/l2_juiceshop_full_20260524_154933_standard.json
+
+# Smoke-test the scoring path without paying LLM cost (manual scan in
+# another shell or none at all)
+python -m benchmarks.per_target.bench_l2_juiceshop_full --skip-strix --keep-up
+```
+
+Output (markdown + JSON in `baseline/`) breaks down:
+- solved per difficulty tier (1★–6★)
+- solved per category (XSS, Injection, Broken Auth, ...)
+- weighted score (Σ difficulty × solved / Σ difficulty × total) — rewards harder tiers
+- LLM cost / tokens / agents / tools used
+- cost per challenge solved (the L2-economics headline)
+- vs prior-run deltas (`--compare-to`)
+
+Why this metric beats the 9-must_find list:
+
+| Aspect | 9-must_find scoring | full challenge.json scoring |
+|---|---|---|
+| Coverage | 9 hand-picked vulns | 109 with rich tier/category breakdown |
+| L1 vs L2 separation | none — L1 already nails most | Tier 1-2 = L1 floor, Tier 4-6 = L2 reasoning |
+| Bias | curator picked easy DAST wins | SUT is source of truth, no human curation |
+| Comparability | drift if we curate differently | stable across model/scan-mode changes |
+| Maps to L2+ readiness | no | yes — Tier 5-6 gaps are exactly where L2+ hypothesis explorer + chain reasoning would land |
+
 ---
 
 ## Scoring
