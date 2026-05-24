@@ -52,6 +52,9 @@ from .cors_check import *           # noqa: F403  # cors_deep_check
 from .csrf_check import *           # noqa: F403  # csrf_check
 from .cache_deception import *      # noqa: F403  # scan_cache_deception
 from .cookie_scoping import *       # noqa: F403  # cookie_scoping
+from .auth_seed import *            # noqa: F403  # iter-28.4 — seed_auth (registration discovery + JWT/cookie capture)
+from .graphql_discover import *     # noqa: F403  # iter-28.5 — discover_graphql_endpoints
+from .default_creds_probe import *  # noqa: F403  # iter-28.6 — probe_default_creds (pure-python brute-force)
 from .debug_endpoint import *       # noqa: F403  # debug_endpoint_probe
 from .dom_xss_static import *       # noqa: F403  # dom_xss_static_probe
 from .file_upload import *          # noqa: F403  # file_upload-related probes

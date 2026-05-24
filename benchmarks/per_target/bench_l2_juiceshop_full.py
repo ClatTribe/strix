@@ -214,9 +214,23 @@ def run_strix(
 
     Captures stdout so we can parse the summary panel for token/cost
     stats. stderr is forwarded (errors visible immediately).
+
+    `host.docker.internal` is used as the target hostname because
+    strix runs inside its own sandbox container and reaches the
+    juice-shop docker-compose service via the docker bridge. The
+    strix CLI's preflight runs on the HOST first and tries to
+    DNS-resolve the target hostname there — `host.docker.internal`
+    doesn't resolve outside docker, so we always pass --no-preflight
+    to bypass the host-side check. Strix's in-sandbox tools still
+    reach the target fine.
     """
     target = f"web_application:http://host.docker.internal:{DEFAULT_PORT}"
-    cmd = [strix_bin, "-n", "-t", target, "-m", scan_mode] + extra_args
+    cmd = [
+        strix_bin, "-n",
+        "-t", target,
+        "-m", scan_mode,
+        "--no-preflight",
+    ] + extra_args
     print(f"[bench] {' '.join(cmd)}", flush=True)
     start = time.monotonic()
     # Capture stdout so we can parse it; let stderr stream live to console.

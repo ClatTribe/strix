@@ -230,6 +230,11 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "source_maps", "cookie_jwt_scoping_check",
         # Threat-intel for web targets
         "vt_reputation", "greynoise_classify",
+        # iter-28 L1 universal primitives (#449-respecting — pure
+        # python + existing-binary based; no new docker tools):
+        "seed_auth",                    # iter-28.4 — register test user, capture JWT/cookie
+        "discover_graphql_endpoints",   # iter-28.5 — GraphQL endpoint discovery + introspection
+        "probe_default_creds",          # iter-28.6 — SecLists default-credentials brute
     }),
     "repository": frozenset({
         # Specialist-tools
@@ -331,6 +336,10 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_credential_leaks_hibp",   # iter-22.6 — domain-level breach
         # Threat-intel.
         "vt_reputation", "greynoise_classify",
+        # iter-28 L1 universal primitives (#449-respecting):
+        "seed_auth",                    # iter-28.4 — register test user, capture JWT/cookie
+        "discover_graphql_endpoints",   # iter-28.5 — GraphQL endpoint discovery + introspection
+        "probe_default_creds",          # iter-28.6 — SecLists default-credentials brute
     }),
     "domain": frozenset({
         "scan_misconfig",
