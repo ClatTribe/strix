@@ -70,6 +70,72 @@ def test_existing_error_token_in_baseline_does_not_trip():
     assert sig.new_error_classes == []
 
 
+# ---------------------------------------------------------------------------
+# iter-30.4 — success-leak token detection
+# ---------------------------------------------------------------------------
+
+def test_success_token_etc_passwd_leak_scores_as_path_traversal():
+    """When /etc/passwd content appears in payload response, that's
+    path-traversal success — should score 0.5."""
+    baseline = {"status": 200, "size": 500, "time_ms": 30,
+                "body": "<html>not found</html>", "location": ""}
+    payload = {"status": 200, "size": 800, "time_ms": 30,
+               "body": "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:...",
+               "location": ""}
+    from strix.l15.baseline_diff import diff_responses
+    sig = diff_responses(baseline, payload)
+    assert "path-traversal" in sig.new_success_classes
+    assert sig.score >= 0.5
+
+
+def test_success_token_jwt_in_response_scores_as_sqli():
+    """When baseline response has no auth token but payload response
+    DOES, that's SQLi-login auth bypass success."""
+    baseline = {"status": 401, "size": 50, "time_ms": 30,
+                "body": '{"error":"invalid"}', "location": ""}
+    payload = {"status": 200, "size": 800, "time_ms": 30,
+               "body": '{"access_token":"eyJhbGciOi.eyJzdWIi.sig","user_id":1}',
+               "location": ""}
+    from strix.l15.baseline_diff import diff_responses
+    sig = diff_responses(baseline, payload)
+    assert "sqli" in sig.new_success_classes
+    assert sig.score >= 0.5
+
+
+def test_success_token_cmd_injection_uid_output():
+    """`uid=0(root)` in payload body indicates command-injection success."""
+    baseline = {"status": 200, "size": 500, "time_ms": 30, "body": "ok", "location": ""}
+    payload = {"status": 200, "size": 600, "time_ms": 30,
+               "body": "ok\nuid=0(root) gid=0(root) groups=0(root)",
+               "location": ""}
+    from strix.l15.baseline_diff import diff_responses
+    sig = diff_responses(baseline, payload)
+    assert "cmd-injection" in sig.new_success_classes
+
+
+def test_success_token_ssrf_imds_response():
+    """AWS IMDS response markers indicate SSRF success."""
+    baseline = {"status": 200, "size": 500, "time_ms": 30, "body": "ok", "location": ""}
+    payload = {"status": 200, "size": 2000, "time_ms": 30,
+               "body": '{"ami-id":"ami-1234","instance-id":"i-abc"}',
+               "location": ""}
+    from strix.l15.baseline_diff import diff_responses
+    sig = diff_responses(baseline, payload)
+    assert "ssrf" in sig.new_success_classes
+
+
+def test_success_token_existing_in_baseline_does_not_trip():
+    """Token in both → not a new signal."""
+    baseline = {"status": 200, "size": 500, "time_ms": 30,
+                "body": '{"access_token":"abc"} — login already present', "location": ""}
+    payload = {"status": 200, "size": 600, "time_ms": 30,
+               "body": '{"access_token":"abc"} — login already present',
+               "location": ""}
+    from strix.l15.baseline_diff import diff_responses
+    sig = diff_responses(baseline, payload)
+    assert sig.new_success_classes == []
+
+
 def test_traceback_token_classifies_as_code_exec():
     baseline = {"status": 200, "size": 500, "time_ms": 30,
                 "body": "<html>ok</html>", "location": ""}

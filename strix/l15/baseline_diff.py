@@ -99,6 +99,52 @@ ERROR_TOKEN_TO_VULN_CLASS: dict[str, str] = {
 }
 
 
+# iter-30.4 — Success-leak tokens: strings that, if present in
+# payload response but NOT in baseline, indicate the payload TRIPPED
+# the vuln (response leaked data or unlocked a session).
+#
+# Anti-overfit: each entry is a documented response artifact from
+# Linux/UNIX file contents, well-known auth-response schemas, or
+# standard application output. No SUT-specific values.
+SUCCESS_TOKEN_TO_VULN_CLASS: dict[str, str] = {
+    # /etc/passwd leak → path-traversal / LFI
+    "root:x:0:0":           "path-traversal",
+    "root:!:0:0":           "path-traversal",
+    "daemon:x:1:1":         "path-traversal",
+    "bin:x:1:1":            "path-traversal",
+    "nobody:x:":            "path-traversal",
+    # /etc/shadow leak (rarely readable but try anyway)
+    "root:$1$":             "path-traversal",
+    "root:$6$":             "path-traversal",
+    # Windows host file or system info
+    "[boot loader]":        "path-traversal",
+    "[fonts]":              "path-traversal",
+    "for 16-bit app support": "path-traversal",
+    # Auth-bypass via SQLi-login — response now contains a token where
+    # baseline (no-auth probe) didn't. Common API auth response shapes.
+    # ONLY counted as a signal when token isn't in baseline.
+    "\"access_token\"":     "sqli",  # OAuth-style auth response
+    "\"accessToken\"":      "sqli",  # camelCase variant
+    "\"id_token\"":         "sqli",  # OIDC
+    "\"jwt\"":              "sqli",  # explicit JWT field
+    "\"token\":\"eyJ":      "sqli",  # JWT prefix value (eyJ = base64 `{"`)
+    "\"refresh_token\"":    "sqli",
+    "\"refreshToken\"":     "sqli",
+    # Command-injection success: command output structure
+    "uid=0(root)":          "cmd-injection",
+    "uid=1000":             "cmd-injection",
+    "Linux ":               "cmd-injection",  # output of `uname -a`
+    "Darwin Kernel":        "cmd-injection",
+    # SSRF success: AWS / GCP / Azure IMDS response markers
+    "ami-id":               "ssrf",  # AWS IMDS
+    "instance-id":          "ssrf",
+    "iam/security-credentials": "ssrf",
+    "compute/v1/projects":  "ssrf",  # GCP IMDS
+    # XXE / file read via XML entity
+    "<!ENTITY":             "xxe",  # echo-back of the payload
+}
+
+
 # Default thresholds. From OWASP DAST playbook + sqlmap manual.
 DEFAULT_SIZE_DELTA_PCT = 0.20         # ≥20% body length deviation = signal
 DEFAULT_TIME_DELTA_MULT = 3.0         # ≥3× baseline response time = time-based signal
@@ -126,6 +172,8 @@ class DiffSignal:
     body_hash_changed: bool = False
     new_error_tokens: list[str] = field(default_factory=list)
     new_error_classes: list[str] = field(default_factory=list)  # classified vuln types
+    new_success_tokens: list[str] = field(default_factory=list)  # iter-30.4
+    new_success_classes: list[str] = field(default_factory=list)  # iter-30.4
     status_class_changed: bool = False       # 2xx -> 4xx etc.
     redirect_target_changed: bool = False
 
@@ -161,6 +209,21 @@ def _find_new_error_tokens(
     new_tokens: list[str] = []
     new_classes: set[str] = set()
     for token, cls in ERROR_TOKEN_TO_VULN_CLASS.items():
+        if token in payload_body and token not in baseline_body:
+            new_tokens.append(token)
+            new_classes.add(cls)
+    return new_tokens, sorted(new_classes)
+
+
+def _find_new_success_tokens(
+    baseline_body: str, payload_body: str,
+) -> tuple[list[str], list[str]]:
+    """iter-30.4 — Return (new_tokens, new_vuln_classes) for SUCCESS-
+    leak tokens (auth-bypass JWT, /etc/passwd leak, IMDS markers, etc.)
+    that appear in payload but NOT baseline."""
+    new_tokens: list[str] = []
+    new_classes: set[str] = set()
+    for token, cls in SUCCESS_TOKEN_TO_VULN_CLASS.items():
         if token in payload_body and token not in baseline_body:
             new_tokens.append(token)
             new_classes.add(cls)
@@ -219,6 +282,10 @@ def diff_responses(
     sig.new_error_tokens = new_tokens
     sig.new_error_classes = new_classes
 
+    succ_tokens, succ_classes = _find_new_success_tokens(b_body, p_body)
+    sig.new_success_tokens = succ_tokens
+    sig.new_success_classes = succ_classes
+
     return score_signal(
         sig,
         size_delta_pct_threshold=size_delta_pct_threshold,
@@ -258,6 +325,17 @@ def score_signal(
         score += 0.5
         reasons.append(
             f"new error token(s) {sig.new_error_tokens[:3]} → class(es) {sig.new_error_classes}"
+        )
+
+    # iter-30.4 — Success-leak signal — same strength as error (the
+    # payload made the SUT leak something / unlock something it
+    # shouldn't have). e.g. /etc/passwd contents, JWT in response,
+    # IMDS metadata.
+    if sig.new_success_classes:
+        score += 0.5
+        reasons.append(
+            f"success-leak token(s) {sig.new_success_tokens[:3]} → "
+            f"class(es) {sig.new_success_classes}"
         )
 
     # Status-class change — 2xx → 5xx is suspicious (we likely broke the parser)
@@ -364,6 +442,7 @@ def fire_and_diff(
 __all__ = [
     "DiffSignal",
     "ERROR_TOKEN_TO_VULN_CLASS",
+    "SUCCESS_TOKEN_TO_VULN_CLASS",
     "DEFAULT_SIZE_DELTA_PCT",
     "DEFAULT_TIME_DELTA_MULT",
     "DEFAULT_TIME_DELTA_ABS_MS",
