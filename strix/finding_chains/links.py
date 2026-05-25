@@ -60,6 +60,16 @@ LINK_SCA_SAST_PACKAGE = "sca_to_sast_package"
 LINK_CORS_TO_SSRF_CHAIN = "cors_reflection_to_ssrf_chain"
 LINK_JWT_CONFUSION_CHAIN = "jwt_confusion_chain"
 LINK_AUTH_BYPASS_VIA_METHOD_OVERRIDE = "auth_bypass_via_method_override_chain"
+# iter-33.3 — shape-based heuristic linkers. Fire on category-pattern
+# matches even when CWE / endpoint don't strictly align. Lower
+# confidence than the exact-match linkers above; designed to surface
+# chains the strict linkers miss (e.g. an LLM-emitted "auth bypass"
+# finding without a CWE, paired with an "admin endpoint authz
+# missing" finding from a different specialist).
+LINK_HEURISTIC_PRIV_ESCALATION = "heuristic_privilege_escalation_chain"
+LINK_HEURISTIC_CREDENTIAL_EXTRACTION = "heuristic_credential_extraction_chain"
+LINK_HEURISTIC_DATA_EXFIL = "heuristic_data_exfil_chain"
+LINK_HEURISTIC_BOLA_AT_SCALE = "heuristic_bola_at_scale_chain"
 
 LinkType = str
 
@@ -650,6 +660,226 @@ def link_auth_bypass_via_method_override(
 
 
 # ---------------------------------------------------------------------------
+# iter-33.3 — heuristic shape-based linkers
+#
+# The existing linkers above require strict matches (same CWE, same
+# endpoint, same package). Empirically that misses chains that a
+# human pentester would obviously combine — e.g.:
+#
+#   * Auth-bypass on /login (LLM-emitted, no CWE attached) + missing-
+#     auth on /admin (different specialist, different CWE) →
+#     privilege escalation
+#   * SQLi on /users (any CWE) + hardcoded JWT secret in a finding
+#     description → credential extraction
+#   * IDOR on /api/orders/{id} + weak JWT signing → BOLA at scale
+#
+# These heuristics fire on category families, not exact CWEs. Lower
+# default confidence (~0.7) than the exact-match linkers — these
+# surface POSSIBLE chains that the LLM consumer can ratify.
+# ---------------------------------------------------------------------------
+
+# Category families. Generic shapes — apply to any web app, no SUT
+# identifiers. Each family groups findings that play the same role
+# in a multi-step exploit chain.
+_FAMILY_AUTH_BYPASS = frozenset({
+    "auth", "jwt", "weak_creds", "weak_auth", "broken_auth",
+    "auth_bypass", "default_creds",
+})
+_FAMILY_AUTHZ_MISSING = frozenset({
+    "authz", "bfla", "missing_auth", "idor", "bola",
+})
+_FAMILY_INJECTION = frozenset({
+    "sqli", "nosqli", "cmd_injection", "command_injection",
+    "path_traversal", "xxe", "ssti", "ldap_injection",
+})
+_FAMILY_CREDENTIAL_EXPOSURE = frozenset({
+    "info_disclosure", "hardcoded_secret", "secret_in_response",
+    "weak_crypto", "session_fixation", "jwt_weak",
+})
+_FAMILY_DATA_READ = frozenset({
+    "info_disclosure", "missing_auth", "directory_listing",
+    "debug_endpoint", "config_exposure", "open_database",
+})
+
+
+def _category_in(f: Finding, family: frozenset[str]) -> bool:
+    cat = (f.category or "").strip().lower()
+    return cat in family
+
+
+def _title_or_desc_contains(f: Finding, needles: list[str]) -> bool:
+    haystack = f"{f.title or ''} {f.description or ''}".lower()
+    return any(n in haystack for n in needles)
+
+
+def link_heuristic_priv_escalation_chain(
+    findings: list[Finding],
+) -> list[ChainLink]:
+    """**iter-33.3 — heuristic privilege escalation chain.**
+
+    Any auth-bypass-shaped finding on a target + any authz-missing
+    finding on the SAME target → chain. The attacker can authenticate
+    (auth-bypass) and then access admin/IDOR-enabled endpoints
+    (authz-missing).
+
+    Confidence 0.7 — pattern-based, not signature-based.
+    """
+    out: list[ChainLink] = []
+    auth_bypasses = [f for f in findings if _category_in(f, _FAMILY_AUTH_BYPASS)]
+    authz_misses = [f for f in findings if _category_in(f, _FAMILY_AUTHZ_MISSING)]
+    seen_pairs: set[tuple[str, str]] = set()
+    for a in auth_bypasses:
+        for b in authz_misses:
+            if a.id == b.id:
+                continue
+            if not _same_target(a, b):
+                continue
+            pair = tuple(sorted((a.id, b.id)))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            out.append(ChainLink(
+                finding_a=a.id, finding_b=b.id,
+                link_type=LINK_HEURISTIC_PRIV_ESCALATION,
+                confidence=0.7,
+                rationale=(
+                    f"Privilege-escalation chain — auth-bypass-shape "
+                    f"finding ({a.category}) on the same target as "
+                    f"an authz-missing finding ({b.category}). The "
+                    f"attacker first bypasses authentication, then "
+                    f"reaches the broken-authz endpoint without "
+                    f"needing valid credentials."
+                ),
+            ))
+    return out
+
+
+def link_heuristic_credential_extraction_chain(
+    findings: list[Finding],
+) -> list[ChainLink]:
+    """**iter-33.3 — heuristic credential extraction chain.**
+
+    Any injection-shape finding + any credential-exposure-shape
+    finding on the SAME target → chain. The injection enables data
+    extraction; the credential exposure is what gets extracted.
+    """
+    out: list[ChainLink] = []
+    injections = [f for f in findings if _category_in(f, _FAMILY_INJECTION)]
+    credentials = [
+        f for f in findings if _category_in(f, _FAMILY_CREDENTIAL_EXPOSURE)
+    ]
+    seen_pairs: set[tuple[str, str]] = set()
+    for a in injections:
+        for b in credentials:
+            if a.id == b.id:
+                continue
+            if not _same_target(a, b):
+                continue
+            pair = tuple(sorted((a.id, b.id)))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            out.append(ChainLink(
+                finding_a=a.id, finding_b=b.id,
+                link_type=LINK_HEURISTIC_CREDENTIAL_EXTRACTION,
+                confidence=0.7,
+                rationale=(
+                    f"Credential-extraction chain — injection-shape "
+                    f"finding ({a.category}) plus credential-exposure-"
+                    f"shape finding ({b.category}) on the same target. "
+                    f"The injection enables data extraction; the "
+                    f"credentials are exfiltrable through that "
+                    f"injection point."
+                ),
+            ))
+    return out
+
+
+def link_heuristic_data_exfil_chain(
+    findings: list[Finding],
+) -> list[ChainLink]:
+    """**iter-33.3 — heuristic data exfil chain.**
+
+    Any injection finding + any "data exposed without auth" finding
+    on the same target → chain. The combined surface enables bulk
+    data read (the injection scales the exposure).
+    """
+    out: list[ChainLink] = []
+    injections = [f for f in findings if _category_in(f, _FAMILY_INJECTION)]
+    data_reads = [f for f in findings if _category_in(f, _FAMILY_DATA_READ)]
+    seen_pairs: set[tuple[str, str]] = set()
+    for a in injections:
+        for b in data_reads:
+            if a.id == b.id:
+                continue
+            if not _same_target(a, b):
+                continue
+            pair = tuple(sorted((a.id, b.id)))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            out.append(ChainLink(
+                finding_a=a.id, finding_b=b.id,
+                link_type=LINK_HEURISTIC_DATA_EXFIL,
+                confidence=0.7,
+                rationale=(
+                    f"Data-exfil chain — injection-shape ({a.category}) "
+                    f"+ data-read-without-auth ({b.category}) on same "
+                    f"target. The combined surface enables bulk data "
+                    f"extraction at attacker-driven scale."
+                ),
+            ))
+    return out
+
+
+def link_heuristic_bola_at_scale_chain(
+    findings: list[Finding],
+) -> list[ChainLink]:
+    """**iter-33.3 — heuristic BOLA-at-scale chain.**
+
+    Any IDOR/BOLA finding + any weak-auth-token finding (weak JWT,
+    weak crypto on session, hardcoded secret) on the same target →
+    chain. The token forgery enables sweep-style IDOR (probe all IDs
+    as 'authenticated' attacker).
+    """
+    out: list[ChainLink] = []
+    idors = [
+        f for f in findings
+        if (f.category or "").lower() in ("idor", "bola", "bfla")
+    ]
+    weak_auth = [
+        f for f in findings
+        if (f.category or "").lower() in (
+            "jwt", "jwt_weak", "weak_crypto", "session_fixation",
+            "hardcoded_secret",
+        )
+    ]
+    seen_pairs: set[tuple[str, str]] = set()
+    for a in idors:
+        for b in weak_auth:
+            if a.id == b.id:
+                continue
+            if not _same_target(a, b):
+                continue
+            pair = tuple(sorted((a.id, b.id)))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            out.append(ChainLink(
+                finding_a=a.id, finding_b=b.id,
+                link_type=LINK_HEURISTIC_BOLA_AT_SCALE,
+                confidence=0.7,
+                rationale=(
+                    f"BOLA-at-scale chain — IDOR ({a.category}) + "
+                    f"weak auth token ({b.category}) on same target. "
+                    f"Token forgery enables sweep-style enumeration "
+                    f"of every object the IDOR exposes."
+                ),
+            ))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Linker registry
 # ---------------------------------------------------------------------------
 
@@ -668,4 +898,11 @@ LINKER_REGISTRY: list[Callable[[list[Finding]], list[ChainLink]]] = [
     link_cors_reflection_to_ssrf_chain,
     link_jwt_confusion_chain,
     link_auth_bypass_via_method_override,
+    # iter-33.3 — shape-based heuristic linkers (broader recall
+    # than the strict CWE/endpoint matchers; lower per-link
+    # confidence ~0.7 because they fire on category families).
+    link_heuristic_priv_escalation_chain,
+    link_heuristic_credential_extraction_chain,
+    link_heuristic_data_exfil_chain,
+    link_heuristic_bola_at_scale_chain,
 ]
