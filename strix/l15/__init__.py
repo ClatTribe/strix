@@ -25,6 +25,11 @@ from strix.l15.corroborator import (
     CorroboratorLedger,
     corroborator_ledger,
 )
+from strix.l15.endpoint_classifier import (  # iter-29.1
+    EndpointProfile,
+    classify_endpoint,
+    classify_endpoints_batch,
+)
 from strix.l15.exploitability import (
     ExploitabilityScore,
     apply_exploitability_to_severity,
@@ -117,4 +122,8 @@ __all__ = [
     "record_planned_bundle",
     # iter-26.8 — stealth payload guidance
     "stealth_addendum_for",
+    # iter-29.1 — endpoint classifier (foundation for shape-aware exploitation)
+    "EndpointProfile",
+    "classify_endpoint",
+    "classify_endpoints_batch",
 ]
