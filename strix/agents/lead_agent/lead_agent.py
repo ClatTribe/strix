@@ -194,6 +194,58 @@ _AUTH_CRAWL_DIRECTIVE = (
 
 
 # ---------------------------------------------------------------------------
+# iter-32.2 — recon-first directive.
+#
+# Empirically: the post-iter-30.5 L2 Juice Shop standard-mode run
+# (host-docker-internal-3001_77fa) showed `endpoints_discovered_total=0`
+# because the lead jumped straight to specialist scan_* tools without
+# first calling the recon pipeline (crawl_with_katana, bfs_crawl,
+# openapi_spec_ingest, etc.). The iter-32.1 wiring routes those tools'
+# output into workflow_state.record_endpoint_discovered, but the
+# wiring is moot if the agent doesn't invoke the wired tools.
+#
+# Without a pre-scan inventory, fan-out (above) has nothing to fan
+# OVER — the lead probes only the seed URL it was handed plus a
+# handful of LLM-hallucinated paths. This directive forces the
+# inventory-first sequencing that DAST best-practice (sqlmap / nuclei /
+# Burp pro) treats as default: enumerate → fan-out → verify.
+# ---------------------------------------------------------------------------
+_RECON_FIRST_DIRECTIVE = (
+    "RECON BEFORE SCAN — INVENTORY IS NON-OPTIONAL.\n\n"
+    "Before invoking ANY `scan_*` specialist (scan_sqli / scan_xss / "
+    "scan_idor / scan_path_traversal / csrf_check / "
+    "open_redirect_check / etc.), you MUST first establish an "
+    "endpoint inventory by running the appropriate recon tools for "
+    "the target type:\n\n"
+    "  * web_application target → `crawl_with_katana` (JS-aware "
+    "crawl) is the primary anchor. Follow with `bfs_crawl` for "
+    "deeper HTML-form discovery if katana under-returns, and "
+    "`well_known_harvest` for /.well-known/* + sitemap.xml + "
+    "robots.txt enumeration. `probe_hosts_httpx` only when target "
+    "scope includes multiple hosts.\n"
+    "  * api target → `openapi_spec_ingest` is the primary anchor "
+    "(spec exposes EVERY endpoint by design; HTML crawling is "
+    "pointless on a JSON API). If no spec found, fall back to "
+    "`crawl_with_katana`.\n"
+    "  * ip / cidr target → `probe_hosts_httpx` first to map open "
+    "HTTP services, then per-host web_application recon.\n\n"
+    "After recon completes, query `workflow_status()` to confirm "
+    "the endpoint inventory is non-empty. If recon returned ZERO "
+    "endpoints, that's the signal — investigate WHY (auth wall? "
+    "static-only site? wrong host?) before assuming there's no "
+    "attack surface. Don't proceed to specialist dispatch with an "
+    "empty inventory.\n\n"
+    "Counter-pattern to AVOID: invoking `scan_sqli` or "
+    "`scan_xss` with the raw target URL as the sole endpoint. The "
+    "scanner needs a list of paths-with-params to probe; without "
+    "recon, you're testing one URL.\n\n"
+    "Time discipline: recon is ~2-5 min on a typical web app, "
+    "<1 min on an API with an OpenAPI spec. Budget it explicitly — "
+    "don't skip it to save time."
+)
+
+
+# ---------------------------------------------------------------------------
 # Recall-lift PR-1 — specialist fan-out directive.
 #
 # Empirically: the failing testfire run made 100 tool calls but spent
@@ -339,6 +391,8 @@ _LEAD_L15_AWARENESS_DIRECTIVE = (
 # (see `_LEAD_OPERATING_DIRECTIVE` reference below).
 _LEAD_SYSTEM_PROMPT_ADDENDUM = (
     _LEAD_SYSTEM_PROMPT_ADDENDUM
+    + "\n\n"
+    + _RECON_FIRST_DIRECTIVE  # iter-32.2 — recon before specialist dispatch
     + "\n\n"
     + _AUTH_CRAWL_DIRECTIVE
     + "\n\n"
