@@ -184,6 +184,9 @@ def test_score_finding_full_context():
 
 
 def test_score_finding_missing_author_and_fix():
+    """iter-32.3 — for a web/api finding (only endpoint, no file),
+    `author` is NOT_APPLICABLE rather than MISSING (git_blame doesn't
+    apply to remote targets)."""
     f = {
         "id": "v1", "title": "X",
         "endpoint": "/api/users",
@@ -191,7 +194,10 @@ def test_score_finding_missing_author_and_fix():
         "business_impact_plain": "blah",
     }
     s = score_finding_context(f)
-    assert "author" in s.dimensions_missing
+    # author is structurally N/A on this web-only finding
+    assert "author" in s.dimensions_not_applicable
+    assert "author" not in s.dimensions_missing
+    # fix_hint genuinely missing
     assert "fix_hint" in s.dimensions_missing
     assert "location" in s.dimensions_present
     # poc_script_code is also an actionable field
@@ -199,10 +205,126 @@ def test_score_finding_missing_author_and_fix():
 
 
 def test_score_finding_completely_bare():
+    """iter-32.3 — a bare finding without ANY location field is
+    treated as web/api-like (no file → author N/A). 4 dims missing,
+    1 N/A."""
     s = score_finding_context({"id": "v0", "title": "bare"})
     assert s.dimensions_present == []
-    assert len(s.dimensions_missing) == 5
+    assert len(s.dimensions_missing) == 4  # location, fix_hint, exploit, impact
+    assert s.dimensions_not_applicable == ["author"]
     assert s.actionable is False
+
+
+# ---------------------------------------------------------------------------
+# iter-32.3 — applicable-dimension semantics
+# ---------------------------------------------------------------------------
+
+def test_iter_32_3_web_only_finding_author_is_not_applicable():
+    """Web/api finding with endpoint but no file: `author` (git_blame)
+    can't apply. Should be classified N/A, not MISSING."""
+    f = {
+        "id": "v1", "endpoint": "/api/users",
+        "impact": "x", "recommended_action": "fix",
+        "poc_script_code": "curl", "title": "X",
+    }
+    s = score_finding_context(f)
+    assert "author" in s.dimensions_not_applicable
+    assert "author" not in s.dimensions_missing
+    assert "author" not in s.dimensions_present
+
+
+def test_iter_32_3_code_finding_author_is_applicable():
+    """Code finding (has file): `author` IS applicable and counts as
+    missing when blame_author is empty."""
+    f = {
+        "id": "v1", "file": "app.py", "line": 22,
+        # no blame_author, no git_blame
+    }
+    s = score_finding_context(f)
+    assert "author" in s.dimensions_missing
+    assert "author" not in s.dimensions_not_applicable
+
+
+def test_iter_32_3_code_finding_with_author_populated():
+    """Code finding with blame_author populated: present."""
+    f = {
+        "id": "v1", "file": "app.py", "line": 22,
+        "blame_author": "alice@x.com",
+    }
+    s = score_finding_context(f)
+    assert "author" in s.dimensions_present
+
+
+def test_iter_32_3_web_finding_with_populated_author_still_counts_present():
+    """If the agent populated blame_author even on a web target
+    (unusual but possible), credit them with the data — don't
+    silently demote to N/A."""
+    f = {
+        "id": "v1", "endpoint": "/api/x",
+        "blame_author": "someone@example.com",
+    }
+    s = score_finding_context(f)
+    assert "author" in s.dimensions_present
+    assert "author" not in s.dimensions_not_applicable
+
+
+def test_iter_32_3_code_locations_alt_path_triggers_applicable_author():
+    """When file is encoded as code_locations[0].file (alt path),
+    author is applicable."""
+    f = {
+        "id": "v1",
+        "code_locations": [{"file": "app.py", "line_number": 22}],
+    }
+    s = score_finding_context(f)
+    assert "author" in s.dimensions_missing
+    assert "author" not in s.dimensions_not_applicable
+
+
+def test_iter_32_3_full_context_excludes_NA_dimensions_from_denominator():
+    """A web-only finding with all 4 APPLICABLE dimensions populated
+    counts as full context (4/4) — the N/A `author` doesn't block it."""
+    f = {
+        "id": "v1", "endpoint": "/api/x",
+        "impact": "high", "recommended_action": "fix",
+        "poc_script_code": "curl ...",
+    }
+    r = score_fixture_context("test", [f])
+    assert r.findings_with_full_context == 1
+    assert r.context_completeness == 1.0
+
+
+def test_iter_32_3_full_context_on_code_target_requires_all_5():
+    """A code-target finding must populate ALL 5 dimensions (incl.
+    author) to count as full context."""
+    f_missing_author = {
+        "id": "v1", "file": "app.py", "line": 22,
+        "impact": "x", "recommended_action": "fix",
+        "poc_script_code": "curl",
+        # missing blame_author
+    }
+    r = score_fixture_context("test", [f_missing_author])
+    # 4/5 applicable populated → not "full context"
+    assert r.findings_with_full_context == 0
+    assert r.context_completeness == 0.0
+
+
+def test_iter_32_3_per_dimension_presence_only_counts_present():
+    """The per_dimension_presence histogram counts ONLY populated
+    fields — N/A dimensions don't add to either present or missing."""
+    findings = [
+        {"id": "v1", "endpoint": "/x", "impact": "y"},  # web, no author
+        {"id": "v2", "file": "a.py", "line": 1,
+         "blame_author": "bob"},                         # code, has author
+    ]
+    r = score_fixture_context("test", findings)
+    # author present on v2 only (v1's author is N/A, not missing)
+    assert r.per_dimension_presence["author"] == 1
+
+
+def test_iter_32_3_dimensions_not_applicable_serializable():
+    f = {"id": "v1", "endpoint": "/api/x"}
+    s = score_finding_context(f)
+    json.dumps(s.to_dict())
 
 
 # ---------------------------------------------------------------------------
