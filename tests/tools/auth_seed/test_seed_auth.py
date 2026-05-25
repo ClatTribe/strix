@@ -249,6 +249,43 @@ def test_candidates_skip_get_form_when_falling_back():
 # seed_auth — top-level
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Sandbox-mode URL rewrite (iter-28 follow-up fix)
+# ---------------------------------------------------------------------------
+
+def test_sandbox_mode_rewrites_localhost(monkeypatch):
+    """When STRIX_SANDBOX_MODE=true, localhost/127.0.0.1 must be
+    rewritten to host.docker.internal so the request actually reaches
+    the host's docker-compose'd SUT instead of the sandbox itself.
+
+    Caught during iter-28 L1 bench against juice-shop: seed_auth
+    tried 15 candidate registration paths against `localhost:3001`
+    from inside the sandbox container; every connection refused
+    because localhost was the sandbox, not the host.
+    """
+    monkeypatch.setenv("STRIX_SANDBOX_MODE", "true")
+    from strix.tools.auth_seed.seed_auth import _rewrite_for_sandbox
+    assert _rewrite_for_sandbox("http://localhost:3001/register") == \
+        "http://host.docker.internal:3001/register"
+    assert _rewrite_for_sandbox("http://127.0.0.1:8080/api/users") == \
+        "http://host.docker.internal:8080/api/users"
+    # Already-correct URLs passed through unchanged
+    assert _rewrite_for_sandbox("http://host.docker.internal:3001/x") == \
+        "http://host.docker.internal:3001/x"
+    # External hosts NOT rewritten
+    assert _rewrite_for_sandbox("https://example.com/api") == \
+        "https://example.com/api"
+
+
+def test_rewrite_noop_on_host(monkeypatch):
+    """Outside the sandbox (host invocation), no rewrite — `localhost`
+    is the right hostname for the bench harness."""
+    monkeypatch.delenv("STRIX_SANDBOX_MODE", raising=False)
+    from strix.tools.auth_seed.seed_auth import _rewrite_for_sandbox
+    assert _rewrite_for_sandbox("http://localhost:3001/x") == \
+        "http://localhost:3001/x"
+
+
 def test_seed_auth_rejects_empty_target():
     out = seed_auth(target_url="")
     assert out["success"] is False
