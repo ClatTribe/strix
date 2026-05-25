@@ -19,6 +19,13 @@ docker:
   wait_url: http://127.0.0.1:5001/
   wait_timeout_seconds: 60
 
+# iter-31.9 — surface_discovery_breadth ground truth. VAmPI's OpenAPI
+# spec at root declares ~25 endpoints (users/v1/*, books/v1/*, etc.).
+# Recon should ingest the spec + discover via crawl. Conservative
+# floor of 20 leaves room for spec-version drift while still
+# requiring the openapi_spec_ingest path to fire.
+expected_endpoint_count: 20
+
 expected_findings:
   # API1:2023 — BOLA
   - id: bola-user-by-username

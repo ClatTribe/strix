@@ -898,6 +898,46 @@ class Tracer:
             # "does the PoC reproduce on re-fire" signal without
             # re-walking vulnerability_reports.
             **self._build_reproducibility_summary(),
+            # iter-31.9 — surface_discovery_breadth signal (metric #5).
+            # Bench compares against fixture YAML `expected_endpoint_count`.
+            **self._build_surface_breadth_summary(),
+        }
+
+    def _build_surface_breadth_summary(self) -> dict[str, Any]:
+        """iter-31.9 — surface enumeration rollup from workflow_state.
+
+        Pulls the count of pre-auth + post-auth discovered endpoints
+        from `strix.agents.workflow_state.snapshot()`. Tolerant of the
+        workflow module being absent / mocked out (returns zero on
+        any error). Per docs/metrics.md §1.1 the metric is
+        `unique_endpoints_probed / unique_endpoints_actually_present`;
+        this method surfaces the numerator. The bench supplies the
+        denominator from fixture YAML.
+
+        Returns dict with:
+          * `endpoints_discovered_total` — unique endpoint count
+          * `endpoints_discovered_pre_auth` — pre-auth subset count
+          * `endpoints_discovered_post_auth` — post-auth subset count
+          * `endpoints_discovered_sample` — first 20 unprobed
+            endpoints (sorted) for debugging visibility in
+            run_summary.json
+        """
+        try:
+            from strix.agents.workflow_state import snapshot as ws_snapshot
+            s = ws_snapshot() or {}
+            pre = int(s.get("endpoints_discovered_count") or 0)
+            post = int(s.get("post_auth_endpoints_discovered_count") or 0)
+            sample = list(s.get("unprobed_endpoints_sample") or [])[:20]
+        except Exception:  # noqa: BLE001
+            logger.debug("surface_breadth summary failed", exc_info=True)
+            pre = 0
+            post = 0
+            sample = []
+        return {
+            "endpoints_discovered_total": pre + post,
+            "endpoints_discovered_pre_auth": pre,
+            "endpoints_discovered_post_auth": post,
+            "endpoints_discovered_sample": sample,
         }
 
     def _build_reproducibility_summary(self) -> dict[str, Any]:
