@@ -3846,6 +3846,35 @@ async def run_oss_anchor_prepass(
                         }],
                     },
                 ))
+            # iter-30.3 — always emit a dispatcher-summary tool_result
+            # so the bench markdown reflects what the dispatcher did
+            # even when findings=[] (otherwise it's invisible —
+            # indistinguishable from "didn't run").
+            summary.tool_results.append(ToolResult(
+                tool_name="shape_aware_dispatcher",
+                status="ok" if dispatch_summary.findings else "partial",
+                findings_count=len(dispatch_summary.findings),
+                wall_time_s=dispatch_summary.wall_time_s,
+                raw_result={
+                    "status": "ok",
+                    "findings": [],   # per-finding entries above carry actual findings
+                    "endpoints_seen": dispatch_summary.endpoints_seen,
+                    "endpoints_probed": dispatch_summary.endpoints_probed,
+                    "endpoints_skipped_static": dispatch_summary.endpoints_skipped_static,
+                    "endpoints_skipped_destructive": dispatch_summary.endpoints_skipped_destructive,
+                    "payloads_fired": dispatch_summary.payloads_fired,
+                    "signals_above_threshold": dispatch_summary.signals_above_threshold,
+                },
+                error_reason=(
+                    None if dispatch_summary.findings
+                    else (
+                        f"fired {dispatch_summary.payloads_fired} payload(s) across "
+                        f"{dispatch_summary.endpoints_probed} endpoint(s); "
+                        f"{dispatch_summary.signals_above_threshold} signal(s) above 0.5 threshold; "
+                        f"0 verified findings"
+                    )
+                ),
+            ))
             summary.tools_run.append("shape_aware_dispatcher")
             summary.tools_succeeded.append("shape_aware_dispatcher")
             logger.info(
