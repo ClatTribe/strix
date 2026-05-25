@@ -410,6 +410,18 @@ def advance_phase(
                 "mid-scan correlate error at phase boundary: %s",
                 result.error,
             )
+        # iter-31.6 — record every phase-correlation invocation on the
+        # tracer so build_run_summary() can surface phase_correlations[]
+        # for the bench. We record even error/zero-chain results — that's
+        # the signal that "L1.5 tried but didn't find anything new at
+        # this phase," which is itself a useful telemetry datapoint.
+        try:
+            from strix.telemetry.tracer import get_global_tracer
+            tr = get_global_tracer()
+            if tr is not None:
+                tr.record_phase_correlation(result)
+        except Exception:  # noqa: BLE001
+            logger.debug("phase_correlation telemetry record failed", exc_info=True)
     except Exception as e:  # noqa: BLE001
         logger.debug("mid-scan correlate hook failed: %s", e)
     return True, "ok"
