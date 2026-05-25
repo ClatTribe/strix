@@ -16,6 +16,14 @@ docker:
   wait_url: http://127.0.0.1:3001/rest/admin/application-version
   wait_timeout_seconds: 90
 
+# iter-31.9 — surface_discovery_breadth ground truth. Curated lower
+# bound on the unique HTTP endpoints L1's recon (katana + openapi
+# ingest + crawler) SHOULD discover. Juice Shop has ~80 distinct API
+# routes + ~50 SPA routes — we set the bench target at 60 which is
+# a conservative recall floor that exercises pre-auth crawl + JS
+# parsing without requiring every hash-route to be visited.
+expected_endpoint_count: 60
+
 expected_findings:
   - id: sqli-login
     category: sqli
