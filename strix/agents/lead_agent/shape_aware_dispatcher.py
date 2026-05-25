@@ -274,17 +274,30 @@ def shape_aware_dispatch(
     # ----- Build candidate endpoint list -----
     candidates: list[dict[str, Any]] = []
 
-    # From openapi / katana endpoints
+    # From openapi / katana endpoints. Param normalization is critical:
+    # openapi_spec_ingest emits `params=[{"name": "...", "in": "path",
+    # "schema": {...}}, ...]` (OpenAPI parameter objects), while katana
+    # emits `params=["id", "q"]` (bare name strings). The dispatcher
+    # only needs the name strings — flatten the OpenAPI objects.
     for ep in endpoints or []:
         url = ep.get("url") or ep.get("endpoint") or ""
         if not url:
             continue
         if not url.startswith(("http://", "https://")):
             url = urljoin(base_url.rstrip("/") + "/", url.lstrip("/"))
+        raw_params = ep.get("params") or []
+        normalized_params: list[str] = []
+        for p in raw_params:
+            if isinstance(p, str):
+                normalized_params.append(p)
+            elif isinstance(p, dict):
+                name = p.get("name")
+                if isinstance(name, str) and name:
+                    normalized_params.append(name)
         candidates.append({
             "url": url,
             "method": (ep.get("method") or "GET").upper(),
-            "params": list(ep.get("params") or []),
+            "params": normalized_params,
             "_source": "endpoint",
         })
 
@@ -293,11 +306,16 @@ def shape_aware_dispatch(
         action = f.get("action") or "/"
         if not action.startswith(("http://", "https://")):
             action = urljoin(base_url.rstrip("/") + "/", action.lstrip("/"))
-        params = [
-            i.get("name") for i in (f.get("inputs") or [])
-            if isinstance(i, dict) and i.get("name")
-            and (i.get("type") or "").lower() != "hidden"
-        ]
+        params: list[str] = []
+        for i in (f.get("inputs") or []):
+            if not isinstance(i, dict):
+                continue
+            name = i.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            if (i.get("type") or "").lower() == "hidden":
+                continue
+            params.append(name)
         candidates.append({
             "url": action,
             "method": (f.get("method") or "POST").upper(),
