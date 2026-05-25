@@ -400,12 +400,19 @@ def shape_aware_dispatch(
                     profile.shape, method, params, payload,
                 )
 
-                # Fire-and-diff (29.2)
+                # Fire-and-diff (29.2 + iter-30.5 shape-aware benign control)
                 try:
                     signal = fire_and_diff(
                         url=attack_url, method=method,
                         attack_payload=attack_kwargs,
                         timeout=timeout,
+                        # iter-30.5 — pass shape + params so the baseline
+                        # uses a benign-shape body on POST/PUT/PATCH
+                        # instead of the no-body request that the server
+                        # rejects (collapsing baseline + attack to identical
+                        # 400 responses and zero diff signal).
+                        shape=profile.shape,
+                        params=params,
                     )
                 except Exception as e:  # noqa: BLE001
                     logger.debug("fire_and_diff failed: %s", e)
@@ -428,9 +435,13 @@ def shape_aware_dispatch(
                 # alternative payload).
                 variant = _pick_variant_payload(payloads, payload)
 
-                def _rerun(_u=attack_url, _m=method, _k=attack_kwargs) -> DiffSignal:
+                def _rerun(
+                    _u=attack_url, _m=method, _k=attack_kwargs,
+                    _shape=profile.shape, _params=params,
+                ) -> DiffSignal:
                     return fire_and_diff(
                         url=_u, method=_m, attack_payload=_k, timeout=timeout,
+                        shape=_shape, params=_params,  # iter-30.5
                     )
 
                 variant_fn = None
@@ -442,10 +453,14 @@ def shape_aware_dispatch(
                         profile.shape, method, params, variant,
                     )
 
-                    def _variant_fn(_u=v_url, _m=method, _k=v_kwargs) -> DiffSignal:
+                    def _variant_fn(
+                        _u=v_url, _m=method, _k=v_kwargs,
+                        _shape=profile.shape, _params=params,
+                    ) -> DiffSignal:
                         return fire_and_diff(
                             url=_u, method=_m, attack_payload=_k,
                             timeout=timeout,
+                            shape=_shape, params=_params,  # iter-30.5
                         )
 
                     variant_fn = _variant_fn
