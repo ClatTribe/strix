@@ -3809,13 +3809,45 @@ async def run_oss_anchor_prepass(
                 endpoints=endpoints_aggregate,
                 timeout=timeout_s,
             )
-            # Surface dispatch stats as tool_results so the bench output
-            # shows what fired. Each emitted finding already went through
-            # the tracer (in _emit_to_tracer), so total_findings counts
-            # them automatically on the next sweep — but mirror here for
-            # immediate visibility.
+            # iter-30.2 — surface dispatcher findings as proper
+            # ToolResult entries on summary.tool_results. Each
+            # dispatcher finding becomes a synthetic ToolResult with
+            # `raw_result.findings = [{...}]` shaped like a
+            # SpecialistResult, so the L1 bench harness's
+            # `for r in summary.tool_results: for f in raw.get("findings")`
+            # scoring path picks them up. Without this, dispatcher
+            # findings are visible to L2 (via tracer) but invisible to
+            # L1 bench recall scoring.
+            #
+            # Generic shape — works for any future post-prepass
+            # dispatcher that produces findings.
             for f in dispatch_summary.findings:
                 summary.total_findings += 1
+                summary.tool_results.append(ToolResult(
+                    tool_name=f"shape_aware_dispatcher[{f.vuln_class}@{f.method} {f.endpoint}]",
+                    status="ok",
+                    findings_count=1,
+                    raw_result={
+                        "status": "ok",
+                        "findings": [{
+                            "category": f.vuln_class,
+                            "endpoint": f.endpoint,
+                            "method": f.method,
+                            "payload_excerpt": f.payload_excerpt,
+                            "confidence": f.confidence,
+                            "score": f.score,
+                            "reasons": f.reasons,
+                            "description": (
+                                f"Shape-aware dispatcher: {f.vuln_class} on "
+                                f"{f.method} {f.endpoint} (confidence={f.confidence}, "
+                                f"score={f.score:.2f})"
+                            ),
+                            "evidence": "; ".join(f.reasons) if f.reasons else "",
+                        }],
+                    },
+                ))
+            summary.tools_run.append("shape_aware_dispatcher")
+            summary.tools_succeeded.append("shape_aware_dispatcher")
             logger.info(
                 "shape-aware dispatcher: endpoints_seen=%d probed=%d "
                 "payloads=%d signals=%d findings=%d wall=%.1fs",
