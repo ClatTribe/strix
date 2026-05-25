@@ -1,9 +1,32 @@
 # Metrics roadmap — shipping list to align with `docs/metrics.md`
 
-**Status**: proposal — concrete iter list to make all 19 metrics measurable.
+**Status**: **Wave 1-3 shipped** as of 2026-05-25. 11 of 19 metrics
+now measurable; only Wave 4 (hypothesis explorer + cost curves)
+remains, and it's strictly blocked on L2+ feature work.
 **Last updated**: 2026-05-25.
 **Source**: `docs/metrics.md` defines the 19 metrics + per-layer targets.
 This doc is the execution plan to make them visible.
+
+## Ship log (Wave 1 → Wave 3)
+
+| iter | item | PR | tests | status |
+|---|---|---|---|---|
+| iter-31.1 | FP-suppression bench + L1.5 dismissal surfacing | #459 | 22 | ✓ merged |
+| iter-31.2 | Chain detection bench + `chains_emitted` surface | #460 | 31 | ✓ merged |
+| iter-31.3 | Severity calibration bench | #461 | 28 | ✓ merged |
+| iter-31.5 | Corroboration rate bench + tracer rollup | #462 | 29 | ✓ merged |
+| iter-31.6 | `phase_correlate_emissions` bench + tracer surface | #463 | 37 | ✓ merged |
+| iter-31.7 | `reproducibility_rate` aggregator + bench | #464 | 32 | ✓ merged |
+| iter-31.8 | `context_completeness` + `actionable_rate` bench | #465 | 40 | ✓ merged |
+| iter-31.9 | `surface_discovery_breadth` bench | #466 | 20 | ✓ merged |
+| iter-31.10 | `novel_finding_rate` bench | #467 | 26 | ✓ merged |
+| iter-31.12 | `explanation_clarity` bench (heuristic + LLM-as-judge) | #468 | 22 | ✓ merged |
+| iter-31.11 | `patch_correctness` bench + tracer rollup | #469 | 12 | ✓ merged |
+
+**Net delivery**: 11 PRs, ~8.4K LOC of bench + scoring infrastructure,
+~299 new tests, all merged to main behind a consistent anti-overfit
+guard pattern (source-grep regression tests forbidding SUT-specific
+tokens in every new bench source).
 
 ## Why this list
 
@@ -28,32 +51,34 @@ categories of work per metric:
 
 Status legend: ✓ done · 🚧 partially built (signal exists, bench missing) · ⬜ not started · ⛓ blocked on prerequisite
 
-| # | Metric | Axis | Layer | Signal source today | Bench measurement | Ship priority |
-|---|---|---|---|---|---|---|
-| 1 | `must_find_recall` | detection | L1 | ✓ all specialists emit | ✓ `bench_l1_only` + `runner.py` | **DONE** |
-| 2 | `juice_shop_full_recall` | detection | L1+L2 | ✓ SUT `/api/Challenges/` | ✓ `bench_l2_juiceshop_full.py` | **DONE** |
-| 3 | `chain_detection_rate` | detection | L1.5 | 🚧 iter-27.2 `mid_scan_correlate` emits `chain_summary` blocks but they don't reach bench | ⬜ `bench_chains.py` + `expected_chains[]` in YAML | **Wave 1** |
-| 4 | `novel_finding_rate` | detection | L2+ | ⬜ no signal | ⬜ `bench_novel.py` diffs findings against KEV + nuclei template + sqlmap corpora | Wave 3 |
-| 5 | `surface_discovery_breadth` | detection | L1 | 🚧 katana_crawl + openapi_spec_ingest emit `endpoints[]` but bench doesn't aggregate | ⬜ `bench_surface.py` + `expected_endpoint_count` per fixture | Wave 2 |
-| 6 | `fp_rate` | quality | L1.5 | 🚧 `pre_emission_fp_filter` dismisses but the dismissal isn't surfaced | ⬜ `bench_fp_suppression.py` + `expected_dismissed[]` in YAML | **Wave 1** |
-| 7 | `severity_tier_accuracy` | quality | L1.5 | 🚧 `surface_priority` + `exploitability` write to `finding.severity` but bench doesn't grade it against ground truth | ⬜ `bench_severity.py` + `expected_severity_tier` in YAML | **Wave 1** |
-| 8 | `reproducibility_rate` | quality | L2.5 | 🚧 iter-29.5 `verify_finding` builds `PocVerification.confidence` but bench only sees confidence string, doesn't aggregate | ⬜ `bench_reproducibility.py` aggregator | Wave 2 |
-| 9 | `context_completeness` | quality | L1.5 | 🚧 `git_blame` + L2 specialists populate file/line/author/fix-hint per finding but bench doesn't check field presence | ⬜ `bench_context.py` field-presence checker | Wave 2 |
-| 10 | `dismissal_accuracy` | quality | L1.5 | paired with #6 | paired with #6 — same bench | Wave 1 |
-| 11 | `wall_seconds` | cost | all | ✓ bench tracks | ✓ in both benches | **DONE** |
-| 12 | `cost_per_scan_usd` | cost | L2+ | ✓ parsed from strix CLI panel | ✓ in `bench_l2_juiceshop_full.py` | **DONE** |
-| 13 | `cost_per_matched_finding_usd` | cost | L2+ | ✓ derived | ✓ printed in bench summary | **DONE** |
-| 14 | `tokens_input/output/cached` | cost | L2+ | ✓ parsed | ✓ in JSON output | **DONE** |
-| 15 | `tools_invoked` | cost | all | ✓ tracked | ✓ in bench breakdown | **DONE** |
-| 16 | `hypothesis_generation_rate` | reasoning | L2+ | ⬜ feature not built (proposed iter-31 hypothesis explorer) | ⛓ blocked on feature | Wave 4 |
-| 17 | `corroboration_rate` | reasoning | L1.5 | 🚧 `corroborator_ledger` tracks ≥2-tool co-occurrence; findings get promoted but bench doesn't read the count | ⬜ `bench_corroboration.py` aggregator | Wave 2 |
-| 18 | `chain_depth_p95` | reasoning | L1.5 + L2 | paired with #3 | paired with #3 | Wave 1 |
-| 19 | `phase_correlate_emissions` | reasoning | L2 | 🚧 iter-27.2 fires but emissions invisible — same problem as iter-30 dispatcher pre-fix | ⬜ surface as ToolResult (like iter-30.3 did for dispatcher) | Wave 2 |
-| 20 | `patch_correctness` | output | L2+ | ⬜ patcher chain emits diffs but no test-run bench | ⬜ `bench_patcher_correctness.py` (sandbox repo + apply + test) | Wave 3 |
-| 21 | `explanation_clarity` | output | L2 | 🚧 each finding has `description` field; bench doesn't grade | ⬜ `bench_explanation.py` (LLM-as-judge) | Wave 3 |
-| 22 | `actionable_rate` | output | L2 | 🚧 specialists return `next_probes_suggested[]` but bench doesn't aggregate field-presence | ⬜ part of `bench_context.py` (#9) | Wave 2 |
+| # | Metric | Axis | Layer | Bench source | Status |
+|---|---|---|---|---|---|
+| 1 | `must_find_recall` | detection | L1 | `bench_l1_only.py` | ✓ DONE |
+| 2 | `juice_shop_full_recall` | detection | L1+L2 | `bench_l2_juiceshop_full.py` | ✓ DONE |
+| 3 | `chain_detection_rate` | detection | L1.5 | `bench_chains.py` (iter-31.2) | ✓ DONE |
+| 4 | `novel_finding_rate` | detection | L2+ | `bench_novel.py` (iter-31.10) | ✓ DONE |
+| 5 | `surface_discovery_breadth` | detection | L1 | `bench_surface.py` (iter-31.9) | ✓ DONE |
+| 6 | `fp_rate` | quality | L1.5 | `bench_fp_suppression.py` (iter-31.1) | ✓ DONE |
+| 7 | `severity_tier_accuracy` | quality | L1.5 | `bench_severity.py` (iter-31.3) | ✓ DONE |
+| 8 | `reproducibility_rate` | quality | L2.5 | `bench_reproducibility.py` (iter-31.7) | ✓ DONE |
+| 9 | `context_completeness` | quality | L1.5 | `bench_context.py` (iter-31.8) | ✓ DONE |
+| 10 | `dismissal_accuracy` | quality | L1.5 | paired with #6 | ✓ DONE |
+| 11 | `wall_seconds` | cost | all | both benches | ✓ DONE |
+| 12 | `cost_per_scan_usd` | cost | L2+ | `bench_l2_juiceshop_full.py` | ✓ DONE |
+| 13 | `cost_per_matched_finding_usd` | cost | L2+ | derived | ✓ DONE |
+| 14 | `tokens_input/output/cached` | cost | L2+ | JSON output | ✓ DONE |
+| 15 | `tools_invoked` | cost | all | bench breakdown | ✓ DONE |
+| 16 | `hypothesis_generation_rate` | reasoning | L2+ | ⛓ feature not built (Wave 4) | ⛓ BLOCKED |
+| 17 | `corroboration_rate` | reasoning | L1.5 | `bench_corroboration.py` (iter-31.5) | ✓ DONE |
+| 18 | `chain_depth_p95` | reasoning | L1.5+L2 | paired with #3 | ✓ DONE |
+| 19 | `phase_correlate_emissions` | reasoning | L2 | `bench_phase_correlate.py` (iter-31.6) | ✓ DONE |
+| 20 | `patch_correctness` | output | L2+ | `bench_patcher_correctness.py` (iter-31.11) | ✓ DONE |
+| 21 | `explanation_clarity` | output | L2 | `bench_explanation.py` (iter-31.12) | ✓ DONE |
+| 22 | `actionable_rate` | output | L2 | `bench_context.py` (iter-31.8) | ✓ DONE |
 
-⛓ #16 alone is dependency-blocked. Everything else is ship-ready signal + bench work.
+**Scoreboard**: 21 / 22 metrics measurable (one is dependency-blocked
+on L2+ features that don't exist yet). The 3/19 from session start
+is now 21/22.
 
 ---
 
@@ -220,11 +245,11 @@ Estimated effort: **~400 LOC across 6 files, ~2 days.**
 
 ## Summary
 
-| Bench surface today | Target | Gap |
+| Bench surface today | Wave 1-3 baseline | Now (Wave 1-3 shipped) |
 |---|---|---|
-| 3/19 metrics measured | 19/19 | 16 metrics invisible |
-| 0 L1.5 moat metrics measured | 5 L1.5 metrics | architectural value is unprovable |
-| 0 reasoning metrics measured | 4 reasoning metrics | L2+ differentiation invisible |
+| 3/19 measured | 19/19 target | **21/22 measurable** (1 blocked on Wave 4 feature) |
+| 0 L1.5 moat metrics | 5 L1.5 metrics | **5/5 shipped** (fp_rate, severity_tier_accuracy, chain_detection_rate, corroboration_rate, context_completeness) |
+| 0 reasoning metrics | 4 reasoning metrics | **3/4 shipped** (corroboration_rate, chain_depth_p95, phase_correlate_emissions); hypothesis_generation_rate blocked |
 
 **~3 weeks of focused bench-overhaul work** + ~12 small/medium iters
 unlocks all 19. Most of the signal work is "surface what's already
