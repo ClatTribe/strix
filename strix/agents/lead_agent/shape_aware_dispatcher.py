@@ -85,7 +85,7 @@ _PAYLOAD_CAP_PER_ENDPOINT = 6
 # Per-endpoint vuln-class cap — at most N attack classes per endpoint.
 _VULN_CLASS_CAP_PER_ENDPOINT = 3
 # Score threshold to bother PoC-verifying
-_VERIFY_THRESHOLD = 0.5
+_VERIFY_THRESHOLD = 0.4  # iter-30.4: lowered from 0.5 — PoC verifier catches FPs
 # Max endpoints processed per scan (avoid exploding wall time on huge SUTs)
 _ENDPOINT_CAP_DEFAULT = 40
 
