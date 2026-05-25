@@ -290,6 +290,31 @@ def _try_register(
         return None, f"{type(e).__name__}: {e}"
 
 
+def _rewrite_for_sandbox(url: str) -> str:
+    """When running inside the sandbox container, `localhost` and
+    `127.0.0.1` resolve to the sandbox itself — NOT the host's
+    docker-compose'd target. Rewrite to `host.docker.internal` which
+    is wired into the container via `extra_hosts`.
+
+    The bench harness rewrites `host.docker.internal → localhost`
+    for host-side tool invocations (which need localhost to reach the
+    SUT). Sandbox-execution tools have to undo this. Detected via
+    STRIX_SANDBOX_MODE=true env set by docker-entrypoint.sh.
+
+    No-op when not in sandbox mode (running on host directly).
+    """
+    if os.environ.get("STRIX_SANDBOX_MODE", "").lower() != "true":
+        return url
+    parsed = urlparse(url)
+    if parsed.hostname in ("localhost", "127.0.0.1"):
+        # Replace just the hostname; preserve scheme, port, path, query
+        new_netloc = "host.docker.internal"
+        if parsed.port:
+            new_netloc += f":{parsed.port}"
+        return parsed._replace(netloc=new_netloc).geturl()
+    return url
+
+
 def _generate_candidate_endpoints(
     target_url: str, forms: list[dict[str, Any]] | None,
 ) -> list[tuple[str, dict[str, Any] | None]]:
@@ -383,6 +408,11 @@ def seed_auth(
             "candidates_tried": 0,
         }
 
+    # iter-28 fix: when running in sandbox mode, rewrite localhost →
+    # host.docker.internal so we can reach the host's docker-compose'd
+    # SUT instead of the sandbox itself.
+    target_url = _rewrite_for_sandbox(target_url.strip())
+
     # Idempotent: if we already seeded an account this scan, no-op.
     if os.environ.get("STRIX_AUTH_BEARER") or os.environ.get("STRIX_AUTH_COOKIE"):
         return {
@@ -396,7 +426,7 @@ def seed_auth(
         }
 
     creds = _generate_test_account()
-    candidates = _generate_candidate_endpoints(target_url.strip(), forms)
+    candidates = _generate_candidate_endpoints(target_url, forms)
     if not candidates:
         return {
             "success": False, "status": "partial",

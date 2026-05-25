@@ -30,6 +30,7 @@ direction).
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -39,6 +40,21 @@ from strix.tools.registry import register_tool
 
 
 logger = logging.getLogger(__name__)
+
+
+def _rewrite_for_sandbox(url: str) -> str:
+    """When running inside the sandbox container, localhost / 127.0.0.1
+    refers to the sandbox itself, not the host's docker-compose'd SUT.
+    Rewrite to `host.docker.internal`. No-op on host invocation."""
+    if os.environ.get("STRIX_SANDBOX_MODE", "").lower() != "true":
+        return url
+    parsed = urlparse(url)
+    if parsed.hostname in ("localhost", "127.0.0.1"):
+        new_netloc = "host.docker.internal"
+        if parsed.port:
+            new_netloc += f":{parsed.port}"
+        return parsed._replace(netloc=new_netloc).geturl()
+    return url
 
 
 # Top default credentials — sourced from public SecLists corpus
@@ -339,7 +355,8 @@ def probe_default_creds(
             "attempts_made": 0, "credential_found": None,
         }
 
-    parsed = urlparse(target_url.strip())
+    target_url = _rewrite_for_sandbox(target_url.strip())
+    parsed = urlparse(target_url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return {
             "success": False, "status": "error",
@@ -356,7 +373,7 @@ def probe_default_creds(
     detected_pass_field = password_field
 
     if login_url:
-        candidate_urls = [login_url]
+        candidate_urls = [_rewrite_for_sandbox(login_url)]
     elif forms:
         login_form = _detect_login_form(forms)
         if login_form is not None:

@@ -29,12 +29,30 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import requests
 
 from strix.tools.registry import register_tool
+
+
+def _rewrite_for_sandbox(url: str) -> str:
+    """When running inside the sandbox container, localhost / 127.0.0.1
+    refers to the sandbox itself, not the host's docker-compose'd SUT.
+    Rewrite to `host.docker.internal` (wired in via `extra_hosts`).
+    No-op when not in sandbox mode (host invocation). See seed_auth
+    for the canonical comment block."""
+    if os.environ.get("STRIX_SANDBOX_MODE", "").lower() != "true":
+        return url
+    parsed = urlparse(url)
+    if parsed.hostname in ("localhost", "127.0.0.1"):
+        new_netloc = "host.docker.internal"
+        if parsed.port:
+            new_netloc += f":{parsed.port}"
+        return parsed._replace(netloc=new_netloc).geturl()
+    return url
 
 
 logger = logging.getLogger(__name__)
@@ -279,7 +297,8 @@ def discover_graphql_endpoints(
             "endpoints_found": 0, "endpoints": [],
         }
 
-    parsed = urlparse(target_url.strip())
+    target_url = _rewrite_for_sandbox(target_url.strip())
+    parsed = urlparse(target_url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return {
             "success": False, "status": "error",
