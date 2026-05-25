@@ -873,6 +873,61 @@ class Tracer:
             # mid_scan_correlate (iter-27.2). Bench_chains reads this.
             "chains_emitted": self._collect_chains_emitted(),
             "chains_emitted_count": len(self._collect_chains_emitted()),
+            # iter-31.5 — corroboration rollup for the `corroboration_rate`
+            # metric (#17 in docs/metrics.md). The bench reads this
+            # without having to re-walk vulnerability_reports.
+            **self._build_corroboration_summary(),
+        }
+
+    def _build_corroboration_summary(self) -> dict[str, Any]:
+        """iter-31.5 — aggregate L1.5 corroborator_ledger output.
+
+        Returns a dict with three keys:
+          * `corroborations` — list of per-parent records:
+              {parent_id, parent_severity, parent_category, parent_endpoint,
+               corroborator_ids[], source_count}
+            (source_count = 1 parent + len(corroborator_ids))
+          * `corroborations_count` — number of parents corroborated
+            (i.e. with `corroborated_by[]` populated by ≥1 sibling)
+          * `corroboration_rate` — corroborated parents divided by the
+            total emitted-finding count (excluding corroborator roles,
+            which are siblings of the parent). 0.0 when no findings.
+
+        The "rate" here is "share of distinct findings that ≥2 sources
+        agreed on" — what the bench actually wants to measure for
+        `corroboration_rate` per docs/metrics.md §1.4.
+        """
+        parents: list[dict[str, Any]] = []
+        # Total denominator: findings that ARE themselves a parent
+        # candidate (i.e. not just a corroborator sibling).
+        parent_eligible_total = 0
+
+        for r in self.vulnerability_reports:
+            # Skip corroborator siblings — they're attached to a parent,
+            # not their own finding row from the bench's POV.
+            if r.get("role") == "corroborator":
+                continue
+            parent_eligible_total += 1
+            corrob_by = r.get("corroborated_by") or []
+            if not isinstance(corrob_by, list) or not corrob_by:
+                continue
+            parents.append({
+                "parent_id": r.get("id"),
+                "parent_severity": r.get("severity"),
+                "parent_category": r.get("category"),
+                "parent_endpoint": r.get("endpoint") or r.get("target"),
+                "corroborator_ids": list(corrob_by),
+                "source_count": 1 + len(corrob_by),
+            })
+
+        rate = (
+            round(len(parents) / parent_eligible_total, 3)
+            if parent_eligible_total else 0.0
+        )
+        return {
+            "corroborations": parents,
+            "corroborations_count": len(parents),
+            "corroboration_rate": rate,
         }
 
     def _collect_chains_emitted(self) -> list[dict[str, Any]]:
