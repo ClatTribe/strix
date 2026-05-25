@@ -269,6 +269,46 @@ def test_dispatcher_dedups_by_url_method():
         assert summary.endpoints_seen == 2
 
 
+@patch("strix.agents.lead_agent.shape_aware_dispatcher.fire_and_diff")
+@patch("strix.agents.lead_agent.shape_aware_dispatcher.classify_endpoint")
+def test_dispatcher_normalizes_openapi_param_objects(mock_classify, mock_fire):
+    """Regression: openapi_spec_ingest emits params as OpenAPI parameter
+    OBJECTS (dicts with 'name', 'in', 'schema'), not name strings.
+    The dispatcher must flatten to strings or we get
+    `TypeError: cannot use 'dict' as a dict key` when params are
+    spread into a JSON body or form-data dict.
+
+    Caught by iter-30's first vampi bench run; this test pins the fix.
+    """
+    from strix.l15.endpoint_classifier import EndpointProfile
+    mock_classify.return_value = EndpointProfile(
+        url="http://app/users/{id}",
+        shape="json", endpoint_class="api-detail",
+    )
+    mock_fire.return_value = DiffSignal(score=0.1)  # weak — short-circuit
+
+    # OpenAPI-shaped params (dict-shaped, with name field)
+    summary = shape_aware_dispatch(
+        "http://app",
+        endpoints=[{
+            "url": "http://app/users/{id}",
+            "method": "GET",
+            "params": [
+                {"name": "id", "in": "path", "schema": {"type": "string"}},
+                {"name": "include", "in": "query", "schema": {"type": "boolean"}},
+                # Malformed param entry — must not crash
+                {"not_a_name": "x"},
+                # Mixed: also accept bare strings (katana-shape)
+                "extra_param",
+            ],
+        }],
+    )
+    # No crash + dispatcher proceeded
+    assert summary.endpoints_seen == 1
+    # fire_and_diff actually got called (at least once)
+    assert mock_fire.call_count > 0
+
+
 def test_dispatch_summary_serializes_to_dict():
     import json
     summary = DispatchSummary(
