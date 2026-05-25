@@ -901,6 +901,45 @@ class Tracer:
             # iter-31.9 — surface_discovery_breadth signal (metric #5).
             # Bench compares against fixture YAML `expected_endpoint_count`.
             **self._build_surface_breadth_summary(),
+            # iter-31.11 — patcher_correctness rollup (metric #20).
+            # Reads patcher registry status counts.
+            **self._build_patcher_summary(),
+        }
+
+    def _build_patcher_summary(self) -> dict[str, Any]:
+        """iter-31.11 — patcher rollup for `patch_correctness` (#20).
+
+        Reads `strix.agents.patcher.get_registry_stats()`. Tolerant of
+        the module being absent / disabled (returns zero counts).
+
+        Returns dict with:
+          * `patches_total` — count of proposed patches
+          * `patches_by_status` — {proposed, verified, regressed, applied}
+          * `patch_correctness` — verified / (verified + regressed),
+             0.0 when no verify cycles ran
+          * `patches_applied` — count where the diff was written to disk
+        """
+        try:
+            from strix.agents.patcher import get_registry_stats
+            stats = get_registry_stats() or {}
+            counts = dict(stats.get("status_counts") or {})
+            total = int(stats.get("patches") or 0)
+        except Exception:  # noqa: BLE001
+            logger.debug("patcher summary failed", exc_info=True)
+            counts = {}
+            total = 0
+        verified = int(counts.get("verified") or 0)
+        regressed = int(counts.get("regressed") or 0)
+        applied = int(counts.get("applied") or 0)
+        denom = verified + regressed
+        correctness = round(verified / denom, 3) if denom else 0.0
+        return {
+            "patches_total": total,
+            "patches_by_status": counts,
+            "patch_correctness": correctness,
+            "patches_applied_count": applied,
+            "patches_verified_count": verified,
+            "patches_regressed_count": regressed,
         }
 
     def _build_surface_breadth_summary(self) -> dict[str, Any]:
