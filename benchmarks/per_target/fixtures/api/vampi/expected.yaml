@@ -119,3 +119,24 @@ expected_findings:
     description: |
       OpenAPI spec served at root; reveals every endpoint + parameter.
       Often desirable (it's documentation) but flag for inventory awareness.
+
+# iter-31.1 — FP-decoys for vampi (API target).
+expected_dismissed:
+  - id: csrf-on-pure-api
+    category: csrf
+    file: ""
+    reason: api_target_no_csrf
+    description: |
+      A CSRF finding emitted by csrf_check against a pure-JSON API.
+      Vampi is a JSON API with no cookie session — CSRF is not a
+      relevant attack class. L1.5 should demote/drop based on
+      target shape.
+
+  - id: jwt-none-alg-in-test
+    category: jwt
+    file: tests/jwt_examples.json
+    reason: test_file_path
+    description: |
+      A test JSON fixture containing a literal alg=none JWT. Looks like
+      a vulnerable finding to a signature scanner — L1.5 should drop
+      via test_file_path.

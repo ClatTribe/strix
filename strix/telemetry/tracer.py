@@ -460,6 +460,18 @@ class Tracer:
         self.interrupted_content: dict[str, str] = {}
 
         self.vulnerability_reports: list[dict[str, Any]] = []
+        # iter-31.1 — Record L1.5 FP-filter dismissals as structured
+        # entries so downstream benches can score `fp_rate` +
+        # `dismissal_accuracy` (per docs/metrics.md §1.2). Without
+        # this, dismissals only existed as transient telemetry events
+        # in events.jsonl — invisible to per-fixture scoring.
+        #
+        # Each entry: {report_id, title, category, target, file, line,
+        #              reason, dismissed_at, dismissed_by}
+        # `dismissed_by` distinguishes "fp_filter" (pre-emission L1.5)
+        # from future demote/drop layers if they're added.
+        self.dismissed_findings: list[dict[str, Any]] = []
+
         # iter-25-fix: monotonic counter that advances on every call to
         # add_vulnerability_report, NOT on every persisted record. Without
         # this, FP-filter drops (and root-cause merges) caused ID
@@ -853,6 +865,10 @@ class Tracer:
             "top_findings": top_findings,
             "checks": check_summary,
             "summary_text": summary_text,
+            # iter-31.1 — structured L1.5 dismissals for the
+            # bench_fp_suppression scorer + per-org telemetry.
+            "l15_dismissals": list(self.dismissed_findings),
+            "l15_dismissals_count": len(self.dismissed_findings),
         }
 
     def build_target_rollup(self, target_value: str) -> dict[str, Any]:
@@ -1639,6 +1655,20 @@ class Tracer:
             # ---- 25.1 — FP filter ----
             fp = pre_emission_fp_filter(report)
             if fp.is_drop:
+                # iter-31.1 — record structured dismissal alongside the
+                # transient telemetry event so the bench can score
+                # fp_rate + dismissal_accuracy.
+                self.dismissed_findings.append({
+                    "report_id": report_id,
+                    "title": report.get("title"),
+                    "category": report.get("category"),
+                    "target": report.get("target"),
+                    "file": report.get("file") or (report.get("evidence") or {}).get("file"),
+                    "line": report.get("line") or (report.get("evidence") or {}).get("line"),
+                    "reason": fp.reason,
+                    "dismissed_at": datetime.now(UTC).isoformat(),
+                    "dismissed_by": "fp_filter",
+                })
                 # Emit a telemetry event so the run still shows the
                 # signal got produced + filtered, but don't persist.
                 self._emit_event(

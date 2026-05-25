@@ -100,3 +100,47 @@ expected_findings:
     severity: medium
     must_find: true
     description: /register uses md5 for password hashing.
+
+# iter-31.1 — Planted FP-decoys that L1.5's pre_emission_fp_filter
+# SHOULD dismiss. These exercise the FP-filter rules per docs/metrics.md
+# §1.2. Each entry declares the L1.5 rule it tests via `reason`.
+expected_dismissed:
+  - id: sqli-in-test-fixture
+    category: sqli
+    file: tests/fixtures/auth.py
+    line: 8
+    reason: test_file_path
+    description: |
+      A test fixture file containing the SAME string-concat SQLi pattern
+      as src/app.py (`f"SELECT * FROM users WHERE id = {req.args.get('id')}"`).
+      L1.5 should drop this because it's on a `tests/` path — fixtures
+      are not production code.
+
+  - id: secret-in-docstring-example
+    category: hardcoded_secret
+    file: tests/test_auth_examples.py
+    line: 22
+    reason: docstring_example
+    description: |
+      A docstring containing an example credential like `Authorization:
+      Bearer eyJabc...`. L1.5 should drop because docstring text isn't
+      executable.
+
+  - id: weak-crypto-in-test-vector
+    category: crypto
+    file: tests/test_password_vectors.py
+    line: 14
+    reason: test_file_path
+    description: |
+      An md5 hash usage inside a test vector confirming our hash output.
+      Same rule firing as src/app.py line 124, but in tests/ — should drop.
+
+  - id: hardcoded-secret-via-getenv-default
+    category: hardcoded_secret
+    file: src/config.py
+    line: 7
+    reason: getenv_default
+    description: |
+      Pattern: `API_KEY = os.environ.get("API_KEY", "your-api-key-here")`.
+      The string literal is the GETENV DEFAULT placeholder, not a real
+      hardcoded secret. L1.5 should drop via `_is_getenv_default_match`.

@@ -96,3 +96,32 @@ expected_findings:
     severity: medium
     must_find: true
     description: "`/redirect?to=...` allows arbitrary external destinations."
+
+# iter-31.1 — FP-decoys for juiceshop (web_application target).
+# These planted-decoy categories are typical FP-shapes any DAST tool
+# generates against a CRUD-heavy SPA. L1.5 should suppress them.
+expected_dismissed:
+  - id: csrf-on-stateless-api-endpoint
+    category: csrf
+    reason: api_endpoint_stateless
+    description: |
+      A CSRF finding on /api/Challenges (the SUT's own scoreboard
+      endpoint) — it's a read-only public API, no state mutation,
+      CSRF doesn't apply. L1.5 should drop based on stateless-API
+      detection.
+
+  - id: hardcoded-secret-from-public-jwt
+    category: hardcoded_secret
+    reason: public_jwt_in_response
+    description: |
+      A JWT in /rest/products that's the standard demo product-listing
+      response — not a leaked credential. L1.5 should distinguish
+      "JWT in body" from "leaked auth token."
+
+  - id: open-redirect-on-asset-cdn
+    category: open_redirect
+    reason: static_asset_cdn
+    description: |
+      A "redirect to user-controlled URL" finding on /static/redirect-to-
+      logo.png — a static-asset rewrite, not an open-redirect vuln.
+      L1.5 should drop based on static-asset endpoint classification.
