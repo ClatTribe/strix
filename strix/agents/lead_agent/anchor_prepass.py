@@ -3657,6 +3657,39 @@ async def _run_dependent_api_tools(
             summary.tools_failed.append(endpoint_tool_name)
 
 
+def _gather_surface_for_dispatcher(
+    summary: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """iter-30 — extract forms[] and endpoints[] from prior tool
+    results so the shape-aware dispatcher can probe per-form and
+    per-endpoint.
+
+    Reads from:
+      * crawl_with_katana (iter-28.3) — `forms[]` + `endpoints[]`
+      * openapi_spec_ingest — `endpoints[]`
+
+    Returns (forms, endpoints). Either may be empty if the prior
+    phase tools didn't run or returned nothing.
+    """
+    forms_out: list[dict[str, Any]] = []
+    endpoints_out: list[dict[str, Any]] = []
+    for tr in getattr(summary, "tool_results", []) or []:
+        raw = getattr(tr, "raw_result", None)
+        if not isinstance(raw, dict):
+            continue
+        rec_forms = raw.get("forms")
+        if isinstance(rec_forms, list):
+            for f in rec_forms:
+                if isinstance(f, dict):
+                    forms_out.append(f)
+        rec_endpoints = raw.get("endpoints")
+        if isinstance(rec_endpoints, list):
+            for e in rec_endpoints:
+                if isinstance(e, dict):
+                    endpoints_out.append(e)
+    return forms_out, endpoints_out
+
+
 async def run_oss_anchor_prepass(
     *,
     target_type: str,
@@ -3751,6 +3784,53 @@ async def run_oss_anchor_prepass(
         await _run_dependent_ip_tools(
             summary, target_value=target_value,
         )
+
+    # iter-30 — phase 2.5: shape-aware dispatcher. Consumes katana's
+    # forms[] output + openapi endpoints[] from earlier phase tools,
+    # then per-endpoint:
+    #   * classify (29.1 EndpointProfile)
+    #   * skip static / destructive (29.9 safety_guards)
+    #   * apply rate-limit cooldown (29.9 RateLimitGovernor)
+    #   * fire shape-aware payloads (29.3 payload_bins)
+    #   * diff vs baseline (29.2 DiffSignal)
+    #   * verify with PoC re-fire + variant (29.5 verify_finding)
+    #   * emit at `verified` / `likely` confidence only
+    # seed_auth's STRIX_AUTH_BEARER threads through automatically via
+    # iter-29.4's list_auth_states() env-synthesis.
+    if target_type in ("api", "web_application") and target_value:
+        try:
+            from strix.agents.lead_agent.shape_aware_dispatcher import (
+                shape_aware_dispatch,
+            )
+            forms_aggregate, endpoints_aggregate = _gather_surface_for_dispatcher(summary)
+            dispatch_summary = shape_aware_dispatch(
+                target_value,
+                forms=forms_aggregate,
+                endpoints=endpoints_aggregate,
+                timeout=timeout_s,
+            )
+            # Surface dispatch stats as tool_results so the bench output
+            # shows what fired. Each emitted finding already went through
+            # the tracer (in _emit_to_tracer), so total_findings counts
+            # them automatically on the next sweep — but mirror here for
+            # immediate visibility.
+            for f in dispatch_summary.findings:
+                summary.total_findings += 1
+            logger.info(
+                "shape-aware dispatcher: endpoints_seen=%d probed=%d "
+                "payloads=%d signals=%d findings=%d wall=%.1fs",
+                dispatch_summary.endpoints_seen,
+                dispatch_summary.endpoints_probed,
+                dispatch_summary.payloads_fired,
+                dispatch_summary.signals_above_threshold,
+                len(dispatch_summary.findings),
+                dispatch_summary.wall_time_s,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "shape-aware dispatcher raised %s: %s — continuing without "
+                "phase-2.5 dispatch", type(e).__name__, e,
+            )
 
     summary.wall_time_s = _t.monotonic() - overall_start
     logger.info(
