@@ -472,6 +472,15 @@ class Tracer:
         # from future demote/drop layers if they're added.
         self.dismissed_findings: list[dict[str, Any]] = []
 
+        # iter-31.6 — Record L1.5 mid_scan_correlate emissions per phase
+        # boundary. Each entry is the `PhaseCorrelationResult.to_dict()`
+        # output: {from_phase, to_phase, chains_built, new_chains,
+        #          findings_promoted, error, recorded_at}.
+        # Surfaced in `build_run_summary()` as `phase_correlations[]`
+        # for the `phase_correlate_emissions` metric (#19 in
+        # docs/metrics.md §1.4).
+        self.phase_correlations: list[dict[str, Any]] = []
+
         # iter-25-fix: monotonic counter that advances on every call to
         # add_vulnerability_report, NOT on every persisted record. Without
         # this, FP-filter drops (and root-cause merges) caused ID
@@ -877,7 +886,34 @@ class Tracer:
             # metric (#17 in docs/metrics.md). The bench reads this
             # without having to re-walk vulnerability_reports.
             **self._build_corroboration_summary(),
+            # iter-31.6 — phase_correlate emissions per phase boundary
+            # for the `phase_correlate_emissions` metric (#19).
+            "phase_correlations": list(self.phase_correlations),
+            "phase_correlations_count": len(self.phase_correlations),
+            "phase_correlations_new_chains_total": sum(
+                int(p.get("new_chains") or 0) for p in self.phase_correlations
+            ),
         }
+
+    def record_phase_correlation(self, result: Any) -> None:
+        """iter-31.6 — append a mid_scan_correlate result for the bench.
+
+        Accepts either a `PhaseCorrelationResult` (anything with a
+        `.to_dict()` method) or a raw dict. Never raises — failures
+        log + skip so phase transitions don't depend on telemetry
+        being healthy.
+        """
+        try:
+            if hasattr(result, "to_dict"):
+                payload = dict(result.to_dict())
+            elif isinstance(result, dict):
+                payload = dict(result)
+            else:
+                return
+            payload["recorded_at"] = datetime.now(UTC).isoformat()
+            self.phase_correlations.append(payload)
+        except Exception:  # noqa: BLE001
+            logger.debug("record_phase_correlation failed", exc_info=True)
 
     def _build_corroboration_summary(self) -> dict[str, Any]:
         """iter-31.5 — aggregate L1.5 corroborator_ledger output.
