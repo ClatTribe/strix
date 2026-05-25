@@ -44,6 +44,89 @@ _PROMOTE_TIER: dict[str, str] = {
 }
 
 
+# iter-33.4 — chain-kind → next-exploit-step prompt map.
+# When mid_scan_correlate promotes a chain, this attaches a
+# `next_exploit_step` directive on the parent finding so the L2
+# Lead's next `list_pending_findings()` sees a concrete action
+# rather than just an elevated severity.
+#
+# The strings are generic per chain kind — no SUT-specific paths /
+# identifiers. They tell the LLM WHAT exploitation pattern to try
+# next, not the exact URL.
+_CHAIN_KIND_TO_NEXT_STEPS: dict[str, str] = {
+    "heuristic_privilege_escalation_chain": (
+        "Chain detected: auth-bypass + authz-missing. "
+        "Next exploit step: (1) use the auth-bypass to obtain a session "
+        "(default creds / forged JWT / etc.), (2) hit the authz-missing "
+        "endpoint with that session, (3) enumerate admin-only resources "
+        "the broken-authz endpoint exposes. Tier-3+ challenges typically "
+        "land here — admin-panel access, role escalation, data dump."
+    ),
+    "heuristic_credential_extraction_chain": (
+        "Chain detected: injection + credential exposure. "
+        "Next exploit step: (1) confirm the injection extracts the "
+        "credential material visible in the disclosure finding, "
+        "(2) attempt to authenticate as another user with the extracted "
+        "secret, (3) probe whether the credential unlocks higher-privilege "
+        "paths (admin panel, mass-data endpoints). Tier-4+ challenges "
+        "often hide here."
+    ),
+    "heuristic_data_exfil_chain": (
+        "Chain detected: injection + data-read-without-auth. "
+        "Next exploit step: (1) chain the injection to enumerate IDs "
+        "the unprotected endpoint accepts, (2) iterate ID ranges to "
+        "exfiltrate the full dataset, (3) check if any record holds "
+        "secrets / tokens that would extend the chain. Tier-4+ "
+        "challenges including 'dump all users' / 'dump all orders'."
+    ),
+    "heuristic_bola_at_scale_chain": (
+        "Chain detected: BOLA/IDOR + weak auth token. "
+        "Next exploit step: (1) forge JWTs / sessions for arbitrary "
+        "user IDs using the weak-token finding, (2) sweep the IDOR "
+        "endpoint across the forged-user ID space, (3) extract "
+        "per-user objects (baskets, orders, profile data). Tier-5+ "
+        "'mass account takeover' challenges hide here."
+    ),
+    # Strict-match chain kinds (existing linkers) — generic guidance.
+    "sca_sast_dast": (
+        "Chain detected: SCA + SAST + DAST agreement on same CWE. "
+        "Next: re-verify the DAST PoC against the patched-dependency "
+        "version (confirm regression) and capture proof artifact."
+    ),
+    "sast_dast": (
+        "Chain detected: SAST + DAST agreement on same CWE+endpoint. "
+        "Next: capture the SAST hint (file:line + variable) and use it "
+        "to craft a more precise DAST payload."
+    ),
+    "iac_dast": (
+        "Chain detected: IaC misconfig + DAST finding. "
+        "Next: confirm the misconfig is the proximate cause of the "
+        "runtime finding; remediation is at infra layer, not app."
+    ),
+}
+
+# Default fallback for unmapped chain kinds.
+_DEFAULT_NEXT_STEP = (
+    "Chain detected — multiple findings on the same target share a "
+    "common attack surface. Next: try combining the exploit primitives "
+    "into a multi-step PoC (e.g. exploit A to enable exploit B's "
+    "preconditions), or use the chain's parent severity as a priority "
+    "signal for which path to deepen."
+)
+
+
+def _next_step_for_kind(kind: str | None) -> str:
+    """Return the iter-33.4 next-exploit-step prompt for a chain kind.
+
+    `kind` is the `link_type` constant (or chain_type aggregate) that
+    fired the chain. Falls back to `_DEFAULT_NEXT_STEP` for unmapped
+    kinds — better to nudge than to stay silent.
+    """
+    if not isinstance(kind, str):
+        return _DEFAULT_NEXT_STEP
+    return _CHAIN_KIND_TO_NEXT_STEPS.get(kind, _DEFAULT_NEXT_STEP)
+
+
 @dataclass(frozen=True)
 class PhaseCorrelationResult:
     """One mid-scan correlator invocation outcome."""
@@ -189,16 +272,26 @@ def _promote_chain_parent(
         return 0
 
     chain_id = getattr(chain, "id", None) or getattr(chain, "chain_id", None) or ""
-    chain_kind = getattr(chain, "kind", None) or getattr(chain, "label", None) or "chain"
+    chain_kind = (
+        getattr(chain, "kind", None)
+        or getattr(chain, "label", None)
+        or getattr(chain, "chain_type", None)
+        or "chain"
+    )
 
     old_sev = parent.get("severity") or "info"
     new_sev = _bump_severity(old_sev)
     parent["severity"] = new_sev
+    # iter-33.4 — surface the next exploit step on the chain_summary
+    # so the L2 Lead's next list_pending_findings() call sees not just
+    # an elevated severity but a concrete action prompt.
+    next_step = _next_step_for_kind(chain_kind)
     parent["chain_summary"] = {
         "chain_id": chain_id,
         "kind": chain_kind,
         "members": member_ids,
         "promoted_at_phase": to_phase,
+        "next_exploit_step": next_step,  # iter-33.4
     }
     trace = parent.get("reasoning_trace") or []
     if isinstance(trace, str):
@@ -206,6 +299,10 @@ def _promote_chain_parent(
     parent["reasoning_trace"] = list(trace) + [
         f"l1.5 (mid-scan correlate at {to_phase}): chained with "
         f"{len(member_ids) - 1} other finding(s) → severity bumped "
-        f"{old_sev} → {new_sev}"
+        f"{old_sev} → {new_sev}",
+        # iter-33.4 — re-prompt the agent with the concrete next step.
+        # Reasoning_trace is rendered to the LLM via list_pending_findings,
+        # so this text becomes part of the next-turn context.
+        f"l1.5 (iter-33.4 next-step): {next_step}",
     ]
     return 1
