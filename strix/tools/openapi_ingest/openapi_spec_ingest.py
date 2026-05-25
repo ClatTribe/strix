@@ -604,6 +604,19 @@ def openapi_spec_ingest(
         endpoints, spec_url=discovered_at,
     )
 
+    # iter-32.1 — feed openapi-discovered endpoints into workflow_state
+    # so iter-31.9 surface_discovery_breadth metric has a numerator on
+    # API targets where openapi_spec_ingest is the primary recon path
+    # and no katana/web_crawler run. Best-effort.
+    try:
+        from strix.agents.workflow_state import record_endpoint_discovered
+        for ep in endpoints:
+            url = ep.get("url") or ""
+            if url:
+                record_endpoint_discovered(url)
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "success": True,
         "target": target,

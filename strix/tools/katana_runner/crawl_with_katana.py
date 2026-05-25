@@ -211,6 +211,17 @@ def crawl_with_katana(
         if len(endpoints) >= max_pages:
             break
 
+    # iter-32.1 — route each katana-discovered endpoint through
+    # workflow_state so iter-31.9 surface_discovery_breadth has a
+    # numerator when only L2 (no L1 prepass) ran. Best-effort: failures
+    # log + skip; never breaks the tool's return path.
+    try:
+        from strix.agents.workflow_state import record_endpoint_discovered
+        for ep in endpoints:
+            record_endpoint_discovered(ep["url"])
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "success": True,
         "status": "ok",

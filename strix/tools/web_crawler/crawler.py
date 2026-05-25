@@ -564,6 +564,14 @@ def bfs_crawl(
             "depth": depth,
             "discovered_via": source,
         })
+        # iter-32.1 — route each newly-discovered endpoint through
+        # workflow_state so iter-31.9 surface_discovery_breadth has a
+        # numerator when only L2 (no L1 prepass) ran. Best-effort.
+        try:
+            from strix.agents.workflow_state import record_endpoint_discovered
+            record_endpoint_discovered(url)
+        except Exception:  # noqa: BLE001
+            pass
 
     while queue and len(visited) < capped_max_pages:
         url, depth = queue.popleft()
@@ -626,6 +634,17 @@ def bfs_crawl(
             _record_endpoint(form["action"], form["method"], depth + 1, "form")
 
     ended_at = datetime.now(UTC).isoformat()
+
+    # iter-32.1 — defence-in-depth: ensure every endpoint in the final
+    # list reaches workflow_state.record_endpoint_discovered(). Catches
+    # the sitemap / openapi / robots paths that bypass _record_endpoint
+    # above. Idempotent (record_endpoint_discovered uses a set).
+    try:
+        from strix.agents.workflow_state import record_endpoint_discovered as _rec
+        for _ep in endpoints:
+            _rec(_ep.get("url") or "")
+    except Exception:  # noqa: BLE001
+        pass
 
     return {
         "success": True,
