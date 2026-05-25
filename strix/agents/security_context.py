@@ -383,7 +383,51 @@ def get_auth_state(label: str) -> AuthState | None:
 
 
 def list_auth_states() -> list[AuthState]:
-    return list(get_security_context().auth_states.values())
+    """Return registered AuthStates + synthesized fallback from env.
+
+    iter-29.4 — when `STRIX_AUTH_BEARER` / `STRIX_AUTH_COOKIE` env are
+    set (typically by `seed_auth` in iter-28.4), synthesize an
+    AuthState so every specialist that consumes
+    `list_auth_states()` (scan_sqli / scan_xss / scan_idor /
+    scan_api_bfla / scan_xxe / scan_cmd_injection / ... ~10 callers)
+    picks up the seeded credential automatically. Without this, the
+    seed_auth → downstream-specialist chain has no carrier — the
+    auth_seed primitive sets the env, but the specialists that
+    *should* exploit the auth-walled surface keep firing
+    unauthenticated.
+
+    Anti-overfit: synthesizing from env is generic — works for any
+    auth flow that lands a Bearer or Cookie in the env (seed_auth,
+    default_creds_probe, scan_auth_flow, operator-supplied).
+    """
+    import os as _os  # local — avoid import cycle at module top
+
+    out = list(get_security_context().auth_states.values())
+
+    bearer = _os.environ.get("STRIX_AUTH_BEARER")
+    cookie = _os.environ.get("STRIX_AUTH_COOKIE")
+
+    # Only synthesize if NOT already represented in registered states
+    have_bearer = any(s.bearer == bearer for s in out) if bearer else True
+    have_cookie = (
+        any(s.cookies for s in out) if cookie else True
+    )
+
+    if (bearer and not have_bearer) or (cookie and not have_cookie):
+        synth = AuthState(
+            label="strix-env-synthesized",
+            bearer=bearer if bearer and not have_bearer else None,
+        )
+        if cookie and not have_cookie:
+            # Parse simple "name=value; name2=value2" cookie form
+            for pair in cookie.split(";"):
+                pair = pair.strip()
+                if "=" in pair:
+                    k, _, v = pair.partition("=")
+                    synth.cookies[k.strip()] = v.strip()
+        out.append(synth)
+
+    return out
 
 
 def list_partial_signals() -> list[PartialSignal]:
