@@ -869,7 +869,37 @@ class Tracer:
             # bench_fp_suppression scorer + per-org telemetry.
             "l15_dismissals": list(self.dismissed_findings),
             "l15_dismissals_count": len(self.dismissed_findings),
+            # iter-31.2 — chain_summary blocks emitted by L1.5's
+            # mid_scan_correlate (iter-27.2). Bench_chains reads this.
+            "chains_emitted": self._collect_chains_emitted(),
+            "chains_emitted_count": len(self._collect_chains_emitted()),
         }
+
+    def _collect_chains_emitted(self) -> list[dict[str, Any]]:
+        """iter-31.2 — extract chain_summary blocks from findings,
+        dedup by chain_id, return a structured list for bench
+        consumption. Each entry:
+            {chain_id, kind, members[], promoted_at_phase, depth,
+             parent_finding_id, parent_severity}
+        """
+        chains_seen: dict[str, dict[str, Any]] = {}
+        for r in self.vulnerability_reports:
+            cs = r.get("chain_summary")
+            if not isinstance(cs, dict):
+                continue
+            cid = cs.get("chain_id")
+            if not cid or cid in chains_seen:
+                continue
+            chains_seen[cid] = {
+                "chain_id": cid,
+                "kind": cs.get("kind"),
+                "members": list(cs.get("members") or []),
+                "promoted_at_phase": cs.get("promoted_at_phase"),
+                "depth": len(cs.get("members") or []),
+                "parent_finding_id": r.get("id"),
+                "parent_severity": r.get("severity"),
+            }
+        return list(chains_seen.values())
 
     def build_target_rollup(self, target_value: str) -> dict[str, Any]:
         """Per-target slice of findings + checks for the target.completed payload.
