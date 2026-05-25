@@ -66,6 +66,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -3168,6 +3169,115 @@ def probe_password_reset_otp_space(
     return out
 
 
+async def _retry_default_creds_against_login_forms(
+    summary: PrepassSummary,
+    *,
+    target_value: str,
+    agent_state: Any,
+    timeout_s: int,
+) -> None:
+    """iter-33.1 — re-fire probe_default_creds against each login URL
+    that recon discovered.
+
+    Reads `workflow_state.login_forms_found` (populated by recon
+    tools / katana / webapp_recon_pipeline / web_crawler). For each
+    URL, invokes the existing `probe_default_creds` tool with
+    `login_url=` set so the tool tries the discovered URL instead of
+    guessing one off the root.
+
+    Idempotent:
+      * No-op when `workflow_state.auth_state_captured` is already
+        True (phase-1 anchor already landed a session).
+      * No-op when no login forms were discovered.
+      * Caps invocations at 5 distinct URLs per scan to bound wall-
+        clock + request volume.
+
+    Best-effort: any per-URL failure is captured in a ToolResult and
+    the loop continues. Never raises.
+    """
+    # Read workflow state. Tolerant of the module being unavailable
+    # in narrow test environments.
+    try:
+        from strix.agents.workflow_state import snapshot as ws_snapshot
+        snap = ws_snapshot() or {}
+    except Exception:  # noqa: BLE001
+        return
+
+    if bool(snap.get("auth_state_captured")):
+        return  # phase-1 already captured a session
+
+    login_urls_raw = snap.get("login_forms_found") or []
+    if not isinstance(login_urls_raw, list) or not login_urls_raw:
+        return
+
+    # Dedup + cap. URL strings only.
+    seen: set[str] = set()
+    login_urls: list[str] = []
+    for u in login_urls_raw:
+        if isinstance(u, str) and u.strip() and u not in seen:
+            seen.add(u)
+            login_urls.append(u)
+        if len(login_urls) >= 5:
+            break
+    if not login_urls:
+        return
+
+    # Per-URL invocation. We call the tool function directly (not via
+    # _run_one_tool) because probe_default_creds is sync + already
+    # wraps its work; this keeps the wall-time bounded by the
+    # tool's internal timeout.
+    try:
+        from strix.tools.default_creds_probe.probe_default_creds import (
+            probe_default_creds,
+        )
+    except ImportError:
+        return
+
+    for login_url in login_urls:
+        t0 = time.monotonic()
+        try:
+            raw = probe_default_creds(
+                target_url=target_value,
+                login_url=login_url,
+                timeout=8,
+            )
+        except Exception as e:  # noqa: BLE001
+            elapsed = time.monotonic() - t0
+            summary.tool_results.append(ToolResult(
+                tool_name=f"probe_default_creds[{login_url}]",
+                status="error",
+                findings_count=0,
+                error_reason=f"{type(e).__name__}: {e}",
+                wall_time_s=round(elapsed, 2),
+                raw_result=None,
+            ))
+            continue
+        elapsed = time.monotonic() - t0
+        status = "ok" if (
+            isinstance(raw, dict) and raw.get("default_credential_found")
+        ) else "partial"
+        n_findings = _count_findings(raw)
+        summary.tools_run.append("probe_default_creds_iter_33_1")
+        if status == "ok":
+            summary.tools_succeeded.append("probe_default_creds_iter_33_1")
+        else:
+            summary.tools_failed.append("probe_default_creds_iter_33_1")
+        summary.total_findings += n_findings
+        summary.tool_results.append(ToolResult(
+            tool_name="probe_default_creds_iter_33_1",
+            status=status,
+            findings_count=n_findings,
+            error_reason=None if status == "ok" else "no_default_credential_landed",
+            wall_time_s=round(elapsed, 2),
+            raw_result=raw if isinstance(raw, dict) else None,
+        ))
+        # Short-circuit on first success — one good session is
+        # enough for downstream specialists. Trying further URLs
+        # mostly wastes budget on the same SUT.
+        if status == "ok":
+            break
+
+
 async def _run_dependent_api_tools(
     summary: PrepassSummary,
     *,
@@ -3264,6 +3374,36 @@ async def _run_dependent_api_tools(
             pipeline_endpoints = wrp_result.raw_result.get("endpoints")
             if isinstance(pipeline_endpoints, list) and pipeline_endpoints:
                 endpoints = pipeline_endpoints
+
+    # iter-33.1 — deterministic auth re-attempt against discovered
+    # login forms.
+    #
+    # The phase-1 probe_default_creds anchor runs against the ROOT
+    # target URL only. For SPAs / JS-rendered apps (juiceshop's
+    # Angular bundle, React/Vue apps, etc.) the actual login endpoint
+    # is at a different URL discovered DURING recon — never at the
+    # root. So phase-1 probe_default_creds always fails on these
+    # targets, leaving every post-auth challenge unreachable.
+    #
+    # This hook re-fires probe_default_creds against each login URL
+    # that recon discovered + recorded into workflow_state. The
+    # default-creds corpus is the same (~50 universal pairs:
+    # admin/admin / admin/password / etc. — no SUT identifiers).
+    # When a default credential lands, the resulting session is
+    # auto-recorded via security_context.record_auth_state, and
+    # downstream auth-aware specialists (scan_idor, scan_api_bola,
+    # scan_api_bfla, jwt_audit) pick it up via SecurityContext.
+    if target_type == "web_application" and target_value:
+        try:
+            await _retry_default_creds_against_login_forms(
+                summary, target_value=target_value,
+                agent_state=agent_state, timeout_s=timeout_s,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(
+                "iter-33.1 auth re-attempt failed: %s — passthrough", e,
+            )
+
     # Iter-11 deterministic L1 probes — fire BEFORE bailing out on
     # empty endpoints. These probes don't need the endpoint list at
     # all (only target_value), so they should fire even when openapi
