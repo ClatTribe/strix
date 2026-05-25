@@ -117,6 +117,12 @@ class FindingContextScore:
     severity: str | None = None
     dimensions_present: list[str] = field(default_factory=list)
     dimensions_missing: list[str] = field(default_factory=list)
+    # iter-32.3 — dimensions that don't apply to this finding's target
+    # type (e.g. `author` for a web/api finding with no file path —
+    # git_blame is meaningless on a remote URL). Excluded from the
+    # denominator so context_completeness measures "what the agent
+    # could populate" rather than penalizing structurally-N/A signals.
+    dimensions_not_applicable: list[str] = field(default_factory=list)
     actionable: bool = False
     actionable_field: str | None = None
 
@@ -190,6 +196,42 @@ def _field_populated(finding: dict[str, Any], path: str) -> bool:
     return True
 
 
+def _has_file_location(finding: dict[str, Any]) -> bool:
+    """Is this finding tied to a file in source code (i.e. a target the
+    `author` / git_blame dimension can meaningfully apply to)?
+
+    iter-32.3 — true when the finding carries a `file` field OR a
+    `code_locations[].file` entry. False when the only locator is an
+    `endpoint` URL (= web/api target — no source to git-blame).
+    """
+    if _field_populated(finding, "file"):
+        return True
+    cl = finding.get("code_locations")
+    if isinstance(cl, list):
+        for entry in cl:
+            if isinstance(entry, dict) and entry.get("file"):
+                return True
+    return False
+
+
+def _dimension_applicable(finding: dict[str, Any], dim: str) -> bool:
+    """iter-32.3 — whether the dimension can be populated at all for
+    this finding's target shape.
+
+    Currently the only structurally-N/A dimension is `author` on
+    findings that have NO file location (only an endpoint). git_blame
+    requires source code; a remote DAST finding against a Docker
+    image can't produce one.
+
+    Other dimensions are always applicable — the agent could in
+    principle populate impact / fix_hint / exploit / location on any
+    finding regardless of target type.
+    """
+    if dim == "author":
+        return _has_file_location(finding)
+    return True
+
+
 def _dimension_satisfied(finding: dict[str, Any], dim: str) -> bool:
     """For the LOCATION dimension specifically, require BOTH file+line OR
     code_locations OR endpoint; for the others, any single field path
@@ -229,7 +271,20 @@ def _actionable_field(finding: dict[str, Any]) -> str | None:
 
 
 def score_finding_context(finding: dict[str, Any]) -> FindingContextScore:
-    """Per-finding context + actionable scorer."""
+    """Per-finding context + actionable scorer.
+
+    iter-32.3 — dimensions are categorised in this order:
+      1. POPULATED → `present` (always counts, even on a target type
+         where the dimension is structurally N/A — if the agent
+         supplied the data, credit the agent).
+      2. EMPTY + applicable → `missing` (the agent could and should
+         have populated it).
+      3. EMPTY + not applicable → `not_applicable` (structurally
+         impossible for this target shape — e.g. git_blame for an
+         endpoint-only DAST finding with no source file).
+    Only `missing` reflects an agent failure; `not_applicable` is
+    excluded from the context_completeness denominator.
+    """
     score = FindingContextScore(
         finding_id=finding.get("id"),
         title=finding.get("title"),
@@ -238,8 +293,10 @@ def score_finding_context(finding: dict[str, Any]) -> FindingContextScore:
     for dim in _CONTEXT_DIMENSIONS:
         if _dimension_satisfied(finding, dim):
             score.dimensions_present.append(dim)
-        else:
+        elif _dimension_applicable(finding, dim):
             score.dimensions_missing.append(dim)
+        else:
+            score.dimensions_not_applicable.append(dim)
     af = _actionable_field(finding)
     if af:
         score.actionable = True
@@ -277,7 +334,16 @@ def score_fixture_context(
     for f in eligible_findings:
         s = score_finding_context(f)
         result.per_finding.append(s)
-        if len(s.dimensions_present) == len(_CONTEXT_DIMENSIONS):
+        # iter-32.3 — "full context" means every APPLICABLE dimension
+        # is present. Findings on web/api targets won't have `author`
+        # (no source to git-blame); penalising them for that
+        # structurally-N/A dimension produced 0% on the v1/v2/v3 L2
+        # Juice Shop runs even though impact/fix/exploit/location/PoC
+        # were all populated.
+        applicable_count = (
+            len(_CONTEXT_DIMENSIONS) - len(s.dimensions_not_applicable)
+        )
+        if applicable_count > 0 and len(s.dimensions_present) == applicable_count:
             result.findings_with_full_context += 1
         if s.actionable:
             result.findings_actionable += 1
