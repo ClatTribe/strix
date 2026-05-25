@@ -411,6 +411,91 @@ def _capture(
         }
 
 
+# ---------------------------------------------------------------------------
+# iter-30.5 — Benign-shape control payload generator.
+#
+# The original `fire_and_diff` sent a no-body baseline on POST/PUT/PATCH.
+# Servers reject a missing body as a 400 "missing required field" /
+# "invalid JSON" — and the attack payload (e.g. a SQLi string) ALSO
+# gets rejected as malformed. Both responses are 400 with identical
+# error envelopes → diff sees zero signal → finding gets dismissed.
+#
+# Fix: when the caller knows the endpoint's wire shape (from iter-29.1
+# EndpointClassifier), generate a SHAPE-MATCHED BENIGN control body
+# that the server WILL accept. The diff is then "what the server does
+# when given benign-shaped input" vs "what it does when given attack-
+# shaped input", which is the actual signal.
+#
+# This is shape-aware (json / form / multipart / graphql / xml) but
+# NEVER endpoint-content-specific. The benign VALUE is always a safe
+# placeholder string ("benign") that contains no SQL syntax / shell
+# metachars / template tokens / XSS payload tokens.
+# ---------------------------------------------------------------------------
+
+# Benign placeholder value. Chosen to be:
+#   - non-empty (won't trip "required field" gates)
+#   - alphabetic (won't trip integer-only field parsers; we'd rather
+#     get a 422 type mismatch than have the server interpret the
+#     value as data)
+#   - free of any character that's part of an attack alphabet:
+#     no quotes / brackets / backticks / dollar / hash / angle / etc.
+_BENIGN_VALUE = "benign"
+_BENIGN_FALLBACK_PARAM = "q"
+
+
+def generate_benign_control(
+    shape: str | None,
+    method: str,
+    params: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """Build a shape-matched benign-control kwargs dict suitable for
+    `fire_and_diff(..., control_payload=...)`.
+
+    Returns None when:
+      - shape is None / unknown — caller should fall back to no-body
+      - method is read-only (GET/HEAD/OPTIONS) — no body needed
+
+    The returned dict mirrors the shape produced by the dispatcher's
+    `_build_attack_kwargs_for_shape` so the diff is comparing
+    same-shape requests with different values.
+    """
+    m = (method or "GET").upper()
+    if m not in ("POST", "PUT", "PATCH"):
+        return None  # no body needed; caller's no-body baseline is fine
+
+    s = (shape or "").strip().lower()
+    fields = [p for p in (params or []) if isinstance(p, str) and p] or [_BENIGN_FALLBACK_PARAM]
+
+    if s == "json":
+        return {"json": {p: _BENIGN_VALUE for p in fields}}
+
+    if s in ("form", "multipart"):
+        return {"data": {p: _BENIGN_VALUE for p in fields}}
+
+    if s == "graphql":
+        # Minimal benign query that's syntactically valid GraphQL.
+        # No introspection, no field access — server returns either
+        # a parse-error (if it doesn't accept this query) or an empty
+        # data block. Either way the diff against the attack payload
+        # is meaningful.
+        return {"json": {
+            "query": "query { __typename }",
+        }}
+
+    if s == "xml":
+        # Minimal well-formed XML envelope. Most XML APIs will reject
+        # this as "not the expected schema" with a structured error —
+        # which still differs from how they respond to an XXE-shaped
+        # attack body.
+        return {
+            "data": f"<request><value>{_BENIGN_VALUE}</value></request>",
+            "headers_override": {"Content-Type": "application/xml"},
+        }
+
+    # Unknown shape → no benign control (let caller fall back).
+    return None
+
+
 def fire_and_diff(
     url: str,
     *,
@@ -419,6 +504,12 @@ def fire_and_diff(
     attack_payload: dict[str, Any],
     headers: dict[str, str] | None = None,
     timeout: int = DEFAULT_PROBE_TIMEOUT_S,
+    # iter-30.5 — endpoint metadata for auto-generating a benign
+    # control body on POST/PUT/PATCH when the caller didn't supply
+    # one. shape is from iter-29.1 EndpointClassifier; params are
+    # the known body-field names.
+    shape: str | None = None,
+    params: list[str] | None = None,
 ) -> DiffSignal:
     """End-to-end helper: fire CONTROL request → fire ATTACK request →
     diff → score.
@@ -427,14 +518,30 @@ def fire_and_diff(
     second/third positional `_capture()` call:
         {"json": {...}} or {"data": {...}}
 
-    When control_payload=None, sends the request with no body — that's
-    the "raw GET baseline" pattern useful for status-class / body-size
-    diff scoring.
+    Control-body resolution order:
+      1. `control_payload` (caller-supplied) — used as-is
+      2. `shape` is supplied + method is POST/PUT/PATCH — auto-generate
+         a benign-shape control via `generate_benign_control`. (iter-30.5)
+      3. Fall back to a raw no-body baseline (the iter-29.2 default —
+         right for GET baselines, fragile on POST where the server
+         rejects no-body as malformed).
     """
+    if control_payload is None and shape:
+        control_payload = generate_benign_control(shape, method, params)
+
     if control_payload is None:
         baseline = _capture(url, method, headers=headers, timeout=timeout)
     else:
-        baseline = _capture(url, method, headers=headers, timeout=timeout, **control_payload)
+        # `headers_override` (set by XML benign control) merges into headers
+        ctrl_kwargs = dict(control_payload)
+        ctrl_headers_override = ctrl_kwargs.pop("headers_override", None)
+        merged_headers = dict(headers or {})
+        if isinstance(ctrl_headers_override, dict):
+            merged_headers.update(ctrl_headers_override)
+        baseline = _capture(
+            url, method, headers=merged_headers or None,
+            timeout=timeout, **ctrl_kwargs,
+        )
     payload = _capture(url, method, headers=headers, timeout=timeout, **attack_payload)
     return diff_responses(baseline, payload)
 
@@ -448,5 +555,6 @@ __all__ = [
     "DEFAULT_TIME_DELTA_ABS_MS",
     "diff_responses",
     "fire_and_diff",
+    "generate_benign_control",
     "score_signal",
 ]
