@@ -97,6 +97,29 @@ def _disabled() -> bool:
     )
 
 
+def _dispatch_concurrency() -> int:
+    """iter-33.2 — per-scan parallelism cap for the per-endpoint probe
+    loop. Default 1 (serial — preserves iter-30 behavior). Set
+    `STRIX_DISPATCH_CONCURRENCY=N` (1-16) to fan out N endpoints in
+    parallel via a ThreadPoolExecutor.
+
+    Rationale: shape_aware_dispatch in standard mode fires ~73 tool
+    calls serially over 10 min. The per-endpoint work is HTTP-bound;
+    parallelism on independent endpoints (each is its own host:path
+    surface, doesn't share state with peers) can 3-5x throughput
+    without changing the verifier semantics or per-endpoint payload
+    budget.
+
+    Capped at 16 to keep rate-limit pressure on the target sane.
+    """
+    raw = os.environ.get("STRIX_DISPATCH_CONCURRENCY", "1").strip()
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(16, n))
+
+
 # ---------------------------------------------------------------------------
 # DispatchResult — visible in bench output
 # ---------------------------------------------------------------------------
@@ -125,12 +148,35 @@ class DispatchSummary:
     signals_above_threshold: int = 0
     findings: list[DispatchFinding] = field(default_factory=list)
     wall_time_s: float = 0.0
+    # iter-33.2 — visibility into whether parallel dispatch was used
+    concurrency_used: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         return {
             **asdict(self),
             "findings": [f.to_dict() for f in self.findings],
         }
+
+
+@dataclass
+class _PerEndpointResult:
+    """iter-33.2 — per-endpoint probe result that the outer loop
+    merges into DispatchSummary. Separated so threadpool workers can
+    return results without mutating shared state.
+    """
+    endpoint_url: str = ""
+    classify_failed: bool = False
+    static_skipped: bool = False
+    destructive_skipped: bool = False
+    probed: bool = False
+    payloads_fired: int = 0
+    signals_above_threshold: int = 0
+    findings: list[DispatchFinding] = field(default_factory=list)
+    # Profile to forward to `_emit_to_tracer` once we're back on the
+    # main thread (so the emit happens single-threaded — finding
+    # emission isn't thread-safe; the tracer's own append + dedup
+    # logic assumes serial calls).
+    finding_profiles: list[Any] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -339,163 +385,222 @@ def shape_aware_dispatch(
 
     governor = get_governor()
 
-    # ----- Per-endpoint probe loop -----
-    for ep in deduped:
-        url = ep["url"]
-        method = ep["method"]
-        params = ep["params"]
+    # iter-33.2 — execute the per-endpoint probe loop with optional
+    # ThreadPoolExecutor parallelism. Default concurrency=1 preserves
+    # the original serial behavior. With STRIX_DISPATCH_CONCURRENCY=N
+    # set, N endpoints probe concurrently; each thread does its own
+    # HTTP work and returns a `_PerEndpointResult` that's merged on
+    # the main thread (so finding emission stays serial → no tracer
+    # race conditions).
+    concurrency = _dispatch_concurrency()
+    summary.concurrency_used = concurrency
 
-        # Classify (uses pre-cached response when re-running; here we
-        # let the classifier probe fresh — it's a single HEAD-like GET)
-        try:
-            profile = classify_endpoint(
-                url, methods=[method], probe_if_no_response=True,
-                timeout=timeout,
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.debug("classify failed for %s: %s", url, e)
-            continue
-
-        # Skip static assets — no value in payloading
-        if profile.endpoint_class == "static-asset":
+    def _merge_result(res: _PerEndpointResult) -> None:
+        if res.classify_failed:
+            return
+        if res.static_skipped:
             summary.endpoints_skipped_static += 1
-            continue
-
-        # Skip destructive endpoints unless explicit opt-in
-        ok, why = check_destructive(url, method, profile.endpoint_class)
-        if not ok:
+            return
+        if res.destructive_skipped:
             summary.endpoints_skipped_destructive += 1
-            logger.info("skipping %s %s: %s", method, url, why)
-            continue
+            return
+        if res.probed:
+            summary.endpoints_probed += 1
+        summary.payloads_fired += res.payloads_fired
+        summary.signals_above_threshold += res.signals_above_threshold
+        for finding, profile in zip(res.findings, res.finding_profiles):
+            summary.findings.append(finding)
+            _emit_to_tracer(finding, profile=profile)
 
-        host = urlparse(url).netloc or ""
-        # Honor rate-limit governor
-        governor.before_request(host)
-
-        # Pick vuln classes for this endpoint class
-        vuln_classes = _CLASS_TO_VULN_CLASSES.get(
-            profile.endpoint_class, _CLASS_TO_VULN_CLASSES["generic"],
-        )[:_VULN_CLASS_CAP_PER_ENDPOINT]
-
-        if not vuln_classes:
-            continue
-
-        summary.endpoints_probed += 1
-
-        for vuln_class in vuln_classes:
-            payloads = bin_for(
-                profile.shape, vuln_class, waf=profile.waf_detected,
-            )[:_PAYLOAD_CAP_PER_ENDPOINT]
-            if not payloads:
-                continue
-
-            for payload in payloads:
-                summary.payloads_fired += 1
-
-                # Build attack url + kwargs
-                attack_url = _build_attack_url(
-                    url, profile.shape, method, params, payload,
-                )
-                attack_kwargs = _build_attack_kwargs_for_shape(
-                    profile.shape, method, params, payload,
-                )
-
-                # Fire-and-diff (29.2 + iter-30.5 shape-aware benign control)
+    if concurrency > 1:
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = [
+                executor.submit(_probe_one_endpoint, ep, timeout, governor)
+                for ep in deduped
+            ]
+            for fut in _cf.as_completed(futures):
                 try:
-                    signal = fire_and_diff(
-                        url=attack_url, method=method,
-                        attack_payload=attack_kwargs,
-                        timeout=timeout,
-                        # iter-30.5 — pass shape + params so the baseline
-                        # uses a benign-shape body on POST/PUT/PATCH
-                        # instead of the no-body request that the server
-                        # rejects (collapsing baseline + attack to identical
-                        # 400 responses and zero diff signal).
-                        shape=profile.shape,
-                        params=params,
-                    )
+                    res = fut.result()
                 except Exception as e:  # noqa: BLE001
-                    logger.debug("fire_and_diff failed: %s", e)
+                    logger.debug("parallel probe task crashed: %s", e)
                     continue
-
-                # Update rate-limit governor with the response status
-                # we observed (fire_and_diff captures it internally;
-                # we recover from the diff's status_delta)
-                # Note: we approximate — governor needs status; we record
-                # a 200 by default (no rate-limit info from diff alone)
-                governor.record_response(host, status=200)
-
-                if signal.score < _VERIFY_THRESHOLD:
-                    continue
-
-                summary.signals_above_threshold += 1
-
-                # ----- PoC verification (29.5) -----
-                # Re-fire original + variant (or just original if no
-                # alternative payload).
-                variant = _pick_variant_payload(payloads, payload)
-
-                def _rerun(
-                    _u=attack_url, _m=method, _k=attack_kwargs,
-                    _shape=profile.shape, _params=params,
-                ) -> DiffSignal:
-                    return fire_and_diff(
-                        url=_u, method=_m, attack_payload=_k, timeout=timeout,
-                        shape=_shape, params=_params,  # iter-30.5
-                    )
-
-                variant_fn = None
-                if variant is not None:
-                    v_url = _build_attack_url(
-                        url, profile.shape, method, params, variant,
-                    )
-                    v_kwargs = _build_attack_kwargs_for_shape(
-                        profile.shape, method, params, variant,
-                    )
-
-                    def _variant_fn(
-                        _u=v_url, _m=method, _k=v_kwargs,
-                        _shape=profile.shape, _params=params,
-                    ) -> DiffSignal:
-                        return fire_and_diff(
-                            url=_u, method=_m, attack_payload=_k,
-                            timeout=timeout,
-                            shape=_shape, params=_params,  # iter-30.5
-                        )
-
-                    variant_fn = _variant_fn
-
-                verification = verify_finding(
-                    signal, _rerun, variant_fn=variant_fn,
-                    wait_seconds=1.0,  # short wait in batch context
-                )
-
-                if verification.confidence not in (
-                    CONFIDENCE_VERIFIED, CONFIDENCE_LIKELY,
-                ):
-                    continue
-
-                # ----- Emit finding -----
-                finding = DispatchFinding(
-                    endpoint=url,
-                    method=method,
-                    vuln_class=vuln_class,
-                    payload_excerpt=_summarize_payload(payload),
-                    confidence=verification.confidence,
-                    score=signal.score,
-                    reasons=signal.reasons,
-                )
-                summary.findings.append(finding)
-                # Emit to the tracer so downstream L2 + reporting picks it up
-                _emit_to_tracer(finding, profile=profile)
-
-                # Don't keep firing payloads of the same vuln class
-                # once we have a verified finding — diminishing returns
-                if verification.confidence == CONFIDENCE_VERIFIED:
-                    break
+                _merge_result(res)
+    else:
+        for ep in deduped:
+            try:
+                res = _probe_one_endpoint(ep, timeout, governor)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("serial probe failed for %s: %s", ep.get("url"), e)
+                continue
+            _merge_result(res)
 
     summary.wall_time_s = round(time.monotonic() - t_start, 2)
     return summary
+
+
+def _probe_one_endpoint(
+    ep: dict[str, Any], timeout: int, governor: Any,
+) -> _PerEndpointResult:
+    """iter-33.2 — single-endpoint probe logic extracted from the
+    inner loop. Returns a `_PerEndpointResult` for the outer loop to
+    merge. Pure-thread-safe (no shared mutable state).
+    """
+    result = _PerEndpointResult(endpoint_url=ep.get("url", ""))
+    url = ep["url"]
+    method = ep["method"]
+    params = ep["params"]
+
+    # Classify (uses pre-cached response when re-running; here we
+    # let the classifier probe fresh — it's a single HEAD-like GET)
+    try:
+        profile = classify_endpoint(
+            url, methods=[method], probe_if_no_response=True,
+            timeout=timeout,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("classify failed for %s: %s", url, e)
+        result.classify_failed = True
+        return result
+
+    # Skip static assets — no value in payloading
+    if profile.endpoint_class == "static-asset":
+        result.static_skipped = True
+        return result
+
+    # Skip destructive endpoints unless explicit opt-in
+    ok, why = check_destructive(url, method, profile.endpoint_class)
+    if not ok:
+        result.destructive_skipped = True
+        logger.info("skipping %s %s: %s", method, url, why)
+        return result
+
+    host = urlparse(url).netloc or ""
+    # Honor rate-limit governor (thread-safe — governor uses internal locks)
+    governor.before_request(host)
+
+    # Pick vuln classes for this endpoint class
+    vuln_classes = _CLASS_TO_VULN_CLASSES.get(
+        profile.endpoint_class, _CLASS_TO_VULN_CLASSES["generic"],
+    )[:_VULN_CLASS_CAP_PER_ENDPOINT]
+
+    if not vuln_classes:
+        return result
+
+    result.probed = True
+
+    for vuln_class in vuln_classes:
+        payloads = bin_for(
+            profile.shape, vuln_class, waf=profile.waf_detected,
+        )[:_PAYLOAD_CAP_PER_ENDPOINT]
+        if not payloads:
+            continue
+
+        for payload in payloads:
+            result.payloads_fired += 1
+
+            # Build attack url + kwargs
+            attack_url = _build_attack_url(
+                url, profile.shape, method, params, payload,
+            )
+            attack_kwargs = _build_attack_kwargs_for_shape(
+                profile.shape, method, params, payload,
+            )
+
+            # Fire-and-diff (29.2 + iter-30.5 shape-aware benign control)
+            try:
+                signal = fire_and_diff(
+                    url=attack_url, method=method,
+                    attack_payload=attack_kwargs,
+                    timeout=timeout,
+                    # iter-30.5 — pass shape + params so the baseline
+                    # uses a benign-shape body on POST/PUT/PATCH
+                    # instead of the no-body request that the server
+                    # rejects (collapsing baseline + attack to identical
+                    # 400 responses and zero diff signal).
+                    shape=profile.shape,
+                    params=params,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.debug("fire_and_diff failed: %s", e)
+                continue
+
+            # Update rate-limit governor with the response status
+            # we observed (fire_and_diff captures it internally;
+            # we recover from the diff's status_delta)
+            # Note: we approximate — governor needs status; we record
+            # a 200 by default (no rate-limit info from diff alone)
+            governor.record_response(host, status=200)
+
+            if signal.score < _VERIFY_THRESHOLD:
+                continue
+
+            result.signals_above_threshold += 1
+
+            # ----- PoC verification (29.5) -----
+            # Re-fire original + variant (or just original if no
+            # alternative payload).
+            variant = _pick_variant_payload(payloads, payload)
+
+            def _rerun(
+                _u=attack_url, _m=method, _k=attack_kwargs,
+                _shape=profile.shape, _params=params,
+            ) -> DiffSignal:
+                return fire_and_diff(
+                    url=_u, method=_m, attack_payload=_k, timeout=timeout,
+                    shape=_shape, params=_params,  # iter-30.5
+                )
+
+            variant_fn = None
+            if variant is not None:
+                v_url = _build_attack_url(
+                    url, profile.shape, method, params, variant,
+                )
+                v_kwargs = _build_attack_kwargs_for_shape(
+                    profile.shape, method, params, variant,
+                )
+
+                def _variant_fn(
+                    _u=v_url, _m=method, _k=v_kwargs,
+                    _shape=profile.shape, _params=params,
+                ) -> DiffSignal:
+                    return fire_and_diff(
+                        url=_u, method=_m, attack_payload=_k,
+                        timeout=timeout,
+                        shape=_shape, params=_params,  # iter-30.5
+                    )
+
+                variant_fn = _variant_fn
+
+            verification = verify_finding(
+                signal, _rerun, variant_fn=variant_fn,
+                wait_seconds=1.0,  # short wait in batch context
+            )
+
+            if verification.confidence not in (
+                CONFIDENCE_VERIFIED, CONFIDENCE_LIKELY,
+            ):
+                continue
+
+            # ----- Collect finding (emit happens single-threaded in caller) -----
+            finding = DispatchFinding(
+                endpoint=url,
+                method=method,
+                vuln_class=vuln_class,
+                payload_excerpt=_summarize_payload(payload),
+                confidence=verification.confidence,
+                score=signal.score,
+                reasons=signal.reasons,
+            )
+            result.findings.append(finding)
+            result.finding_profiles.append(profile)
+
+            # Don't keep firing payloads of the same vuln class
+            # once we have a verified finding — diminishing returns
+            if verification.confidence == CONFIDENCE_VERIFIED:
+                break
+
+    return result
 
 
 def _emit_to_tracer(
