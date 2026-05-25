@@ -30,6 +30,33 @@ from strix.l15.endpoint_classifier import (  # iter-29.1
     classify_endpoint,
     classify_endpoints_batch,
 )
+from strix.l15.baseline_diff import (  # iter-29.2
+    DiffSignal,
+    diff_responses,
+    fire_and_diff,
+    score_signal,
+)
+from strix.l15.payload_bins import (  # iter-29.3
+    PayloadBin,
+    bin_for,
+    bin_object_for,
+    list_available_combinations,
+)
+from strix.l15.poc_verifier import (  # iter-29.5
+    CONFIDENCE_DISMISSED,
+    CONFIDENCE_LIKELY,
+    CONFIDENCE_SUSPECTED,
+    CONFIDENCE_VERIFIED,
+    PocVerification,
+    verify_finding,
+)
+from strix.l15.safety_guards import (  # iter-29.9
+    RateLimitGovernor,
+    check_destructive,
+    destructive_ok,
+    get_governor,
+    is_destructive_endpoint,
+)
 from strix.l15.exploitability import (
     ExploitabilityScore,
     apply_exploitability_to_severity,
@@ -126,4 +153,27 @@ __all__ = [
     "EndpointProfile",
     "classify_endpoint",
     "classify_endpoints_batch",
+    # iter-29.2 — baseline-and-diff verifier
+    "DiffSignal",
+    "diff_responses",
+    "fire_and_diff",
+    "score_signal",
+    # iter-29.3 — shape-aware payload bins
+    "PayloadBin",
+    "bin_for",
+    "bin_object_for",
+    "list_available_combinations",
+    # iter-29.5 — PoC validator
+    "CONFIDENCE_DISMISSED",
+    "CONFIDENCE_LIKELY",
+    "CONFIDENCE_SUSPECTED",
+    "CONFIDENCE_VERIFIED",
+    "PocVerification",
+    "verify_finding",
+    # iter-29.9 — safety guards
+    "RateLimitGovernor",
+    "check_destructive",
+    "destructive_ok",
+    "get_governor",
+    "is_destructive_endpoint",
 ]

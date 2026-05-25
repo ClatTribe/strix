@@ -160,6 +160,62 @@ def test_auth_state_merges_cookies_across_calls() -> None:
 
 
 # ---------------------------------------------------------------------------
+# iter-29.4 — env-synthesized AuthState fallback
+# ---------------------------------------------------------------------------
+
+def test_list_auth_states_synthesizes_from_env_bearer(monkeypatch) -> None:
+    """When STRIX_AUTH_BEARER is set (e.g., by seed_auth) but no
+    registered AuthState exists, list_auth_states() must synthesize
+    one so downstream specialists pick up the credential."""
+    from strix.agents.security_context import list_auth_states, reset_security_context
+    reset_security_context()
+    monkeypatch.setenv("STRIX_AUTH_BEARER", "synth-bearer-xyz")
+    monkeypatch.delenv("STRIX_AUTH_COOKIE", raising=False)
+    states = list_auth_states()
+    assert any(s.bearer == "synth-bearer-xyz" for s in states)
+    # Label distinguishes synthesized from registered
+    synth = next(s for s in states if s.bearer == "synth-bearer-xyz")
+    assert synth.label == "strix-env-synthesized"
+
+
+def test_list_auth_states_synthesizes_from_env_cookie(monkeypatch) -> None:
+    """Cookie env synthesizes too — supports compound `name=v;name2=v2`."""
+    from strix.agents.security_context import list_auth_states, reset_security_context
+    reset_security_context()
+    monkeypatch.delenv("STRIX_AUTH_BEARER", raising=False)
+    monkeypatch.setenv("STRIX_AUTH_COOKIE", "session=abc; csrf=xyz")
+    states = list_auth_states()
+    synth = next((s for s in states if s.label == "strix-env-synthesized"), None)
+    assert synth is not None
+    assert synth.cookies == {"session": "abc", "csrf": "xyz"}
+
+
+def test_list_auth_states_no_synthesis_when_already_registered(monkeypatch) -> None:
+    """If a real AuthState with the same bearer is already registered,
+    no duplicate synthesized state."""
+    from strix.agents.security_context import (
+        list_auth_states, record_auth_state, reset_security_context,
+    )
+    reset_security_context()
+    record_auth_state("real-user", bearer="my-bearer")
+    monkeypatch.setenv("STRIX_AUTH_BEARER", "my-bearer")
+    monkeypatch.delenv("STRIX_AUTH_COOKIE", raising=False)
+    states = list_auth_states()
+    # Only the registered one, not duplicated
+    assert len(states) == 1
+    assert states[0].label == "real-user"
+
+
+def test_list_auth_states_no_env_no_synthesis(monkeypatch) -> None:
+    """Baseline: no env, no registered → no synthesized states."""
+    from strix.agents.security_context import list_auth_states, reset_security_context
+    reset_security_context()
+    monkeypatch.delenv("STRIX_AUTH_BEARER", raising=False)
+    monkeypatch.delenv("STRIX_AUTH_COOKIE", raising=False)
+    assert list_auth_states() == []
+
+
+# ---------------------------------------------------------------------------
 # Partial signals
 # ---------------------------------------------------------------------------
 
