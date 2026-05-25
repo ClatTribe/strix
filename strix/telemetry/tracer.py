@@ -2114,6 +2114,31 @@ class Tracer:
         except Exception as e:  # noqa: BLE001
             logger.debug("L1.5 hooks failed: %s — passthrough", e)
 
+        # iter-32.4 — post-emit verifier. Opt-in via env
+        # `STRIX_L15_POST_EMIT_VERIFY=1`. For findings landed at
+        # `pattern_match` / `inconclusive` / `suspected` / `likely`
+        # with a probable endpoint + supported category, re-fire a
+        # representative payload via iter-29.2 fire_and_diff (now
+        # with iter-30.5 benign baseline) and upgrade to `verified`
+        # when the signal crosses threshold.
+        try:
+            from strix.l15 import post_emit_verifier
+            if post_emit_verifier.is_enabled():
+                upgraded = post_emit_verifier.try_post_emit_verify(report)
+                if upgraded:
+                    self._emit_event(
+                        "finding.l15_post_emit_verified",
+                        payload={
+                            "report_id": report_id,
+                            "from_status": "pattern_match",
+                            "to_status": report.get("verification_status"),
+                        },
+                        status="info",
+                        source="strix.l15.post_emit_verifier",
+                    )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("post-emit verifier hook failed: %s", e)
+
         # Roadmap §9 cross-tool dedup. When a new finding shares the
         # stable fingerprint of an existing one, MERGE rather than
         # create a duplicate row. The accumulated `detected_by` list
