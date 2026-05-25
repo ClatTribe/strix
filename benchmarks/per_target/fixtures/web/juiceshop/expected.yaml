@@ -125,3 +125,33 @@ expected_dismissed:
       A "redirect to user-controlled URL" finding on /static/redirect-to-
       logo.png — a static-asset rewrite, not an open-redirect vuln.
       L1.5 should drop based on static-asset endpoint classification.
+
+# iter-31.2 — Expected attack chains that L1.5's mid_scan_correlate
+# (iter-27.2) SHOULD promote into multi-step chain findings. Each chain
+# is composed of finding IDs from `expected_findings[]` above.
+#
+# The chain is matched when ≥50% of the listed members appear in the
+# actual chain's members[] (substring match in either direction). The
+# bench computes `chain_detection_rate` per fixture and aggregate.
+expected_chains:
+  - id: auth-bypass-to-admin
+    kind: privilege-escalation
+    members:
+      - sqli-login
+      - missing-auth-admin
+    severity: critical
+    description: |
+      SQLi on /rest/user/login bypasses auth → resulting session can
+      reach /#/administration which lacks role enforcement. Chain
+      bumps both findings to "active breach path."
+
+  - id: idor-to-data-exfil
+    kind: data-exfil
+    members:
+      - idor-basket
+      - weak-jwt-handling
+    severity: high
+    description: |
+      Forged JWT (weak HMAC / alg=none) enables horizontal access to
+      other users' baskets via IDOR. Chain encodes "credential
+      forgery enables BOLA at scale."

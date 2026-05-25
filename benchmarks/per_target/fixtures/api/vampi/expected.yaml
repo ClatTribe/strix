@@ -140,3 +140,42 @@ expected_dismissed:
       A test JSON fixture containing a literal alg=none JWT. Looks like
       a vulnerable finding to a signature scanner — L1.5 should drop
       via test_file_path.
+
+# iter-31.2 — Expected attack chains that L1.5's mid_scan_correlate
+# SHOULD promote. Each chain references finding IDs from
+# `expected_findings[]` above.
+expected_chains:
+  - id: bola-to-mass-assignment
+    kind: privilege-escalation
+    members:
+      - bola-user-by-username
+      - mass-assignment-admin
+    severity: critical
+    description: |
+      BOLA on /users/v1/{username} enumerates the admin's username →
+      attacker re-registers a user with `admin: true` via mass-
+      assignment → privileges escalate. Chain encodes "user enum
+      enables targeted admin promotion."
+
+  - id: jwt-forge-to-debug-data-exfil
+    kind: data-exfil
+    members:
+      - jwt-none-alg
+      - bfla-debug-endpoint
+    severity: critical
+    description: |
+      Forged JWT (alg=none, no signature needed) → hit the
+      /users/v1/_debug endpoint that returns all users + password
+      hashes. Chain demonstrates broken auth enables broken function-
+      level auth bypass.
+
+  - id: sqli-to-credential-extract
+    kind: data-exfil
+    members:
+      - sqli-users-by-username
+      - jwt-weak-secret
+    severity: critical
+    description: |
+      SQLi on /users/v1/{username} extracts the JWT signing secret
+      from `users` table → attacker forges arbitrary admin JWTs
+      offline. Chain links injection to credential theft.
