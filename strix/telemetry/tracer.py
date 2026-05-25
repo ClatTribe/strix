@@ -893,6 +893,74 @@ class Tracer:
             "phase_correlations_new_chains_total": sum(
                 int(p.get("new_chains") or 0) for p in self.phase_correlations
             ),
+            # iter-31.7 — reproducibility_rate rollup (metric #8 in
+            # docs/metrics.md §1.2). Bench reads this to score L2.5's
+            # "does the PoC reproduce on re-fire" signal without
+            # re-walking vulnerability_reports.
+            **self._build_reproducibility_summary(),
+        }
+
+    def _build_reproducibility_summary(self) -> dict[str, Any]:
+        """iter-31.7 — aggregate per-finding verification_status into a
+        single reproducibility_rate + per-tier histogram.
+
+        `verification_status` (set by `add_vulnerability_report` from
+        the PoC verifier / agent) takes the values:
+          verified / likely / suspected / dismissed / exploited /
+          pattern_match / inconclusive
+
+        Buckets:
+          * **strong** (counts toward rate): `verified`, `exploited`
+            — original PoC re-fired AND a variant fired (or the agent
+            demonstrably exploited the finding).
+          * **weak** (counts toward `rate_within_likely`): `likely` —
+            original re-fired but variant didn't.
+          * **other** (denominator only): everything else.
+
+        Excludes:
+          * Corroborator-role siblings (they're proxies for a parent's
+            verification; double-counting inflates the rate).
+          * Findings without any `verification_status` set.
+
+        Returns dict with:
+          * reproducibility_rate
+          * reproducibility_rate_within_likely
+          * reproducibility_by_tier (counts per tier label)
+          * reproducibility_findings_total (denominator)
+        """
+        STRONG = {"verified", "exploited"}
+        WEAK = {"likely"}
+
+        strong = 0
+        weak = 0
+        total = 0
+        by_tier: dict[str, int] = {}
+
+        for r in self.vulnerability_reports:
+            if r.get("role") == "corroborator":
+                continue
+            vs_raw = r.get("verification_status")
+            if not isinstance(vs_raw, str):
+                continue
+            vs = vs_raw.strip().lower()
+            if not vs:
+                continue
+            total += 1
+            by_tier[vs] = by_tier.get(vs, 0) + 1
+            if vs in STRONG:
+                strong += 1
+            elif vs in WEAK:
+                weak += 1
+
+        rate = round(strong / total, 3) if total else 0.0
+        rate_within_likely = (
+            round((strong + weak) / total, 3) if total else 0.0
+        )
+        return {
+            "reproducibility_rate": rate,
+            "reproducibility_rate_within_likely": rate_within_likely,
+            "reproducibility_by_tier": by_tier,
+            "reproducibility_findings_total": total,
         }
 
     def record_phase_correlation(self, result: Any) -> None:
