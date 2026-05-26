@@ -21,6 +21,17 @@ from strix.agents.lead_agent.tool_catalog import (
 )
 
 
+# iter-37.10: phase-filter tests assume the LEGACY ~85-tool catalog
+# (see module docstring). Under the iter-37.2/37.8/37.10 minimal
+# catalogs, the per-asset surface is intentionally too small for the
+# phase-filter intersection to remove much. Opt into legacy mode so
+# the phase-filter contract is tested against the catalog it was
+# designed for.
+@pytest.fixture(autouse=True)
+def _enable_legacy_catalog(monkeypatch):
+    monkeypatch.setenv("STRIX_LEGACY_CATALOG", "1")
+
+
 # ---------------------------------------------------------------------------
 # Backwards-compatibility — phase=None falls back to pre-PR-α behaviour
 # ---------------------------------------------------------------------------

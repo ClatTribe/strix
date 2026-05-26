@@ -339,11 +339,27 @@ Strix is **an LLM orchestrator over community-maintained OSS security tools**, n
 | 37.1 | Audit doc `docs/tool-catalog-rationalization.md` | #483 | ✓ shipped |
 | 37.2 | Per-asset minimal catalog filter (default ON) — web 99 → 42 tools | #484 | ✓ shipped |
 | 37.3 | Deprecation registry (`strix/tools/deprecations.py`) — 50+ tools warn-on-call | #485 | ✓ shipped |
+| 37.7 | CLAUDE.md decision rule + iter-37 status table | #486 | ✓ shipped |
+| 37.8 | Minimal CORE tools (32 → 13) | #487 | ✓ shipped |
+| 37.9 | Update 24 specialist tests to set STRIX_LEGACY_CATALOG=1 | #488 | ✓ shipped |
+| 37.10 | Minimal CORE 13 → 5; auto-fire compliance + remediation in finish_scan | — | in flight |
+| 37.11 | Per-asset trim to ACT-only (drop prepass dupes — katana, nuclei, openapi_ingest, …) | — | pending |
+| 37.12 | Bench L2 Juice Shop with iter-37.10 + 37.11 trimmed catalog | — | pending |
 | 37.4 | Add 6 NEW OSS wrappers: smuggler.py, SAML Raider, hydra, mobsfscan, ffuf, schemathesis | — | pending |
 | 37.5 | DELETE the deprecated tools after grace period | — | pending |
-| 37.6 | Re-bench L2 Juice Shop with minimal catalog active | — | pending |
-| 37.7 | This CLAUDE.md update | — | ✓ shipped |
+| 37.6 | Re-bench L2 Juice Shop with minimal catalog active (superseded by 37.12) | — | superseded |
 
-**Default for the L2 Lead today** (post iter-37.2): minimal OSS-anchored catalog. The agent sees ~42 tools per web target (33 core + 9 specialist), all of them OSS-backed or LLM-orchestration logic. Set `STRIX_LEGACY_CATALOG=1` to restore the pre-iter-37.2 99-tool catalog for backwards-compat.
+**Default for the L2 Lead today** (post iter-37.10): minimal OSS-anchored catalog with the trimmed core. The agent sees ≤15 tools per web target (5 core + 10 specialist), all of them OSS-backed or LLM-orchestration logic. Set `STRIX_LEGACY_CATALOG=1` to restore the pre-iter-37.2 99-tool catalog for backwards-compat.
+
+**Minimal CORE (5 tools)** — one per OODA phase + terminate:
+  * `workflow_status` — OBSERVE: where am I in the scan?
+  * `list_pending_findings` — OBSERVE: what did L1 surface?
+  * `think` — ORIENT: reasoning scratchpad
+  * `create_vulnerability_report` — ACT: emit findings (upsert via `existing_report_id`)
+  * `finish_scan` — terminate (auto-fires compliance + remediation artifacts)
+
+**iter-37.10 also auto-fires terminal artifacts** inside `finish_scan` — `emit_compliance_evidence` and `generate_remediation_plan` no longer take catalog slots. Opt-out: `STRIX_FINISH_AUTO_ARTIFACTS=0`.
+
+**Why the trim**: per the OODA loop, the OSS prepass (`anchor_prepass`) already handles OBSERVE+ORIENT deterministically — recon and broad-signature detection fire ~25 tools before the LLM wakes up. The L1.5 hook chain auto-handles threat-intel enrichment (`tracer.add_vulnerability_report` calls `threat_intel.enrich` at emission) and mid-scan correlation (`mid_scan_correlate.correlate_at_phase_boundary` at each phase transition). Tools that were in the catalog purely so the LLM could request work the harness already does are now hidden — fewer choices, less decision paralysis.
 
 **Deprecated tools** (50+ as of iter-37.3) STILL EXECUTE when invoked directly (sandbox tool-server / tests / legacy mode). They emit a WARNING log with the OSS replacement hint. See `strix/tools/deprecations.py` for the central registry.

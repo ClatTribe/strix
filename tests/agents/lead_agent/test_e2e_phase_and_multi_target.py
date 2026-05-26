@@ -96,9 +96,12 @@ def test_l15_enrichment_survives_phase_transition(tracer):
     catalog_probe = get_lead_tool_catalog(
         target_types={"web_application"}, phase="probe",
     )
-    # In probe phase, recon-only tools are hidden but L1.5 core stays
+    # In probe phase, recon-only tools are hidden but core stays.
+    # iter-37.8 dropped drain_amplify_queue from minimal core;
+    # iter-37.10 trimmed core to 5 tools. The L1.5-aware ranked-
+    # catalog accessor (list_pending_findings) is still core.
     assert "list_pending_findings" in catalog_probe
-    assert "drain_amplify_queue" in catalog_probe
+    assert "create_vulnerability_report" in catalog_probe
 
     # Re-read the finding via list_pending_findings — fields should
     # be intact
@@ -133,9 +136,11 @@ def test_multi_target_union_catalog_includes_both_asset_types():
     assert "scan_sast" in catalog
     assert "scan_sca_lockfiles" in catalog
     assert "secrets_scan" in catalog
-    # L1.5 core in both
+    # Core tools in both (iter-37.10 minimal core: list_pending_findings
+    # is the L1.5-aware ranked-catalog accessor; create_vulnerability_report
+    # is the universal emission tool).
     assert "list_pending_findings" in catalog
-    assert "drain_amplify_queue" in catalog
+    assert "create_vulnerability_report" in catalog
 
 
 def test_multi_target_findings_get_l15_enrichment_regardless_of_origin(tracer):

@@ -56,16 +56,23 @@ def test_minimal_core_under_15_tools():
 # ---------------------------------------------------------------------------
 
 def test_workflow_control_in_minimal_core():
-    """Workflow status + phase advancement are non-negotiable."""
+    """workflow_status stays — pure OBSERVE. iter-37.10 dropped
+    advance_workflow_phase (auto-handled by gates)."""
     assert "workflow_status" in _MINIMAL_CORE_TOOLS
-    assert "advance_workflow_phase" in _MINIMAL_CORE_TOOLS
+    # iter-37.10: advance_workflow_phase no longer in core. The
+    # workflow state machine auto-advances on phase criteria; the
+    # OODA-loop-breaker (PR-#232) handles the stuck-loop case.
+    assert "advance_workflow_phase" not in _MINIMAL_CORE_TOOLS
 
 
 def test_finding_emission_in_minimal_core():
-    """The lead's primary actions: emit + update findings."""
+    """create_vulnerability_report + list_pending_findings stay.
+    iter-37.10 folded update_finding into create_vulnerability_report
+    via upsert (`existing_report_id=` kwarg)."""
     assert "create_vulnerability_report" in _MINIMAL_CORE_TOOLS
-    assert "update_finding" in _MINIMAL_CORE_TOOLS
     assert "list_pending_findings" in _MINIMAL_CORE_TOOLS
+    # iter-37.10: update_finding folded into create_vulnerability_report.
+    assert "update_finding" not in _MINIMAL_CORE_TOOLS
 
 
 def test_termination_in_minimal_core():
@@ -73,23 +80,35 @@ def test_termination_in_minimal_core():
 
 
 def test_chain_reasoning_in_minimal_core():
-    assert "correlate_findings" in _MINIMAL_CORE_TOOLS
+    """iter-37.10: correlate_findings dropped from core because
+    mid_scan_correlate (iter-27.2) auto-fires at every phase
+    boundary. The LLM-callable version is redundant + invites
+    decision paralysis."""
+    assert "correlate_findings" not in _MINIMAL_CORE_TOOLS
 
 
 def test_threat_intel_in_minimal_core():
-    """Single threat-intel tool kept (drops threat_intel_status)."""
-    assert "query_threat_intel" in _MINIMAL_CORE_TOOLS
+    """iter-37.10: query_threat_intel dropped from core. The tracer
+    auto-enriches every finding with CWE/CVE/KEV/EPSS at emission
+    time (tracer.py:1689). LLM-callable lookup is redundant for the
+    in-scan path."""
+    assert "query_threat_intel" not in _MINIMAL_CORE_TOOLS
 
 
 def test_http_primitive_in_minimal_core():
-    """probe_endpoint is the generic HTTP primitive every scan needs."""
-    assert "probe_endpoint" in _MINIMAL_CORE_TOOLS
+    """iter-37.10: probe_endpoint dropped from core. send_request
+    (per-asset) is the unified HTTP primitive for web/api/ip; code
+    + container + domain don't need a raw HTTP primitive in catalog."""
+    assert "probe_endpoint" not in _MINIMAL_CORE_TOOLS
 
 
 def test_compliance_remediation_in_minimal_core():
-    """Compliance + remediation outputs are end-of-scan artifacts."""
-    assert "emit_compliance_evidence" in _MINIMAL_CORE_TOOLS
-    assert "generate_remediation_plan" in _MINIMAL_CORE_TOOLS
+    """iter-37.10: both terminal artifacts dropped from core. They
+    auto-fire inside finish_scan (opt-out:
+    STRIX_FINISH_AUTO_ARTIFACTS=0). Frees 2 slots in the catalog
+    without changing behavior."""
+    assert "emit_compliance_evidence" not in _MINIMAL_CORE_TOOLS
+    assert "generate_remediation_plan" not in _MINIMAL_CORE_TOOLS
 
 
 def test_think_in_minimal_core():

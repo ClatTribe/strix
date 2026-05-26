@@ -611,49 +611,83 @@ def is_legacy_catalog_enabled() -> bool:
 # Set STRIX_LEGACY_CATALOG=1 to restore the 32-tool _CORE_TOOLS.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# iter-37.10 — minimal CORE trimmed from 13 → 5.
+#
+# Frame: OODA. The OSS prepass (anchor_prepass) already burns through
+# OBSERVE + ORIENT before the LLM wakes up — recon and broad-signature
+# detection are deterministic, not LLM-driven. The L1.5 hook chain
+# auto-handles threat-intel enrichment (tracer.add_vulnerability_report
+# calls threat_intel.enrich at emission time) and mid-scan correlation
+# (mid_scan_correlate.correlate_at_phase_boundary fires at every phase
+# transition). So the LLM's catalog should ONLY contain tools the LLM
+# itself must call — not tools the harness already drives.
+#
+# Kept (5 tools — one per OODA phase + termination):
+#   * workflow_status          — OBSERVE: where am I in the scan?
+#   * list_pending_findings    — OBSERVE: what did L1 surface?
+#   * think                    — ORIENT: reasoning scratchpad
+#   * create_vulnerability_report — ACT: emit (now upsert-capable via
+#                                  `existing_report_id`)
+#   * finish_scan              — terminate (auto-fires compliance +
+#                                remediation as terminal artifacts)
+#
+# Dropped (8 tools — covered by harness or auto-hooks):
+#   * advance_workflow_phase   — phase gates are advisory; workflow
+#                                state machine auto-advances on
+#                                criteria. LLM-driven advancement
+#                                is a footgun (PR-#232 OODA loop-
+#                                breaker fights this exact problem).
+#   * probe_endpoint           — folds into send_request (per-asset).
+#   * update_finding           — fold into create_vulnerability_report
+#                                via upsert semantics.
+#   * correlate_findings       — mid_scan_correlate auto-fires at every
+#                                phase boundary (iter-27.2). LLM call
+#                                is redundant + invites paralysis.
+#   * query_threat_intel       — tracer.add_vulnerability_report
+#                                auto-enriches with CWE/CVE/KEV/EPSS at
+#                                emission time. Pre-scan stack-CVE
+#                                lookups are an orchestrator-mode
+#                                concern, not core.
+#   * emit_compliance_evidence — terminal artifact, auto-fires inside
+#                                finish_scan now.
+#   * generate_remediation_plan — same; auto-fires inside finish_scan.
+#   * dispatch_specialist      — orchestrator-mode-only; surfaced via
+#                                _ORCHESTRATOR_ALLOWED_TOOLS, not core.
+#
+# All dropped tools STAY REGISTERED + EXECUTABLE (sandbox tool-server,
+# tests, legacy mode). They're just hidden from the LLM's choice space.
+#
+# Total catalog target per web target after iter-37.10:
+#   5 core + 10 specialist (iter-37.2) = 15 tools (down from 23).
+# After iter-37.11 (per-asset ACT-only trim):
+#   5 core + 5 specialist = 10 tools (84% reduction vs 99 legacy).
+#
+# Set STRIX_LEGACY_CATALOG=1 to restore the 32-tool _CORE_TOOLS.
+# ---------------------------------------------------------------------------
+
 _MINIMAL_CORE_TOOLS: frozenset[str] = frozenset({
-    # === Workflow control (2) ===
-    # Where am I + how to advance.
+    # === OBSERVE: where am I? ===
     "workflow_status",
-    "advance_workflow_phase",
 
-    # === HTTP primitive (1) ===
-    # Generic LLM-driven HTTP. Used when nuclei/sqlmap/dalfox don't
-    # cover the case (custom auth headers, multi-step flows, etc.).
-    "probe_endpoint",
-
-    # === Finding emission (3) ===
-    # The lead's primary action: emit findings.
-    "create_vulnerability_report",
-    "update_finding",
+    # === OBSERVE: what did L1 surface? ===
     "list_pending_findings",
 
-    # === Termination (1) ===
-    "finish_scan",
-
-    # === LLM scratchpad (1) ===
+    # === ORIENT: scratchpad ===
     # No-op tool that gives the LLM a place to record reasoning.
-    # Subsumes the 5 note tools + 5 hypothesis tools for almost all
-    # use cases.
+    # Subsumes the 5 note tools + 5 hypothesis tools.
     "think",
 
-    # === Chain reasoning (1) ===
-    # Cross-category finding chain detection. The L1.5 moat.
-    "correlate_findings",
+    # === ACT: emit findings ===
+    # Upsert-capable post iter-37.10 — pass `existing_report_id` to
+    # mutate, omit to create.
+    "create_vulnerability_report",
 
-    # === Threat intel (1) ===
-    # Unified CVE / KEV / EPSS / campaign lookup.
-    "query_threat_intel",
-
-    # === Compliance + remediation output (2) ===
-    "emit_compliance_evidence",
-    "generate_remediation_plan",
-
-    # === Orchestrator-mode dispatch (1) ===
-    # Available always (its no-op outside orchestrator mode is fine).
-    # Removing it from non-orchestrator catalogs would break the
-    # specialist-fan-out path documented in lead_agent.py.
-    "dispatch_specialist",
+    # === ACT: terminate ===
+    # Auto-fires emit_compliance_evidence + generate_remediation_plan
+    # as terminal artifacts (iter-37.10). Set
+    # STRIX_FINISH_AUTO_ARTIFACTS=0 to opt out.
+    "finish_scan",
 })
 
 

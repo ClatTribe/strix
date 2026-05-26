@@ -18,6 +18,20 @@ from strix.agents.lead_agent.tool_catalog import (
 )
 
 
+# iter-37.10: this file documents the LEGACY catalog shape — the full
+# pre-iter-37.x universe of tools per target type, including notes,
+# hypotheses, kg_query, threat_intel_status, etc. Under the iter-37.2
+# / iter-37.8 / iter-37.10 minimal catalogs, ~50 of those tools are
+# deliberately hidden from the LLM. Opt every test in this file into
+# legacy mode so the assertions match the documented contract.
+# Minimal-catalog behavior is covered separately by
+# test_iter_37_2_minimal_catalog.py, test_iter_37_8_minimal_core.py,
+# and test_iter_37_10_minimal_core_trim.py.
+@pytest.fixture(autouse=True)
+def _enable_legacy_catalog(monkeypatch):
+    monkeypatch.setenv("STRIX_LEGACY_CATALOG", "1")
+
+
 # ---------------------------------------------------------------------------
 # Architectural commitment: spawn-helpers always blocked
 # ---------------------------------------------------------------------------
