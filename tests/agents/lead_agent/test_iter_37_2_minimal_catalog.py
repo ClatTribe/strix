@@ -25,11 +25,17 @@ from strix.agents.lead_agent.tool_catalog import (
 
 @pytest.fixture(autouse=True)
 def _clean_env():
-    """Each test starts with STRIX_LEGACY_CATALOG unset (default behavior)."""
+    """Each test starts with STRIX_LEGACY_CATALOG unset. Restore the
+    pre-test value after, regardless of what the test did."""
     saved = os.environ.pop("STRIX_LEGACY_CATALOG", None)
-    yield
-    if saved is not None:
-        os.environ["STRIX_LEGACY_CATALOG"] = saved
+    try:
+        yield
+    finally:
+        # ALWAYS clean up — if the test set the var, pop it; then
+        # restore whatever was set before.
+        os.environ.pop("STRIX_LEGACY_CATALOG", None)
+        if saved is not None:
+            os.environ["STRIX_LEGACY_CATALOG"] = saved
 
 
 # ---------------------------------------------------------------------------

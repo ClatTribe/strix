@@ -132,14 +132,15 @@ def test_lead_agent_carries_tool_catalog_allowlist(base_config) -> None:
     allowlist = ctx.get("tool_catalog_allowlist")
     assert isinstance(allowlist, list)
     assert "create_agent" not in allowlist  # architectural commitment
-    # iter-37.2 — minimal catalog is OSS-anchored. Assertions now
-    # reference the OSS-wrapper tools (nuclei, katana, etc.) rather
-    # than in-house duplicates (scan_misconfig — DEPRECATED, routed
-    # through scan_nuclei_templates `tags:misconfig`).
+    # iter-37.2 — minimal catalog is OSS-anchored. Assertions reference
+    # OSS-wrapper tools instead of in-house duplicates.
+    # iter-37.8 — minimal CORE drops redundant tools (hypothesis x5,
+    # notes x5, introspection). Assertions reference the survivor set.
     assert "scan_nuclei_templates" in allowlist  # OSS-anchored generic detection
     assert "crawl_with_katana" in allowlist  # OSS-anchored recon
-    assert "open_hypothesis" in allowlist  # core
-    assert "check_budget" in allowlist  # §2.9 budget introspection
+    assert "workflow_status" in allowlist  # core — workflow
+    assert "create_vulnerability_report" in allowlist  # core — emit findings
+    assert "think" in allowlist  # core — LLM scratchpad
 
 
 def test_lead_agent_carries_tool_catalog_blocklist(base_config) -> None:
