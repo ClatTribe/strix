@@ -305,12 +305,9 @@ def test_unknown_family_recorded_as_error(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_replay_mutation_in_lead_web_application_catalog() -> None:
-    """iter-22.9: three source-specific replay tools consolidated
-    into one `replay_mutation(source=...)` per
-    `docs/l2-architecture-evaluation.md §5.2`. The unified tool
-    must appear in the catalog; the three split variants must
-    not."""
+def test_replay_mutation_in_lead_web_application_catalog(monkeypatch) -> None:
+    """iter-37.2 — deprecated tool; visible only under STRIX_LEGACY_CATALOG=1."""
+    monkeypatch.setenv("STRIX_LEGACY_CATALOG", "1")
     from strix.agents.lead_agent.tool_catalog import get_lead_tool_catalog
 
     catalog = get_lead_tool_catalog(target_types=["web_application"])
