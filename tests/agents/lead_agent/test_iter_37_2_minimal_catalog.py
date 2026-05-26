@@ -87,13 +87,23 @@ def test_api_catalog_dramatically_smaller_under_minimal():
 # ---------------------------------------------------------------------------
 
 def test_web_minimal_catalog_includes_oss_recon():
-    tools = get_lead_tool_catalog(target_types=["web_application"])
-    assert "crawl_with_katana" in tools
+    """iter-37.11 superseded the iter-37.2 contract: katana fires in
+    the anchor prepass (_ANCHORS_WEB), not in the LLM catalog. Verify
+    the prepass coverage instead."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
+    anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["web_application"]}
+    assert "crawl_with_katana" in anchors
 
 
 def test_web_minimal_catalog_includes_oss_generic_detection():
-    tools = get_lead_tool_catalog(target_types=["web_application"])
-    assert "scan_nuclei_templates" in tools
+    """iter-37.11 superseded: nuclei fires in the prepass, not catalog."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
+    anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["web_application"]}
+    assert "scan_nuclei_templates" in anchors
 
 
 def test_web_minimal_catalog_includes_oss_sqli_xss():
@@ -103,35 +113,58 @@ def test_web_minimal_catalog_includes_oss_sqli_xss():
 
 
 def test_web_minimal_catalog_includes_oss_tls():
-    tools = get_lead_tool_catalog(target_types=["web_application"])
-    assert "tls_audit" in tools
+    """iter-37.11 superseded: tls_audit fires in the prepass."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
+    anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["web_application"]}
+    assert "tls_audit" in anchors
 
 
 def test_api_minimal_catalog_anchors_on_openapi():
-    """APIs use OpenAPI spec ingestion instead of HTML crawl."""
-    tools = get_lead_tool_catalog(target_types=["api"])
-    assert "openapi_spec_ingest" in tools
+    """iter-37.11 superseded: openapi_spec_ingest fires in the prepass."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
+    anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["api"]}
+    assert "openapi_spec_ingest" in anchors
 
 
 def test_api_minimal_catalog_includes_graphql_inql():
-    """GraphQL endpoints are common on API targets."""
+    """GraphQL endpoints are common on API targets. InQL stays in
+    catalog — no comparable OSS substitute for fine-grained schema
+    mutation testing."""
     tools = get_lead_tool_catalog(target_types=["api"])
     assert "map_graphql_inql" in tools
 
 
 def test_code_minimal_catalog_anchors_on_semgrep_trivy():
+    """iter-37.11 superseded: SAST + SCA + secrets fire in the
+    prepass, not in catalog."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
     for asset in ("repository", "local_code"):
-        tools = get_lead_tool_catalog(target_types=[asset])
-        assert "scan_sast" in tools, f"{asset} missing semgrep"
-        assert "scan_sca_lockfiles" in tools, f"{asset} missing trivy fs"
-        assert "secrets_scan" in tools, f"{asset} missing gitleaks"
+        anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE[asset]}
+        assert "scan_sast" in anchors, f"{asset} missing semgrep in prepass"
+        assert "scan_sca_lockfiles" in anchors, (
+            f"{asset} missing trivy fs in prepass"
+        )
+        assert "secrets_scan" in anchors, (
+            f"{asset} missing gitleaks in prepass"
+        )
 
 
 def test_container_minimal_catalog_anchors_on_trivy():
+    """iter-37.11 superseded: trivy (scan_container_image) fires in
+    the prepass. dockle stays in catalog (not prepass-covered)."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
+    anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["container_image"]}
+    assert "scan_container_image" in anchors  # trivy — prepass
     tools = get_lead_tool_catalog(target_types=["container_image"])
-    assert "scan_container_image" in tools  # trivy
-    assert "scan_image_dockle" in tools  # dockle
-    assert "scan_dockerfile_hadolint" not in tools or True  # Maybe present
+    assert "scan_image_dockle" in tools  # dockle — still in catalog
 
 
 def test_ip_minimal_catalog_anchors_on_nmap_nuclei():

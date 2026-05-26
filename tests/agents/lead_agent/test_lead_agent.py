@@ -132,15 +132,22 @@ def test_lead_agent_carries_tool_catalog_allowlist(base_config) -> None:
     allowlist = ctx.get("tool_catalog_allowlist")
     assert isinstance(allowlist, list)
     assert "create_agent" not in allowlist  # architectural commitment
-    # iter-37.2 — minimal catalog is OSS-anchored. Assertions reference
-    # OSS-wrapper tools instead of in-house duplicates.
+    # iter-37.2 — minimal catalog is OSS-anchored.
     # iter-37.8 — minimal CORE drops redundant tools (hypothesis x5,
-    # notes x5, introspection). Assertions reference the survivor set.
-    assert "scan_nuclei_templates" in allowlist  # OSS-anchored generic detection
-    assert "crawl_with_katana" in allowlist  # OSS-anchored recon
-    assert "workflow_status" in allowlist  # core — workflow
-    assert "create_vulnerability_report" in allowlist  # core — emit findings
-    assert "think" in allowlist  # core — LLM scratchpad
+    # notes x5, introspection).
+    # iter-37.10 — core trimmed to 5 (workflow_status, list_pending_
+    # findings, think, create_vulnerability_report, finish_scan).
+    # iter-37.11 — per-asset trimmed to ACT-only; recon (katana) +
+    # broad-orient (nuclei) dropped because the prepass fires them.
+    # Assertions now reference the survivor set: the 5-tool core +
+    # web's ACT-only specialists.
+    assert "workflow_status" in allowlist        # core — observe
+    assert "list_pending_findings" in allowlist  # core — observe L1 queue
+    assert "create_vulnerability_report" in allowlist  # core — emit
+    assert "think" in allowlist                  # core — scratchpad
+    assert "finish_scan" in allowlist            # core — terminate
+    assert "scan_sqli_sqlmap" in allowlist       # web — deep SQLi (sqlmap)
+    assert "scan_idor" in allowlist              # web — session-aware authz
 
 
 def test_lead_agent_carries_tool_catalog_blocklist(base_config) -> None:
