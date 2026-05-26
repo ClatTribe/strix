@@ -595,88 +595,21 @@ async def _run_one_tool(
         )
 
 
-def _katana_crawl(target_url: str, *, max_endpoints: int = 50,
-                  depth: int = 3, timeout_s: int = 60) -> list[dict[str, Any]]:
-    """Host-runnable web crawl via katana. Returns a list of endpoint
-    dicts in the same shape as openapi_spec_ingest emits.
-
-    Used by phase-2 when the target is a web_application + no
-    OpenAPI spec was discovered. Without this, vibe-app / juiceshop
-    style HTML targets have no per-endpoint surface for the scan_*
-    specialists to iterate.
-
-    Best-effort: any failure (katana not on PATH, target unreachable,
-    timeout, parse error) returns empty list. The phase-2 caller
-    treats empty as "no endpoint scanning to do."
-
-    Configuration:
-      * `-jc` + `-jsl` — JavaScript crawling + jsluice JS-AST parsing
-        to extract REST/API endpoints from bundled SPAs (Angular /
-        React / Vue). Without these, juiceshop returns ~6 static
-        asset URLs and nothing else.
-      * `-kf all` — known-file probing (robots.txt, sitemap.xml).
-        Catches deprecated-interface-style endpoints that the SPA
-        doesn't link from its main bundle.
-      * `-d 3` — crawl depth. Default 3 balances spec-rich SPAs
-        against runaway crawls.
-      * Common endpoint-discovery wordlist patterns excluded via
-        the binary-asset filter (don't probe .js / .css / image
-        files as endpoints).
-    """
-    import shutil as _shutil
-    import subprocess as _subprocess
-    if not _shutil.which("katana"):
-        return []
-    cmd = [
-        "katana", "-u", target_url,
-        "-d", str(depth),
-        "-silent", "-nc",
-        "-jc", "-jsl",          # JS crawl + jsluice AST parsing
-        "-kf", "all",           # known files (robots, sitemap)
-        "-rl", "50",            # 50 req/s rate-limit
-        "-c", "10",             # 10 concurrency
-        "-timeout", "10",
-        # Exclude binary assets from results — they're not endpoints.
-        "-ef", "css,js,png,jpg,jpeg,gif,svg,woff,woff2,ttf,ico,map",
-    ]
-    try:
-        r = _subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout_s,
-        )
-    except (_subprocess.TimeoutExpired, OSError):
-        return []
-    urls: list[str] = []
-    for line in (r.stdout or "").splitlines():
-        line = line.strip()
-        if line and line.startswith("http"):
-            urls.append(line)
-            if len(urls) >= max_endpoints:
-                break
-    # Deduplicate URL paths so we don't re-scan ?foo=1 vs ?foo=2.
-    seen_paths: set[str] = set()
-    endpoints: list[dict[str, Any]] = []
-    for u in urls:
-        try:
-            from urllib.parse import urlparse
-            p = urlparse(u)
-            key = f"{p.scheme}://{p.netloc}{p.path}"
-        except Exception:  # noqa: BLE001
-            key = u
-        if key in seen_paths:
-            continue
-        seen_paths.add(key)
-        endpoints.append({
-            "url": u,
-            "path": (
-                u.split("//", 1)[-1].split("/", 1)[-1]
-                if "/" in u.split("//", 1)[-1]
-                else "/"
-            ),
-            "method": "GET",
-            "params": [],
-            "source": "katana_crawl",
-        })
-    return endpoints
+# iter-35.1 — host-side katana crawl helper REMOVED.
+#
+# It was a host subprocess shell-out to the katana binary on the host
+# PATH that bypassed the sandbox boundary (host PATH dependency,
+# inconsistent network policy) and iter-32.1's
+# `record_endpoint_discovered` hook (visibility gap — the bench
+# reported `endpoints_discovered_total=0` even when katana found
+# endpoints).
+#
+# Callers now route through the registered `crawl_with_katana` tool
+# via the executor's HTTP dispatcher → sandbox tool-server →
+# in-container katana binary. The registered tool already calls
+# `record_endpoint_discovered` per iter-32.1 + emits to KG.
+#
+# See CLAUDE.md §3 for the host-vs-sandbox boundary specification.
 
 
 # ---------------------------------------------------------------------------
@@ -3330,21 +3263,35 @@ async def _run_dependent_api_tools(
     # the sandbox is available (always in production, errors cleanly
     # in the bench harness without a sandbox).
     if (not endpoints) and target_type == "web_application" and target_value:
-        crawled = _katana_crawl(target_value, max_endpoints=30, depth=2)
-        if crawled:
-            endpoints = crawled
-            # Record a synthetic tool result so the breakdown shows
-            # the katana crawl happened.
-            summary.tools_run.append("katana_crawl")
-            summary.tools_succeeded.append("katana_crawl")
-            summary.tool_results.append(ToolResult(
-                tool_name="katana_crawl",
-                status="ok",
-                findings_count=len(crawled),
-                error_reason=None,
-                wall_time_s=0.0,
-                raw_result={"endpoints": crawled},
-            ))
+        # iter-35.1 — route through the registered `crawl_with_katana`
+        # tool (sandbox_execution=True) instead of the deleted host-
+        # side `_katana_crawl` helper. The registered tool:
+        #   * runs in sandbox container (consistent network policy,
+        #     no host PATH dependency)
+        #   * already calls workflow_state.record_endpoint_discovered
+        #     (iter-32.1 wiring) so iter-31.9 surface_breadth metric
+        #     lights up on the next bench
+        #   * emits to KG via the standard tool pipeline
+        crawled_tr = await _run_one_tool(
+            "crawl_with_katana",
+            {"target_url": target_value, "max_pages": 30, "depth": 2},
+            agent_state=agent_state, timeout_s=timeout_s,
+        )
+        if crawled_tr.status in ("ok", "partial") and isinstance(
+            crawled_tr.raw_result, dict,
+        ):
+            crawled = crawled_tr.raw_result.get("endpoints") or []
+            if crawled:
+                endpoints = crawled
+                summary.tools_run.append("crawl_with_katana")
+                summary.tools_succeeded.append("crawl_with_katana")
+                summary.tool_results.append(crawled_tr)
+        else:
+            # Tool failed — record the result so the bench shows it
+            # was attempted. No endpoints captured.
+            summary.tools_run.append("crawl_with_katana")
+            summary.tools_failed.append("crawl_with_katana")
+            summary.tool_results.append(crawled_tr)
 
     # iter-18: webapp_recon_pipeline runs unconditionally for
     # web_application targets — its playwright-driven crawl catches
