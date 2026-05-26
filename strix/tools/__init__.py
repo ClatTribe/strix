@@ -114,6 +114,7 @@ from .osint_aggregator import *        # noqa: F403
 from .katana_runner import *           # noqa: F403  # crawl_with_katana
 from .testssl_runner import *          # noqa: F403  # tls_audit_testssl
 from .dalfox_runner import *           # noqa: F403  # scan_xss_dalfox
+from .anchor_probes import *           # noqa: F403  # iter-35.2 — sandbox wrappers for the 11 anchor-prepass probes
 from .hibp_runner import *             # noqa: F403  # scan_credential_leaks_hibp
 # iter-23.1 — recon bedrock: passive subdomain harvest (subfinder),
 # concurrent HTTP probing (httpx), service/version fingerprinting (nmap).

@@ -1699,6 +1699,8 @@ async def _run_dependent_ip_tools(
     summary: PrepassSummary,
     *,
     target_value: str,
+    agent_state: Any = None,
+    timeout_s: int = 60,
 ) -> None:
     """Phase-2 dispatcher for ip_address targets.
 
@@ -1709,13 +1711,23 @@ async def _run_dependent_ip_tools(
          (Redis INFO, HTTP autoindex+banner, FTP anon)
 
     Mutates `summary` in place. Never raises.
+
+    iter-35.2 — every probe dispatches through `_run_one_tool` so the
+    raw socket / urllib / ftplib calls fire inside the sandbox
+    container's network namespace, not on the host. The host-side
+    function bodies still live in this module; the sandbox tool_server
+    lazy-imports them via the wrappers in `strix.tools.anchor_probes`.
     """
     # Step 1: port discovery.
-    open_ports: list[int] = []
-    try:
-        open_ports = probe_open_tcp_ports(target_value)
-    except Exception:  # noqa: BLE001
-        pass
+    port_result = await _run_one_tool(
+        "probe_open_tcp_ports",
+        {"target_value": target_value},
+        agent_state=agent_state, timeout_s=timeout_s,
+    )
+    raw = port_result.raw_result if isinstance(port_result.raw_result, dict) else {}
+    open_ports: list[int] = list(raw.get("open_ports") or [])
+    # Preserve the original tool_results.append shape (with the
+    # human-readable error_reason summarising the open ports).
     summary.tools_run.append("probe_open_tcp_ports")
     summary.tools_succeeded.append("probe_open_tcp_ports")
     summary.tool_results.append(ToolResult(
@@ -1726,65 +1738,59 @@ async def _run_dependent_ip_tools(
             f"open ports: {','.join(str(p) for p in open_ports)}"
             if open_ports else "no open ports in common set"
         ),
-        wall_time_s=0.0,
+        wall_time_s=port_result.wall_time_s,
         raw_result={"open_ports": open_ports, "findings": []},
     ))
     if not open_ports:
         return
 
-    # Step 2: per-port probes. Each entry is (predicate, label, callable).
-    # Predicate decides whether the probe runs for a given port; the
-    # callable returns list[dict] findings.
-    _emissions: list[tuple[str, list[dict[str, Any]]]] = []
+    # Step 2: per-port probes. Each is dispatched via _run_one_tool
+    # so the socket / urllib / ftplib I/O fires in the sandbox.
+    async def _dispatch_and_record(
+        tool_name: str, kwargs: dict[str, Any], record_as: str | None = None,
+    ) -> None:
+        result = await _run_one_tool(
+            tool_name, kwargs,
+            agent_state=agent_state, timeout_s=timeout_s,
+        )
+        label = record_as or tool_name
+        summary.tools_run.append(label)
+        if result.status == "ok":
+            summary.tools_succeeded.append(label)
+        summary.tool_results.append(ToolResult(
+            tool_name=label,
+            status=result.status,
+            findings_count=result.findings_count,
+            error_reason=result.error_reason,
+            wall_time_s=result.wall_time_s,
+            raw_result=result.raw_result,
+        ))
+        summary.total_findings += result.findings_count
 
-    # 2a — Redis (port 6379 typical; also probe other ports if open
-    # and Redis returns a banner — rare; skip the cross-port heuristic
-    # to keep latency low).
+    # 2a — Redis (port 6379 typical).
     if 6379 in open_ports:
-        try:
-            _emissions.append((
-                "probe_redis_no_auth",
-                probe_redis_no_auth(target_value, port=6379),
-            ))
-        except Exception:  # noqa: BLE001
-            pass
+        await _dispatch_and_record(
+            "probe_redis_no_auth",
+            {"target_value": target_value, "port": 6379},
+        )
 
     # 2b — HTTP ports. Try both http and https schemes.
     for port in open_ports:
         if port not in _IP_HTTP_PORTS:
             continue
         scheme = "https" if port in {443, 8443} else "http"
-        try:
-            _emissions.append((
-                f"probe_http_port[{port}]",
-                probe_http_port(target_value, port, scheme=scheme),
-            ))
-        except Exception:  # noqa: BLE001
-            pass
+        await _dispatch_and_record(
+            "probe_http_port",
+            {"host": target_value, "port": port, "scheme": scheme},
+            record_as=f"probe_http_port[{port}]",
+        )
 
     # 2c — FTP (port 21).
     if 21 in open_ports:
-        try:
-            _emissions.append((
-                "probe_ftp_anonymous",
-                probe_ftp_anonymous(target_value, port=21),
-            ))
-        except Exception:  # noqa: BLE001
-            pass
-
-    # Record emissions as tool results.
-    for probe_name, findings in _emissions:
-        summary.tools_run.append(probe_name)
-        summary.tools_succeeded.append(probe_name)
-        summary.tool_results.append(ToolResult(
-            tool_name=probe_name,
-            status="ok",
-            findings_count=len(findings),
-            error_reason=None,
-            wall_time_s=0.0,
-            raw_result={"findings": findings, "status": "ok"},
-        ))
-        summary.total_findings += len(findings)
+        await _dispatch_and_record(
+            "probe_ftp_anonymous",
+            {"target_value": target_value, "port": 21},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -3369,50 +3375,59 @@ async def _run_dependent_api_tools(
     # empty endpoints. These probes don't need the endpoint list at
     # all (only target_value), so they should fire even when openapi
     # + katana found nothing.
-    # All probes are best-effort: any internal failure → empty list.
-    _probe_emissions: list[tuple[str, list[dict[str, Any]]]] = []
+    #
+    # iter-35.2 — every probe now dispatches via `_run_one_tool` so
+    # the underlying urllib / socket / ftplib I/O fires inside the
+    # sandbox container, not on the host process. This restores the
+    # invariant documented in CLAUDE.md §3 ("Only use sandbox-based
+    # tools for any target analysis") and unlocks reachability for
+    # targets that resolve only inside the sandbox network.
+    #
+    # All probes are best-effort: any dispatch failure → record an
+    # error ToolResult and continue.
+    async def _dispatch_probe(
+        tool_name: str, kwargs: dict[str, Any],
+    ) -> None:
+        result = await _run_one_tool(
+            tool_name, kwargs,
+            agent_state=agent_state, timeout_s=timeout_s,
+        )
+        summary.tools_run.append(tool_name)
+        if result.status == "ok":
+            summary.tools_succeeded.append(tool_name)
+        summary.tool_results.append(result)
+        summary.total_findings += result.findings_count
+
     if target_value:
         # Item D: heuristic debug-path enumerator. Passes the
         # endpoints list so the probe ALSO tests openapi-discovered
         # sub-paths that match debug-like keywords (e.g. vampi's
         # /users/v1/_debug which the static base-URL list misses).
-        try:
-            _probe_emissions.append(
-                ("probe_unauth_debug_paths",
-                 probe_unauth_debug_paths(
-                     target_url=target_value,
-                     endpoints=endpoints if isinstance(endpoints, list) else None,
-                 ))
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        await _dispatch_probe(
+            "probe_unauth_debug_paths",
+            {
+                "target_url": target_value,
+                "endpoints": endpoints if isinstance(endpoints, list) else None,
+            },
+        )
         # Item E: open-redirect probe (no endpoints needed at minimum,
         # endpoints enrich it)
-        try:
-            _probe_emissions.append(
-                ("probe_open_redirect",
-                 probe_open_redirect(
-                     target_url=target_value,
-                     endpoints=endpoints if isinstance(endpoints, list) else None,
-                 ))
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        await _dispatch_probe(
+            "probe_open_redirect",
+            {
+                "target_url": target_value,
+                "endpoints": endpoints if isinstance(endpoints, list) else None,
+            },
+        )
         # Item G: directory-listing probe (no endpoints needed)
-        try:
-            _probe_emissions.append(
-                ("probe_directory_listing",
-                 probe_directory_listing(target_url=target_value))
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        await _dispatch_probe(
+            "probe_directory_listing",
+            {"target_url": target_value},
+        )
         # iter-15: HTTP-port banner probe — catches Server-header
         # version disclosure + X-Powered-By + autoindex on common
-        # upload paths. Originally added to the ip_address phase-2;
-        # extending to web/api phase-2 here so apache-version-
-        # disclosure and similar web-target signals are caught.
-        # Parse host+port out of target_value to fit probe_http_port's
-        # ip+port signature.
+        # upload paths. Parse host+port out of target_value to fit
+        # probe_http_port's ip+port signature.
         try:
             from urllib.parse import urlparse
             parsed = urlparse(target_value)
@@ -3421,72 +3436,39 @@ async def _run_dependent_api_tools(
             if port is None:
                 port = 443 if parsed.scheme == "https" else 80
             scheme = parsed.scheme or "http"
-            if host:
-                _probe_emissions.append(
-                    ("probe_http_port",
-                     probe_http_port(host, port, scheme=scheme))
-                )
         except Exception:  # noqa: BLE001
-            pass
+            host = None
+            port = 80
+            scheme = "http"
+        if host:
+            await _dispatch_probe(
+                "probe_http_port",
+                {"host": host, "port": port, "scheme": scheme},
+            )
         # Item I: openapi-spec-exposure probe (needs spec_url from
         # openapi_spec_ingest)
         spec_url = None
         if isinstance(openapi_result, dict):
             spec_url = openapi_result.get("spec_url")
-        try:
-            _probe_emissions.append(
-                ("probe_openapi_spec_exposed",
-                 probe_openapi_spec_exposed(
-                     target_url=target_value, spec_url=spec_url,
-                 ))
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        await _dispatch_probe(
+            "probe_openapi_spec_exposed",
+            {"target_url": target_value, "spec_url": spec_url},
+        )
 
     # Endpoint-dependent probes — only fire if we have an endpoint list
     if isinstance(endpoints, list) and endpoints:
         # Item B: forge-JWT alg=none probe
-        try:
-            _probe_emissions.append(
-                ("probe_jwt_none_alg",
-                 probe_jwt_none_alg(endpoints=endpoints))
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        await _dispatch_probe(
+            "probe_jwt_none_alg", {"endpoints": endpoints},
+        )
         # Item C: mass-assignment privilege-field probe
-        try:
-            _probe_emissions.append(
-                ("probe_mass_assignment_priv_fields",
-                 probe_mass_assignment_priv_fields(endpoints=endpoints))
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        await _dispatch_probe(
+            "probe_mass_assignment_priv_fields", {"endpoints": endpoints},
+        )
         # Item F: unauth BOLA path-param probe
-        try:
-            _probe_emissions.append(
-                ("probe_unauth_bola_path_params",
-                 probe_unauth_bola_path_params(endpoints=endpoints))
-            )
-        except Exception:  # noqa: BLE001
-            pass
-
-    # Record probe emissions as tool results
-    for probe_name, findings in _probe_emissions:
-        summary.tools_run.append(probe_name)
-        if findings:
-            summary.tools_succeeded.append(probe_name)
-        else:
-            # Treat zero-finding probes as "ok" too — they ran cleanly.
-            summary.tools_succeeded.append(probe_name)
-        summary.tool_results.append(ToolResult(
-            tool_name=probe_name,
-            status="ok",
-            findings_count=len(findings),
-            error_reason=None,
-            wall_time_s=0.0,
-            raw_result={"findings": findings, "status": "ok"},
-        ))
-        summary.total_findings += len(findings)
+        await _dispatch_probe(
+            "probe_unauth_bola_path_params", {"endpoints": endpoints},
+        )
 
     # Iter-17.6 — auth-flow MUST still run even when endpoints is
     # empty/None. crapi 1.1.6-rc8 serves its openapi spec behind a
@@ -3882,8 +3864,12 @@ async def run_oss_anchor_prepass(
     # tools require a URL), so this is the entire L1 surface for
     # network targets.
     if target_type == "ip_address" and target_value:
+        # iter-35.2 — pass agent_state + timeout_s so the per-port
+        # probes dispatch through the sandbox tool_server instead of
+        # firing raw sockets from the host.
         await _run_dependent_ip_tools(
             summary, target_value=target_value,
+            agent_state=agent_state, timeout_s=timeout_s,
         )
 
     # iter-30 — phase 2.5: shape-aware dispatcher. Consumes katana's

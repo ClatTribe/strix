@@ -275,6 +275,24 @@ _FRAMEWORK_ONLY_TOOLS = frozenset({
     # ─── Mobile asset support dropped in iter-21.5 ───────────────────
     "scan_mobile_app",
 
+    # ─── iter-35.2 — anchor-prepass probes routed through sandbox ────
+    # Registered with sandbox_execution=True so the prepass orchestrator
+    # can dispatch them via the sandbox tool_server (host-side urllib /
+    # socket / ftplib calls were a CLAUDE.md §3.6 violation). They're
+    # framework-only — invoked by the deterministic prepass, never by
+    # the LLM Lead.
+    "probe_openapi_spec_exposed",
+    "probe_jwt_none_alg",
+    "probe_mass_assignment_priv_fields",
+    "probe_unauth_debug_paths",
+    "probe_open_redirect",
+    "probe_unauth_bola_path_params",
+    "probe_directory_listing",
+    "probe_open_tcp_ports",
+    "probe_redis_no_auth",
+    "probe_http_port",
+    "probe_ftp_anonymous",
+
     # ─── Renamed/aliased duplicates (registered under both old + new
     #     name during a refactor). The canonical name is in the
     #     catalog; the alias stays registered for back-compat.

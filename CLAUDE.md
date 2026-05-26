@@ -121,26 +121,27 @@ Sandbox container:
 **These bypass the `execute_tool` adapter and run on the HOST.** They're
 the source of the "iter-32.1 hooks don't fire" diagnostic gaps.
 
-| Helper | Line | What it does | Why host-side (today) |
-|---|---|---|---|
-| `_katana_crawl` | 597 | shells `katana` on host PATH | Speed: avoids sandbox HTTP RTT in prepass |
-| `_http_get` | 699 | `urllib.request.urlopen` from host | Speed |
-| `_http_request` | 713 | `urllib.request.urlopen` from host | Speed |
-| `probe_openapi_spec_exposed` | 727 | host HTTP via _http_get | Speed |
-| `probe_jwt_none_alg` | 767 | host HTTP | Speed |
-| `probe_mass_assignment_priv_fields` | 844 | host HTTP | Speed |
-| `probe_unauth_debug_paths` | 946 | host HTTP | Speed |
-| `probe_open_redirect` | 1060 | host HTTP | Speed |
-| `probe_unauth_bola_path_params` | 1151 | host HTTP | Speed |
-| `probe_directory_listing` | 1246 | host HTTP | Speed |
-| `probe_open_tcp_ports` | 1514 | host socket | Speed |
-| `probe_redis_no_auth` | 1539 | host socket | Speed |
-| `probe_http_port` | 1585 | host urllib | Speed |
-| `probe_ftp_anonymous` | 1701 | host ftplib | Speed |
+| Helper | Status | Notes |
+|---|---|---|
+| `_katana_crawl` | ✓ migrated (iter-35.1, #481) | Replaced by `crawl_with_katana` sandbox tool. |
+| `probe_openapi_spec_exposed` | ✓ sandbox-routed (iter-35.2) | Wrapper in `strix/tools/anchor_probes/`. Host function body kept; the orchestrator dispatches via `_run_one_tool` so urllib I/O fires in sandbox. |
+| `probe_jwt_none_alg` | ✓ sandbox-routed (iter-35.2) | Same pattern. |
+| `probe_mass_assignment_priv_fields` | ✓ sandbox-routed (iter-35.2) | Same pattern. |
+| `probe_unauth_debug_paths` | ✓ sandbox-routed (iter-35.2) | Same pattern. |
+| `probe_open_redirect` | ✓ sandbox-routed (iter-35.2) | Same pattern. |
+| `probe_unauth_bola_path_params` | ✓ sandbox-routed (iter-35.2) | Same pattern. |
+| `probe_directory_listing` | ✓ sandbox-routed (iter-35.2) | Same pattern. |
+| `probe_open_tcp_ports` | ✓ sandbox-routed (iter-35.2) | Socket sweep now in sandbox netns. |
+| `probe_redis_no_auth` | ✓ sandbox-routed (iter-35.2) | Same pattern. |
+| `probe_http_port` | ✓ sandbox-routed (iter-35.2) | Same pattern. |
+| `probe_ftp_anonymous` | ✓ sandbox-routed (iter-35.2) | ftplib I/O now in sandbox. |
+| `_http_get`, `_http_request` | host-only (private) | Internal helpers for the probe function bodies (which themselves run in sandbox via the wrappers). Not call-sites — pure utilities inside the probe implementations. |
 
-**These should all be migrated to route through sandbox** (iter-35
-candidate). Rationale: sandboxed network policy enforcement, internal-only
-target reachability, telemetry consistency, iter-32.1 visibility hooks.
+**Remaining host-side exceptions** (iter-37+ candidate):
+* `scan_idor` (`sandbox_execution=False`) — uses host's proxy_manager for session capture.
+* `scan_auth_flow` (`sandbox_execution=False`) — same reason.
+
+Both are documented in the catalog as the two specialist tools that still run on host for proxy-manager session-state reasons. Moving these requires migrating proxy_manager into the sandbox tool_server.
 
 ---
 
