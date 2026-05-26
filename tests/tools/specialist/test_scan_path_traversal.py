@@ -370,7 +370,9 @@ def test_scan_path_traversal_registered_in_specialist_registry() -> None:
     assert desc.category == "path-traversal-specialist"
 
 
-def test_scan_path_traversal_in_lead_web_application_catalog() -> None:
+def test_scan_path_traversal_in_lead_web_application_catalog(monkeypatch) -> None:
+    """iter-37.2 — deprecated tool; visible only under STRIX_LEGACY_CATALOG=1."""
+    monkeypatch.setenv("STRIX_LEGACY_CATALOG", "1")
     from strix.agents.lead_agent.tool_catalog import get_lead_tool_catalog
 
     catalog = get_lead_tool_catalog(target_types=["web_application"])

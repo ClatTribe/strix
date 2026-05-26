@@ -304,7 +304,9 @@ def test_scan_subdomain_takeover_active_registered() -> None:
     assert desc.category == "subdomain-takeover-specialist"
 
 
-def test_scan_subdomain_takeover_active_in_lead_domain_catalog() -> None:
+def test_scan_subdomain_takeover_active_in_lead_domain_catalog(monkeypatch) -> None:
+    """iter-37.2 — deprecated tool; visible only under STRIX_LEGACY_CATALOG=1."""
+    monkeypatch.setenv("STRIX_LEGACY_CATALOG", "1")
     from strix.agents.lead_agent.tool_catalog import get_lead_tool_catalog
 
     catalog = get_lead_tool_catalog(target_types=["domain"])

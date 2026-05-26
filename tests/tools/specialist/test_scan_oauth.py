@@ -327,7 +327,9 @@ def test_scan_oauth_registered() -> None:
     assert desc.category == "oauth-specialist"
 
 
-def test_scan_oauth_in_lead_web_application_catalog() -> None:
+def test_scan_oauth_in_lead_web_application_catalog(monkeypatch) -> None:
+    """iter-37.2 — deprecated tool; visible only under STRIX_LEGACY_CATALOG=1."""
+    monkeypatch.setenv("STRIX_LEGACY_CATALOG", "1")
     from strix.agents.lead_agent.tool_catalog import get_lead_tool_catalog
 
     catalog = get_lead_tool_catalog(target_types=["web_application"])
