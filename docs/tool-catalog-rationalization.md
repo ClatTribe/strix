@@ -1,7 +1,10 @@
 # Tool catalog rationalization — strix becomes an OSS orchestrator
 
-**Status:** proposal (iter-37.1). Audit + migration plan.
-**Last updated:** 2026-05-27.
+**Status:** shipped (iter-37.2 → iter-37.11). Re-bench validation in iter-37.12 (in flight).
+**Originally audited:** 2026-05-27 (iter-37.1).
+**Last updated:** 2026-05-27 (iter-37.13 — synced to shipped reality).
+
+> **Reading guide.** Sections 1-4 ("Why" → "In-house scanners — migration verdicts") are the original audit; they remain accurate as a record of the analysis that motivated the cut. Section 5 ("Final per-asset-type catalog") has been **rewritten to reflect what actually shipped** — the live numbers and the harness vs LLM split that emerged during execution. Section 6 ("Migration plan") is now a shipped-status table.
 
 ## Why
 
@@ -156,88 +159,134 @@ A few categories have OSS but strix hasn't wrapped them yet:
 
 **6 new wrappers** to fill the gaps. Each is ~150 LOC following the existing `*_runner` pattern.
 
-## Final per-asset-type catalog
+## Final per-asset-type catalog — **as shipped** (post iter-37.11)
 
-After the migration:
+The execution went deeper than the original audit projected. Two architectural shifts that didn't appear in the iter-37.1 draft:
 
-### `web_application` — **8 tools** (vs 99 today)
+1. **Two-track tool sets.** Tools split between (a) the deterministic OSS prepass that the harness fires before the LLM wakes up (`anchor_prepass.py:_ANCHORS_BY_TARGET_TYPE`), and (b) the LLM catalog. **Tools the harness already runs are removed from the LLM catalog** — duplicating them just burns decision-paralysis tokens.
 
-| # | tool | engine |
-|---|---|---|
-| 1 | `crawl_with_katana` | katana (recon) |
-| 2 | `scan_nuclei_templates` | nuclei (all detection) |
-| 3 | `scan_sqli_sqlmap` | sqlmap (deep SQLi exploit) |
-| 4 | `scan_xss_dalfox` | dalfox (deep XSS exploit) |
-| 5 | `seed_auth` + `scan_auth_flow` | LLM-orchestrated auth |
-| 6 | `idor_authz_check` | LLM-orchestrated session-aware authz |
-| 7 | `tls_audit` | testssl.sh |
-| 8 | `note` + `workflow_status` + `create_vulnerability_report` + `finish_scan` | framework |
+2. **Core vs per-asset.** The 5-tool minimal CORE (`_MINIMAL_CORE_TOOLS`, iter-37.10) — one per OODA phase + terminate — is shared by every asset. The per-asset set is **ACT-only specialists** on top of that core. The audit's flat 8/9/5/6/4 counts conflated these.
 
-### `api` — **9 tools**
+### Minimal CORE — 5 tools, every asset (iter-37.10)
 
-| # | tool | engine |
-|---|---|---|
-| 1 | `openapi_spec_ingest` | spec parser (in-house — replaces HTML crawl on JSON APIs) |
-| 2 | `scan_api_schemathesis` (NEW) | schemathesis (OpenAPI fuzzer) |
-| 3 | `scan_nuclei_templates` | nuclei (API CVE templates) |
-| 4 | `scan_sqli_sqlmap` | sqlmap |
-| 5 | `map_graphql_inql` | InQL (when GraphQL detected) |
-| 6 | `seed_auth` + `scan_auth_flow` | LLM-orchestrated |
-| 7 | `idor_authz_check` | session-aware BOLA/BFLA |
-| 8 | `tls_audit` | testssl.sh |
-| 9 | framework tools | same |
+| # | tool | role | OODA phase |
+|---|---|---|---|
+| 1 | `workflow_status` | "where am I in the scan?" | OBSERVE |
+| 2 | `list_pending_findings` | "what did L1 surface?" — L1.5-ranked queue | OBSERVE |
+| 3 | `think` | reasoning scratchpad (subsumes 5 note tools + 5 hypothesis tools) | ORIENT |
+| 4 | `create_vulnerability_report` | emit a finding (upsert via `existing_report_id=`) | ACT |
+| 5 | `finish_scan` | terminate; auto-fires `emit_compliance_evidence` + `generate_remediation_plan` | TERMINATE |
 
-### `repository` / `local_code` — **5 tools**
+The other 27 tools that used to be in `_CORE_TOOLS` either fold into these or auto-fire via L1.5 hooks (`mid_scan_correlate`, `tracer.threat_intel.enrich`) — see CLAUDE.md §5 for the hook chain.
+
+### `web_application` — **10 tools** (vs 99 legacy, −90%)
+
+**Harness-fired prepass** (`_ANCHORS_WEB` — runs in sandbox before LLM gets control):
+`fingerprint_tech_stack`, `openapi_spec_ingest`, `crawl_with_katana`, `sbom_extract`, `discover_graphql_endpoints`, `seed_auth`, `probe_default_creds`, `scan_nuclei_templates`, `scan_api_rate_limit`, `scan_sqli`, `scan_xxe`, `scan_ssrf`, `scan_ssti`, `scan_path_traversal`, `scan_nosql_injection`, `scan_cmd_injection`, `scan_secrets_in_response`, `http_security_headers_audit`, `tls_audit`, `cors_deep_check`, `csrf_check`, `open_redirect_check`, `scan_authn_metadata`, `scan_cloud_imds_passthrough`, `scan_buckets_via_bbot`, `scan_xss`, `dom_xss_static_probe`, `scan_cache_deception`, `scan_websocket_auth`, `scan_prototype_pollution` + `shape_aware_dispatcher` (iter-30 payload-bin fan-out per endpoint).
+
+**LLM catalog** (10 tools total = 5 core + 5 specialist):
 
 | # | tool | engine |
 |---|---|---|
-| 1 | `scan_sast` (NEW wrapper) | **semgrep** (1000+ rules, daily updates via Semgrep Registry) |
-| 2 | `secrets_scan` | gitleaks |
-| 3 | `verify_credentials_trufflehog` | trufflehog (live verify) |
-| 4 | `scan_sca_lockfiles` (NEW wrapper) | **trivy fs** (covers all package managers) |
-| 5 | framework tools | same |
+| C1-C5 | minimal CORE (5) | framework |
+| 6 | `scan_sqli_sqlmap` | sqlmap (deep SQLi when prepass flags candidates) |
+| 7 | `scan_xss_dalfox` | dalfox (deep XSS) |
+| 8 | `scan_idor` | LLM-orchestrated session-aware IDOR/BOLA/BFLA |
+| 9 | `scan_auth_flow` | LLM-orchestrated multi-step auth (subsumes seed_auth) |
+| 10 | `send_request` | generic HTTP fallback for cases prepass/dispatcher missed |
 
-### `ip_address` — **6 tools**
+### `api` — **10 tools**
 
-| # | tool | engine |
-|---|---|---|
-| 1 | `fingerprint_services_nmap` | nmap |
-| 2 | `scan_nuclei_templates` | nuclei (network templates) |
-| 3 | `enumerate_subdomains_subfinder` | subfinder (when domain attached) |
-| 4 | `domain_recon_pipeline` | bbot |
-| 5 | `tls_audit` | testssl.sh |
-| 6 | framework tools | same |
+**Prepass**: same as web minus the web-only DOM probes (`scan_xss`, `dom_xss_static_probe`, `scan_cache_deception`, `scan_websocket_auth`, `scan_prototype_pollution`).
 
-### `container_image` — **4 tools**
+**LLM catalog**: 5 core + `scan_sqli_sqlmap`, `scan_idor`, `scan_auth_flow`, `map_graphql_inql`, `send_request`.
 
-| # | tool | engine |
-|---|---|---|
-| 1 | `scan_container_image` | **trivy** (vuln + secret + misconfig + SBOM in one) |
-| 2 | `scan_dockerfile_hadolint` | hadolint |
-| 3 | `scan_image_dockle` | dockle |
-| 4 | framework tools | same |
+### `repository` / `local_code` — **9 tools**
 
-### `mobile_app` — **3 tools**
+**Prepass** (`_ANCHORS_LOCAL_CODE`): `scan_sca_lockfiles` (trivy fs), `scan_sast` (semgrep), `scan_iac`, `secrets_scan` (gitleaks).
 
-| # | tool | engine |
-|---|---|---|
-| 1 | `scan_mobile_mobsfscan` (NEW) | **mobsfscan** (MobSF static) |
-| 2 | `scan_nuclei_templates` | nuclei (mobile-specific templates if available) |
-| 3 | framework tools | same |
+**LLM catalog**: 5 core + `build_code_map`, `taint_analysis`, `verify_credentials_trufflehog`, `terminal_execute`.
 
-## Migration plan (iter-37 series)
+### `container_image` — **7 tools**
 
-| iter | scope | cost |
-|---|---|---|
-| **iter-37.1** | This document. Stakeholder alignment. | DONE |
-| **iter-37.2** | Per-asset-type catalog filter: `get_lead_tool_catalog` returns the minimal set. In-house duplicates become hidden from the LLM but stay executable for backward-compat. | 1 PR, ~150 LOC, ~30 tests |
-| **iter-37.3** | Mark all 47 DELETE-class tools as `deprecated=True` in the registry. They warn on invocation + log a "use X instead" hint to the LLM. | 1 PR, ~100 LOC + ~50 test updates |
-| **iter-37.4** | Add the 6 NEW OSS wrappers: smuggler.py, SAML Raider, hydra, mobsfscan, ffuf, schemathesis. Each ~150 LOC + sandbox image entry. | 6 PRs (one per wrapper), ~900 LOC total |
-| **iter-37.5** | Delete the 47 DELETE-class tools entirely (after 1 release cycle of deprecation warnings). Their function module files removed. | 1 PR, -~5000 LOC |
-| **iter-37.6** | Re-bench L2 Juice Shop. Expect recall to jump significantly because nuclei alone covers most of what's been being missed. | bench only |
-| **iter-37.7** | Update CLAUDE.md §3.3 to state "strix is an LLM orchestrator over OSS tools; no in-house detection engines." Sandbox audit shows all surviving detection tools are OSS-backed. | 1 PR, docs |
+**Prepass** (`_ANCHORS_CONTAINER`): `scan_container_image` (trivy — vuln + secrets + misconfig + SBOM in one tool).
 
-**Total scope**: ~7 PRs, ~6,000 LOC net delta (most is deletion). Estimated 1-2 weeks of focused work.
+**LLM catalog**: 5 core + `scan_image_dockle`, `terminal_execute`.
+
+### `ip_address` — **11 tools**
+
+**Prepass** (thin): `probe_open_tcp_ports` + per-port banner probes (Redis, FTP-anon, HTTP banner). No nmap/httpx/nuclei in the prepass.
+
+**LLM catalog**: 5 core + `fingerprint_services_nmap`, `probe_hosts_httpx`, `scan_nuclei_templates`, `tls_audit`, `send_request`, `terminal_execute`. **IP keeps its recon tools in catalog because the prepass coverage is thin** — the LLM must drive comprehensive recon itself.
+
+### `domain` — **11 tools**
+
+**Prepass**: none.
+
+**LLM catalog**: 5 core + `domain_recon_pipeline`, `enumerate_subdomains_subfinder`, `scan_nuclei_templates`, `scan_dns_hygiene_checkdmarc`, `scan_typosquats_dnstwist`, `send_request`. **Domain keeps recon tools in catalog because there's no prepass at all.**
+
+### `mobile_app` — **deferred**
+
+Not yet a registered asset type in `_MINIMAL_TOOLS_BY_TARGET_TYPE`. Will land alongside iter-37.4's `scan_mobile_mobsfscan` wrapper.
+
+### Summary table
+
+| asset | prepass tools | LLM-catalog tools | vs 99 legacy |
+|---|---:|---:|---:|
+| `web_application` | ~25 (auto) | **10** | −90% |
+| `api` | ~20 (auto) | **10** | −90% |
+| `repository` / `local_code` | 4 (auto) | **9** | −78% |
+| `ip_address` | ~6 (auto, thin) | **11** | −74% |
+| `container_image` | 1 (auto) | **7** | −81% |
+| `domain` | 0 | **11** | n/a |
+
+### Why the asset-specific differences
+
+The trim went deeper for assets whose prepass is comprehensive (web/api/code/container — 5 ACT-only specialists each on top of core) and stayed conservative where the prepass is thin or absent (ip/domain — recon must remain in catalog because the harness can't be relied on to discover the surface). The OODA frame makes this explicit: **the LLM only needs catalog visibility for OBSERVE steps the harness can't do for it.**
+
+## Migration plan (iter-37 series) — shipped status
+
+| iter | scope | PR | status |
+|---|---|---|---|
+| **37.1** | This document. Stakeholder alignment. | #483 | ✓ shipped |
+| **37.2** | Per-asset-type catalog filter: `get_lead_tool_catalog` returns the minimal set. In-house duplicates hidden from LLM but stay executable. | #484 | ✓ shipped |
+| **37.3** | Mark all ~50 DELETE-class tools as deprecated in `strix/tools/deprecations.py`. Warn-on-call via `emit_deprecation_warning` hook in `executor.py`. | #485 | ✓ shipped |
+| **37.7** | Update CLAUDE.md §11.1 with the "no new in-house detection engines" decision rule + iter-37 status table. | #486 | ✓ shipped |
+| **37.8** | Minimal CORE 32 → 13. Drop 5 note tools, 5 hypothesis tools, KG paths/nodes, introspection tools (`check_budget`, `agent_self_audit`, `drain_amplify_queue`, etc.). | #487 | ✓ shipped |
+| **37.9** | Update 24 specialist tests to set `STRIX_LEGACY_CATALOG=1` so their deprecated-tool catalog assertions keep passing. | #488 | ✓ shipped |
+| **37.10** | Minimal CORE 13 → 5 (one per OODA phase + terminate). Auto-fire `emit_compliance_evidence` + `generate_remediation_plan` inside `finish_scan` (opt-out: `STRIX_FINISH_AUTO_ARTIFACTS=0`). | #489 | ✓ shipped |
+| **37.11** | Per-asset trim to ACT-only. Drop prepass duplicates (`crawl_with_katana`, `scan_nuclei_templates`, `seed_auth`, `tls_audit`, `openapi_spec_ingest`, `scan_sast`, `secrets_scan`, `scan_sca_lockfiles`, `scan_iac`, `scan_container_image`) from the LLM catalog — they fire deterministically in the prepass. | #490 | ✓ shipped |
+| **37.13** | This sync — bring the doc up to date with the shipped reality. | — | ✓ shipped (this PR) |
+| **37.12** | Re-bench L2 Juice Shop with the 99 → 10 catalog trim. Validation gate for iter-37.4. | — | in flight |
+| **37.4** | Add 6 NEW OSS wrappers: smuggler.py, SAML Raider, hydra, mobsfscan, ffuf, schemathesis. | — | gated on 37.12 |
+| **37.5** | DELETE the ~50 deprecated tools entirely (after ≥1 release cycle of deprecation warnings — earliest 2026-06-15). | — | gated on time |
+| **37.6** | (Original re-bench plan — superseded by 37.12, which covers the broader trim.) | — | superseded |
+
+**Actual scope landed**: 9 PRs, ~1,000 LOC net delta (counting only iter-37.x). The 5,000-LOC deletion happens in iter-37.5 after the grace period.
+
+### Things that shipped but the original plan didn't anticipate
+
+The audit had a clean 7-step migration. Execution surfaced four things that weren't in the original draft and warranted their own iters:
+
+1. **iter-37.8** — the original `_CORE_TOOLS` had 32 entries with substantial redundancy (note tools, hypothesis tools, KG queries, introspection). Trimming it from 32 → 13 was a precondition for hitting the audit's per-asset targets. The audit treated core as a small fixed cost; in reality it was the second-largest cut.
+
+2. **iter-37.10** — even 13 tools in core was too many. OODA-loop analysis showed ~60% were redundant with L1.5 hooks (`mid_scan_correlate` auto-fires correlate_findings at phase boundaries; `tracer.threat_intel.enrich` auto-runs at emission; `finish_scan` can auto-fire compliance + remediation as terminal artifacts). Trim went from 13 → 5.
+
+3. **iter-37.11** — ACT-only per-asset trim. The original plan kept `crawl_with_katana` + `scan_nuclei_templates` + `tls_audit` in the web catalog. But the **anchor prepass already fires them deterministically**. Catalog visibility just creates decision paralysis. Dropping them from catalog while keeping them in the prepass was the biggest single-cut reduction (web: 23 → 10 tools).
+
+4. **iter-37.9 + iter-37.13** — test fallout + doc sync. Each catalog reshuffle invalidated a batch of catalog-shape tests. iter-37.9 fixed 24 specialist tests; iter-37.13 (this PR) syncs the audit doc.
+
+### Key insight: the iter sequence revealed a layered enforcement model
+
+The original audit framed the problem as "catalog too big → trim it." The shipped solution is actually **five enforcement layers** working together:
+
+1. **Catalog visibility** (iter-37.2/37.10/37.11) — LLM can't call what it can't see.
+2. **Deprecation warnings** (iter-37.3) — if LLM names a deprecated tool, warn + redirect.
+3. **Prepass guarantee** (`anchor_prepass.py`) — harness fires recon/orient deterministically; LLM's contribution is purely upside.
+4. **Auto-enrichment at emission** (L1.5 hook chain) — every finding auto-enriches with threat-intel, FP filter, surface_priority, exploitability, corroborator, cross-tool merge. LLM doesn't need to call those tools.
+5. **Auto-fire on termination** (iter-37.10) — compliance + remediation artifacts always produced, even if LLM forgets.
+
+That layered model is the actual architecture this iter series produced. The doc's original "trim the catalog" framing under-described it.
 
 ## What this changes about strix
 
@@ -248,15 +297,35 @@ That sentence:
 - Removes the "templates outdated?" objection (`nuclei -ut`, semgrep registry, trivy DB all auto-update)
 - Keeps the unique value (LLM orchestration, chain detection, explanation, patcher)
 - Reduces strix's maintenance burden by ~70% (no detection logic to maintain)
-- Makes the L2 Lead's job tractable (8 tools per target instead of 99)
+- Makes the L2 Lead's job tractable (10 tools per web target instead of 99)
 
-## Decision rule going forward
-
-Add to CLAUDE.md §11 (coding conventions):
+## Decision rule (codified in CLAUDE.md §11.1 — iter-37.7)
 
 > **No new in-house detection engines.** Every new vulnerability category strix needs to detect must be added by:
 > 1. Identifying the leading OSS tool for that category
-> 2. Adding a `*_runner` wrapper following the existing pattern
-> 3. Routing through `scan_nuclei_templates` first if a nuclei template exists for the category
+> 2. Adding a `*_runner` wrapper following the existing pattern in `strix/tools/*_runner/`
+> 3. Routing through `scan_nuclei_templates` (with the appropriate `tags:` filter) first if a nuclei template exists
+> 4. Registering with `@register_tool(sandbox_execution=True)` — OSS tools run in the sandbox container
 >
-> In-house tools are reserved for LLM orchestration logic (chain detection, multi-session authz, business logic), not detection engines.
+> In-house tools are reserved for **LLM orchestration logic** only:
+> - Chain reasoning (`correlate_findings`, `mid_scan_correlate`)
+> - Multi-session authz (`scan_idor` — absorbs BOLA, BFLA, multi-role)
+> - Auth flow orchestration (`scan_auth_flow`, `seed_auth`)
+> - Business-logic detection (`scan_business_logic`)
+> - Generic primitives (`probe_endpoint`, `send_request`, `browser_action`)
+> - Framework / state mgmt (workflow, notes, findings, threat-intel)
+>
+> Adding a new in-house `scan_*` detection scanner is **forbidden** without an explicit architectural ADR explaining why the leading OSS tool doesn't suffice.
+
+This rule is enforced by code review + the iter-37.3 deprecation registry: any newly-introduced in-house detection scanner would need to be added to `_DEPRECATIONS` immediately, which is the signal to reject it at PR review.
+
+## See also
+
+- `CLAUDE.md` §3 — host vs sandbox execution boundary
+- `CLAUDE.md` §5 — L1.5 hook chain order (FP filter → demote → corroborator → post_emit_verifier → cross-tool merge)
+- `CLAUDE.md` §11.1 — codified decision rule
+- `CLAUDE.md` §12 — iter-37 shipped-status table + per-asset specialist sets
+- `strix/agents/lead_agent/tool_catalog.py` — `_MINIMAL_CORE_TOOLS` + `_MINIMAL_TOOLS_BY_TARGET_TYPE` (the live catalog)
+- `strix/agents/lead_agent/anchor_prepass.py` — `_ANCHORS_BY_TARGET_TYPE` (the deterministic prepass)
+- `strix/tools/deprecations.py` — the `_DEPRECATIONS` map (iter-37.3)
+- `strix/tools/finish/finish_actions.py` — `_auto_fire_terminal_artifacts` (iter-37.10)
