@@ -283,6 +283,20 @@ _ANCHORS_API: list[tuple[str, Any]] = [
     #    they CAN'T run from the prepass — they error on missing
     #    endpoints kwarg.
     ("openapi_spec_ingest", _api_target_kwargs),
+    # 2a-bis. iter-35.3 — JS-AST web crawl. Pulls SPA routes from
+    #     Angular/React/Vue bundles + robots.txt + sitemap.xml. This
+    #     is what the L2 Lead in standard mode wasn't reliably
+    #     invoking via the prompt directive (iter-32.2) — moving it
+    #     into the deterministic prepass ensures recon ALWAYS runs,
+    #     not just when the LLM remembers. Runs in sandbox
+    #     (sandbox_execution=True), calls
+    #     `workflow_state.record_endpoint_discovered` per iter-32.1
+    #     so iter-31.9 surface_breadth metric lights up.
+    #
+    #     Returns partial on pure-API targets that don't serve HTML
+    #     (no penalty — the openapi_spec_ingest above is the primary
+    #     API recon).
+    ("crawl_with_katana", _api_target_url_kwargs),
     # 2b. Black-box SBOM extraction (CycloneDX 1.5). Catches CDN-
     #     served NPM packages, backend frameworks from headers, and
     #     fingerprintable third-party JS — useful for `Dependency`
