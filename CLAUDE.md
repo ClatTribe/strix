@@ -309,3 +309,41 @@ Updating this list when I make a mistake:
 - Tests: regression check existing tests before merging (the iter-31 anti-pattern was shipping 4 PRs without re-running prior tests)
 - PRs: squash-merge via `gh pr merge <N> --squash --delete-branch`
 - Always update CLAUDE.md when architecture changes
+
+### 11.1 No new in-house detection engines (iter-37.x policy)
+
+Strix is **an LLM orchestrator over community-maintained OSS security tools**, not a vulnerability-detection company. Per `docs/tool-catalog-rationalization.md`:
+
+**When adding a new vulnerability category to detect:**
+
+1. Identify the leading OSS tool for that category (nuclei templates first, then specialized tools)
+2. Add a `*_runner` wrapper following the existing pattern in `strix/tools/*_runner/`
+3. Route through `scan_nuclei_templates` (with the appropriate `tags:` filter) first if a nuclei template exists
+4. Register with `@register_tool(sandbox_execution=True)` — OSS tools run in the sandbox container
+
+**In-house tools are reserved for LLM-orchestration logic only:**
+
+- Chain reasoning (`correlate_findings`, `mid_scan_correlate`)
+- Multi-session authz (`scan_idor` — absorbs BOLA, BFLA, multi-role)
+- Auth flow orchestration (`scan_auth_flow`, `seed_auth`)
+- Business-logic detection (`scan_business_logic` — LLM-led app-specific reasoning)
+- Generic primitives (`probe_endpoint`, `send_request`, `browser_action`)
+- Framework / state mgmt (workflow, notes, findings, threat-intel)
+
+**Adding a new in-house `scan_*` detection scanner is forbidden without an explicit architectural ADR explaining why the leading OSS tool doesn't suffice.**
+
+## 12. iter-37 — the OSS-orchestrator migration (in flight)
+
+| iter | what | PR | status |
+|---|---|---|---|
+| 37.1 | Audit doc `docs/tool-catalog-rationalization.md` | #483 | ✓ shipped |
+| 37.2 | Per-asset minimal catalog filter (default ON) — web 99 → 42 tools | #484 | ✓ shipped |
+| 37.3 | Deprecation registry (`strix/tools/deprecations.py`) — 50+ tools warn-on-call | #485 | ✓ shipped |
+| 37.4 | Add 6 NEW OSS wrappers: smuggler.py, SAML Raider, hydra, mobsfscan, ffuf, schemathesis | — | pending |
+| 37.5 | DELETE the deprecated tools after grace period | — | pending |
+| 37.6 | Re-bench L2 Juice Shop with minimal catalog active | — | pending |
+| 37.7 | This CLAUDE.md update | — | ✓ shipped |
+
+**Default for the L2 Lead today** (post iter-37.2): minimal OSS-anchored catalog. The agent sees ~42 tools per web target (33 core + 9 specialist), all of them OSS-backed or LLM-orchestration logic. Set `STRIX_LEGACY_CATALOG=1` to restore the pre-iter-37.2 99-tool catalog for backwards-compat.
+
+**Deprecated tools** (50+ as of iter-37.3) STILL EXECUTE when invoked directly (sandbox tool-server / tests / legacy mode). They emit a WARNING log with the OSS replacement hint. See `strix/tools/deprecations.py` for the central registry.
