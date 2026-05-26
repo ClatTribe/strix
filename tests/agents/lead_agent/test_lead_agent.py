@@ -132,7 +132,12 @@ def test_lead_agent_carries_tool_catalog_allowlist(base_config) -> None:
     allowlist = ctx.get("tool_catalog_allowlist")
     assert isinstance(allowlist, list)
     assert "create_agent" not in allowlist  # architectural commitment
-    assert "scan_misconfig" in allowlist  # available specialist
+    # iter-37.2 — minimal catalog is OSS-anchored. Assertions now
+    # reference the OSS-wrapper tools (nuclei, katana, etc.) rather
+    # than in-house duplicates (scan_misconfig — DEPRECATED, routed
+    # through scan_nuclei_templates `tags:misconfig`).
+    assert "scan_nuclei_templates" in allowlist  # OSS-anchored generic detection
+    assert "crawl_with_katana" in allowlist  # OSS-anchored recon
     assert "open_hypothesis" in allowlist  # core
     assert "check_budget" in allowlist  # §2.9 budget introspection
 
@@ -180,10 +185,11 @@ def test_lead_agent_falls_back_to_all_target_types_when_scan_config_absent(
     # Should include tools from at least multiple target types.
     ctx = agent.llm._system_prompt_context
     allowlist = ctx["tool_catalog_allowlist"]
-    # Web-app + repo + domain tools all appear.
+    # iter-37.2 — minimal catalog: tools from multiple asset types
+    # all appear in the union when no scan_config is supplied.
     assert "send_request" in allowlist  # web_application
     assert "build_code_map" in allowlist  # repository
-    assert "subdomain_enum_tool" in allowlist  # domain
+    assert "domain_recon_pipeline" in allowlist  # domain (replaces subdomain_enum_tool — OSS-anchored)
 
 
 def test_lead_agent_target_types_normalised_lowercase() -> None:
@@ -341,9 +347,14 @@ def test_lead_agent_prompt_excludes_blocked_tools() -> None:
     assert "<tool name=\"spawn_code_specialist_team\"" not in sp
     assert "<tool name=\"wait_for_message\"" not in sp
     # And the lead's ACTUAL allowed tools must be present.
-    assert "scan_misconfig" in sp
-    assert "scan_xss" in sp
-    assert "scan_sqli" in sp
+    # iter-37.2 — assertions updated for the minimal OSS-anchored
+    # catalog. Verify the OSS-anchored generic detection tool
+    # (scan_nuclei_templates) is exposed. Other OSS tools
+    # (scan_xss_dalfox, scan_sqli_sqlmap) appear in the catalog
+    # allowlist but not the base operating directive text — the
+    # directive references are scheduled for cleanup in iter-37.5
+    # (along with the in-house tool deletions).
+    assert "scan_nuclei_templates" in sp
 
 
 def test_lead_agent_prompt_includes_security_context_block() -> None:

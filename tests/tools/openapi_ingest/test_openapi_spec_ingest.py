@@ -514,31 +514,38 @@ def test_api_catalog_includes_openapi_ingest() -> None:
 
 def test_api_catalog_excludes_browser_dom_tools() -> None:
     """API targets don't render HTML — DOM / browser / source-map
-    tools waste budget. Verify they're dropped vs web_application."""
+    tools waste budget. Verify they're dropped vs web_application.
+
+    iter-37.2 — under the minimal OSS-anchored catalog, the
+    web_application catalog includes `browser_action` for SPA-only
+    interactions (last-resort primitive), but API catalog does NOT.
+    HTML-context XSS scanner (scan_xss_dalfox) is web-only too.
+    """
     from strix.agents.lead_agent.tool_catalog import get_lead_tool_catalog
     api_tools = get_lead_tool_catalog(target_types=["api"])
     web_tools = get_lead_tool_catalog(target_types=["web_application"])
-    # `bfs_crawl` replaced by openapi_spec_ingest.
-    assert "bfs_crawl" not in api_tools
-    assert "bfs_crawl" in web_tools
-    # HTML-context XSS scanner dropped.
-    assert "scan_xss" not in api_tools
-    assert "scan_xss" in web_tools
-    # DOM-only / source-map tools dropped.
+    # HTML-context XSS scanner (dalfox) — web-only.
+    assert "scan_xss_dalfox" not in api_tools
+    assert "scan_xss_dalfox" in web_tools
+    # Browser/DOM tools — web-only.
     assert "browser_action" not in api_tools
-    assert "extract_dom" not in api_tools
-    assert "dom_xss_static_probe" not in api_tools
-    assert "source_maps" not in api_tools
+    assert "browser_action" in web_tools
 
 
 def test_api_catalog_keeps_core_dast_specialists() -> None:
-    """The DAST cluster (minus HTML-dependent scanners) carries
-    over."""
+    """The minimal API catalog (iter-37.2) keeps the OSS-anchored
+    DAST stack: nuclei (generic), sqlmap (SQLi), InQL (GraphQL),
+    plus LLM-orchestrated authz + auth tools."""
     from strix.agents.lead_agent.tool_catalog import get_lead_tool_catalog
     api_tools = get_lead_tool_catalog(target_types=["api"])
+    # iter-37.2 — minimal OSS-anchored detection stack
     for name in (
-        "scan_sqli", "scan_idor", "scan_oauth", "scan_auth_flow",
-        "scan_business_logic", "scan_ssrf", "scan_nuclei_templates",
-        "jwt_audit", "graphql_specialist_check",
+        "scan_nuclei_templates",  # OSS generic detection
+        "scan_sqli_sqlmap",       # OSS SQLi (replaces in-house scan_sqli)
+        "map_graphql_inql",       # OSS GraphQL introspection
+        "scan_idor",              # LLM-orchestrated authz (BOLA/BFLA merged)
+        "scan_auth_flow",         # LLM-orchestrated auth
+        "openapi_spec_ingest",    # API endpoint inventory
+        "tls_audit",              # OSS TLS audit (testssl.sh)
     ):
         assert name in api_tools, f"{name} missing from api catalog"
