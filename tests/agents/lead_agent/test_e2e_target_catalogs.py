@@ -19,6 +19,16 @@ from strix.agents.lead_agent.tool_catalog import (
 )
 
 
+# iter-37.10: this file documents the LEGACY per-target catalog
+# shape — including iter-26's L1.5 core (drain_amplify_queue,
+# execute_adaptive_probe) which was dropped from minimal core by
+# iter-37.8/37.10. The legacy contract is still the one the test
+# was written against, so opt into legacy mode for the file.
+@pytest.fixture(autouse=True)
+def _enable_legacy_catalog(monkeypatch):
+    monkeypatch.setenv("STRIX_LEGACY_CATALOG", "1")
+
+
 # iter-26 added these to _CORE_TOOLS; every target_type catalog must
 # include them.
 _L15_CORE_TOOLS = {

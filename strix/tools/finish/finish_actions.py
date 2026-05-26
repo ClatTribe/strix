@@ -514,11 +514,74 @@ def finish_scan(
         return response
 
 
+def _auto_fire_terminal_artifacts(response: dict[str, Any]) -> None:
+    """iter-37.10 — auto-trigger compliance + remediation artifacts.
+
+    Both `emit_compliance_evidence` and `generate_remediation_plan`
+    are read-only side-effecting consumers of `vulnerabilities.json`.
+    They're guaranteed terminal-stage work — the LLM has no reason to
+    call them mid-scan, and the LLM has no reason to skip them at
+    scan-end. So they auto-fire here instead of taking up two slots
+    in the minimal catalog.
+
+    Opt-out via `STRIX_FINISH_AUTO_ARTIFACTS=0` for legacy callers
+    that still expect the LLM to drive these explicitly.
+
+    Failures are best-effort — they annotate the response (so the
+    wrapper can see what skipped) but never fail finish_scan itself.
+    """
+    import os
+
+    if os.environ.get(
+        "STRIX_FINISH_AUTO_ARTIFACTS", "1"
+    ).strip().lower() in ("0", "false", "no", "off"):
+        return
+
+    artifacts: dict[str, Any] = {}
+
+    # Compliance evidence (SOC 2, ISO 27001, PCI DSS, OWASP ASVS).
+    try:
+        from strix.compliance.tools import emit_compliance_evidence
+        result = emit_compliance_evidence()
+        # SpecialistResult dataclass — pull the bits a wrapper cares about.
+        artifacts["compliance_evidence"] = {
+            "ok": getattr(result, "ok", None),
+            "metadata": getattr(result, "tool_metadata", None),
+        }
+    except Exception as e:  # noqa: BLE001
+        artifacts["compliance_evidence"] = {
+            "ok": False, "error": f"{type(e).__name__}: {e}",
+        }
+
+    # Remediation plan (developer-audience markdown by default).
+    try:
+        from strix.tools.remediation_plan.generate_remediation_plan import (
+            generate_remediation_plan,
+        )
+        result_dict = generate_remediation_plan()
+        artifacts["remediation_plan"] = {
+            "ok": bool(result_dict.get("success")),
+            "path": result_dict.get("path"),
+            "status": result_dict.get("status"),
+        }
+    except Exception as e:  # noqa: BLE001
+        artifacts["remediation_plan"] = {
+            "ok": False, "error": f"{type(e).__name__}: {e}",
+        }
+
+    response["auto_artifacts"] = artifacts
+
+
 def _annotate_success_response(response: dict[str, Any]) -> None:
     """When finish_scan succeeds, reset the rejection counter and
     (if a loop was auto-bypassed) annotate the response with the
     auto-bypass marker so the wrapper / benchmark pipeline can
-    flag the scan for review."""
+    flag the scan for review.
+
+    iter-37.10: also auto-fires the terminal compliance + remediation
+    artifacts (formerly two LLM-callable tools, now collapsed into
+    finish_scan)."""
+    _auto_fire_terminal_artifacts(response)
     try:
         from strix.agents.rejection_tracker import (
             build_auto_bypass_marker,
