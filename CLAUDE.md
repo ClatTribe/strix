@@ -343,10 +343,11 @@ Strix is **an LLM orchestrator over community-maintained OSS security tools**, n
 | 37.8 | Minimal CORE tools (32 → 13) | #487 | ✓ shipped |
 | 37.9 | Update 24 specialist tests to set STRIX_LEGACY_CATALOG=1 | #488 | ✓ shipped |
 | 37.10 | Minimal CORE 13 → 5; auto-fire compliance + remediation in finish_scan | #489 | ✓ shipped |
-| 37.11 | Per-asset trim to ACT-only (drop prepass dupes — katana, nuclei, openapi_ingest, …) | — | in flight |
-| 37.12 | Bench L2 Juice Shop with iter-37.10 + 37.11 trimmed catalog | — | pending |
-| 37.4 | Add 6 NEW OSS wrappers: smuggler.py, SAML Raider, hydra, mobsfscan, ffuf, schemathesis | — | pending |
-| 37.5 | DELETE the deprecated tools after grace period | — | pending |
+| 37.11 | Per-asset trim to ACT-only (drop prepass dupes — katana, nuclei, openapi_ingest, …) | #490 | ✓ shipped |
+| 37.13 | Sync `docs/tool-catalog-rationalization.md` to shipped reality (10/10/9/11/7 per-asset, layered enforcement model) | — | ✓ shipped (this PR) |
+| 37.12 | Bench L2 Juice Shop with iter-37.10 + 37.11 trimmed catalog | — | in flight |
+| 37.4 | Add 6 NEW OSS wrappers: smuggler.py, SAML Raider, hydra, mobsfscan, ffuf, schemathesis | — | gated on 37.12 |
+| 37.5 | DELETE the deprecated tools after grace period (≥ 2026-06-15) | — | gated on time |
 | 37.6 | Re-bench L2 Juice Shop with minimal catalog active (superseded by 37.12) | — | superseded |
 
 **Default for the L2 Lead today** (post iter-37.11): minimal ACT-only catalog. The agent sees ~10 tools per web target (5 core + 5 specialist), all of them OSS-backed deep-exploit or LLM-orchestration logic. Recon + broad-orient (katana, nuclei, openapi_ingest, semgrep, trivy, …) fire deterministically in `anchor_prepass.py` — the LLM only sees ACT-stage tools. Set `STRIX_LEGACY_CATALOG=1` to restore the pre-iter-37.2 99-tool catalog for backwards-compat.
