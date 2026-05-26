@@ -571,12 +571,90 @@ def is_legacy_catalog_enabled() -> bool:
         per-asset surface.
 
     The wrapper-facing API (`get_lead_tool_catalog`) and the LLM's
-    visible tool set both branch on this.
+    visible tool set both branch on this. Both the CORE set
+    (iter-37.8) and the per-asset specialist set (iter-37.2)
+    are affected.
     """
     import os
     return os.environ.get(
         "STRIX_LEGACY_CATALOG", "",
     ).strip().lower() in ("1", "true", "yes", "on")
+
+
+# ---------------------------------------------------------------------------
+# iter-37.8 — Minimal CORE tools.
+#
+# The legacy _CORE_TOOLS has 32 entries with substantial redundancy:
+#   * 5 note tools (create/list/get/update/delete) — LLM scratchpad
+#     functionality that `think` already provides
+#   * 5 hypothesis tools (open/confirm/dismiss/list + is_surface...)
+#     — planning aids the LLM rarely uses correctly
+#   * 2 KG tools (query_nodes/query_paths) — niche; merge later
+#   * Multiple introspection tools (agent_self_audit, check_budget,
+#     drain_amplify_queue, execute_adaptive_probe) — almost never
+#     improve the LLM's decisions; surface paralysis
+#   * Orchestrator-mode-only tools (dispatch_specialist,
+#     complete_objective) — handled separately by orchestrator mode
+#
+# iter-37.8 keeps ONLY the 12 tools every scan genuinely needs.
+# Like iter-37.2, the removed tools STAY REGISTERED + EXECUTABLE for
+# backwards-compat (sandbox tool-server + tests + legacy mode). They
+# just aren't surfaced to the LLM as choices.
+#
+# Total catalog target after iter-37.8:
+#   web_application: 12 core + 10 specialist = ~22 tools
+#   api:             12 core + 9 specialist  = ~21 tools
+#   repository:      12 core + 8 specialist  = ~20 tools
+#   ip_address:      12 core + 6 specialist  = ~18 tools
+#   container:       12 core + 4 specialist  = ~16 tools
+#
+# Set STRIX_LEGACY_CATALOG=1 to restore the 32-tool _CORE_TOOLS.
+# ---------------------------------------------------------------------------
+
+_MINIMAL_CORE_TOOLS: frozenset[str] = frozenset({
+    # === Workflow control (2) ===
+    # Where am I + how to advance.
+    "workflow_status",
+    "advance_workflow_phase",
+
+    # === HTTP primitive (1) ===
+    # Generic LLM-driven HTTP. Used when nuclei/sqlmap/dalfox don't
+    # cover the case (custom auth headers, multi-step flows, etc.).
+    "probe_endpoint",
+
+    # === Finding emission (3) ===
+    # The lead's primary action: emit findings.
+    "create_vulnerability_report",
+    "update_finding",
+    "list_pending_findings",
+
+    # === Termination (1) ===
+    "finish_scan",
+
+    # === LLM scratchpad (1) ===
+    # No-op tool that gives the LLM a place to record reasoning.
+    # Subsumes the 5 note tools + 5 hypothesis tools for almost all
+    # use cases.
+    "think",
+
+    # === Chain reasoning (1) ===
+    # Cross-category finding chain detection. The L1.5 moat.
+    "correlate_findings",
+
+    # === Threat intel (1) ===
+    # Unified CVE / KEV / EPSS / campaign lookup.
+    "query_threat_intel",
+
+    # === Compliance + remediation output (2) ===
+    "emit_compliance_evidence",
+    "generate_remediation_plan",
+
+    # === Orchestrator-mode dispatch (1) ===
+    # Available always (its no-op outside orchestrator mode is fine).
+    # Removing it from non-orchestrator catalogs would break the
+    # specialist-fan-out path documented in lead_agent.py.
+    "dispatch_specialist",
+})
 
 
 # §1 / PR-#233 — orchestrator mode. When the lead runs in
@@ -682,18 +760,19 @@ def get_lead_tool_catalog(
     if is_orchestrator_mode_enabled():
         return set(_ORCHESTRATOR_ALLOWED_TOOLS) - _BLOCKED_TOOLS
 
-    # iter-37.2 — minimal OSS-anchored catalog (default ON).
-    # Per docs/tool-catalog-rationalization.md, the lead sees ~8 tools
-    # per asset type instead of ~99, all routing to widely-deployed
-    # OSS engines. Set STRIX_LEGACY_CATALOG=1 to opt back into the
-    # pre-iter-37.2 fat catalog.
+    # iter-37.2 — minimal OSS-anchored per-asset catalog (default ON).
+    # iter-37.8 — minimal CORE tools (default ON).
+    # Both gates flip via STRIX_LEGACY_CATALOG=1 for backwards-compat.
+    # Per docs/tool-catalog-rationalization.md target: ~22 tools per
+    # web target (vs 99 legacy).
     use_minimal = not is_legacy_catalog_enabled()
     per_target_table = (
         _MINIMAL_TOOLS_BY_TARGET_TYPE if use_minimal
         else _TOOLS_BY_TARGET_TYPE
     )
+    core_table = _MINIMAL_CORE_TOOLS if use_minimal else _CORE_TOOLS
 
-    allowed: set[str] = set(_CORE_TOOLS)
+    allowed: set[str] = set(core_table)
     for tt in target_types:
         if not isinstance(tt, str):
             continue
