@@ -421,6 +421,164 @@ _BLOCKED_TOOLS: frozenset[str] = frozenset({
 })
 
 
+# ---------------------------------------------------------------------------
+# iter-37.2 — Minimal OSS-anchored catalog (per docs/tool-catalog-
+# rationalization.md). Replaces the 99-tool web catalog with 8 tools,
+# all of them routing to widely-deployed OSS engines (nuclei, sqlmap,
+# katana, semgrep, trivy, etc.).
+#
+# Why: the L2 Lead on Gemini Flash + 10-min standard mode found only
+# 4-5/109 challenges on Juice Shop because 99 tools is decision-
+# paralysis territory. Empirically the agent fixated on a small subset
+# (scan_cache_deception over and over) and never invoked the broader
+# OSS battery. With 8 tools per target, the LLM's choice space is
+# tractable and each tool maps to a question it's trained to
+# recognize ("run nuclei", "run sqlmap").
+#
+# Default: ON. Opt-out via `STRIX_LEGACY_CATALOG=1` for backwards-
+# compat (e.g. existing tests that explicitly invoke scan_sqli or
+# other deprecated tools).
+#
+# In-house tools NOT in these sets are still REGISTERED + EXECUTABLE
+# (so direct invocation by tests / sandbox tool-server still works).
+# They're just not surfaced to the LLM as choices.
+# ---------------------------------------------------------------------------
+
+_MINIMAL_TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
+    "web_application": frozenset({
+        # Recon (1 tool, OSS-backed)
+        "crawl_with_katana",            # katana — JS+sitemap+robots in one
+        # Generic detection (1 tool, OSS-backed, 10K+ templates)
+        "scan_nuclei_templates",        # nuclei — covers OWASP Top 10 + CVEs
+        # Deep exploit when nuclei flags candidates
+        "scan_sqli_sqlmap",             # sqlmap — deep SQLi
+        "scan_xss_dalfox",              # dalfox — deep XSS
+        # LLM-orchestrated authz (no good OSS — session-aware)
+        "scan_idor",                    # session-aware IDOR/BOLA/BFLA
+        # Auth flow orchestration (LLM-led; orchestrates probe_default_creds + hydra)
+        "scan_auth_flow",
+        "seed_auth",
+        # TLS hygiene (OSS-backed)
+        "tls_audit",                    # testssl.sh
+        # HTTP primitive — generic LLM-driven HTTP for the cases
+        # nuclei doesn't cover (custom auth headers, multi-step flows).
+        "send_request",
+        # Browser-driven primitive — for SPA-only interactions
+        # (rare; LLM choice-of-last-resort).
+        "browser_action",
+    }),
+    "api": frozenset({
+        # Recon — OpenAPI spec is exact inventory for APIs
+        "openapi_spec_ingest",
+        # Crawl for endpoints not in spec
+        "crawl_with_katana",
+        # Generic detection
+        "scan_nuclei_templates",
+        # Deep exploit
+        "scan_sqli_sqlmap",
+        # GraphQL-specific (OSS-backed)
+        "map_graphql_inql",             # InQL
+        # LLM-orchestrated authz
+        "scan_idor",                    # API1/API5 — BOLA + BFLA
+        # Auth flow orchestration
+        "scan_auth_flow",
+        "seed_auth",
+        # TLS hygiene
+        "tls_audit",
+        # HTTP primitive
+        "send_request",
+    }),
+    "repository": frozenset({
+        # SAST — semgrep is the industry standard (1000+ rules, daily registry updates)
+        "scan_sast",
+        # Secrets — gitleaks (covers git history) + trufflehog (verify live)
+        "secrets_scan",
+        "verify_credentials_trufflehog",
+        # SCA — covers all package managers
+        "scan_sca_lockfiles",
+        # IaC misconfig (when Dockerfile / IaC files present)
+        "scan_iac",
+        # Code reasoning primitives (LLM-orchestrated, no OSS substitute)
+        "build_code_map",
+        "taint_analysis",
+        # Terminal for opening files etc.
+        "terminal_execute",
+    }),
+    "local_code": frozenset({
+        # Same as repository — single-asset SAST stack
+        "scan_sast",
+        "secrets_scan",
+        "verify_credentials_trufflehog",
+        "scan_sca_lockfiles",
+        "scan_iac",
+        "build_code_map",
+        "taint_analysis",
+        "terminal_execute",
+    }),
+    "ip_address": frozenset({
+        # Port scan + service fingerprint (OSS-backed)
+        "fingerprint_services_nmap",    # nmap
+        # Concurrent HTTP probe on discovered ports
+        "probe_hosts_httpx",
+        # CVE detection + service templates
+        "scan_nuclei_templates",
+        # TLS audit on discovered TLS ports
+        "tls_audit",
+        # HTTP primitive
+        "send_request",
+        # Shell for protocol-specific probes
+        "terminal_execute",
+    }),
+    "container_image": frozenset({
+        # Vuln + secrets + misconfig + SBOM (one tool covers all)
+        "scan_container_image",         # trivy
+        # Container lint
+        "scan_image_dockle",            # dockle
+        # SBOM extract (separate from container scan when wrapper needs manifest)
+        "sbom_extract",
+        # Shell for image inspection
+        "terminal_execute",
+    }),
+    "domain": frozenset({
+        # Recon pipeline (OSS-backed)
+        "domain_recon_pipeline",        # subfinder + bbot
+        "enumerate_subdomains_subfinder",
+        # Generic detection
+        "scan_nuclei_templates",
+        # DNS hygiene
+        "scan_dns_hygiene_checkdmarc",  # checkdmarc
+        # Typosquat detection
+        "scan_typosquats_dnstwist",     # dnstwist
+        # HTTP primitive for spot-check
+        "send_request",
+    }),
+}
+
+
+def is_legacy_catalog_enabled() -> bool:
+    """iter-37.2 — opt-out of the minimal catalog for backwards-compat.
+
+    Default: minimal catalog is ON (per
+    docs/tool-catalog-rationalization.md). Set
+    `STRIX_LEGACY_CATALOG=1` to restore the pre-iter-37.2 fat
+    catalog (~99 tools per web target).
+
+    Used by:
+      * Tests that explicitly invoke deprecated tools (scan_sqli,
+        scan_xss, etc.) — they should NOT be auto-broken by the
+        catalog migration.
+      * Operators running custom workflows that depend on the legacy
+        per-asset surface.
+
+    The wrapper-facing API (`get_lead_tool_catalog`) and the LLM's
+    visible tool set both branch on this.
+    """
+    import os
+    return os.environ.get(
+        "STRIX_LEGACY_CATALOG", "",
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+
 # §1 / PR-#233 — orchestrator mode. When the lead runs in
 # orchestrator mode (STRIX_ORCHESTRATOR_MODE=true), its catalog is
 # reduced to orchestration + dispatch tools. Probing specialists
@@ -524,11 +682,22 @@ def get_lead_tool_catalog(
     if is_orchestrator_mode_enabled():
         return set(_ORCHESTRATOR_ALLOWED_TOOLS) - _BLOCKED_TOOLS
 
+    # iter-37.2 — minimal OSS-anchored catalog (default ON).
+    # Per docs/tool-catalog-rationalization.md, the lead sees ~8 tools
+    # per asset type instead of ~99, all routing to widely-deployed
+    # OSS engines. Set STRIX_LEGACY_CATALOG=1 to opt back into the
+    # pre-iter-37.2 fat catalog.
+    use_minimal = not is_legacy_catalog_enabled()
+    per_target_table = (
+        _MINIMAL_TOOLS_BY_TARGET_TYPE if use_minimal
+        else _TOOLS_BY_TARGET_TYPE
+    )
+
     allowed: set[str] = set(_CORE_TOOLS)
     for tt in target_types:
         if not isinstance(tt, str):
             continue
-        per_type = _TOOLS_BY_TARGET_TYPE.get(tt.strip().lower(), frozenset())
+        per_type = per_target_table.get(tt.strip().lower(), frozenset())
         allowed |= per_type
 
     # Phase 3d / PR-α — intersect with phase's allowed surface.
