@@ -342,14 +342,27 @@ Strix is **an LLM orchestrator over community-maintained OSS security tools**, n
 | 37.7 | CLAUDE.md decision rule + iter-37 status table | #486 | ✓ shipped |
 | 37.8 | Minimal CORE tools (32 → 13) | #487 | ✓ shipped |
 | 37.9 | Update 24 specialist tests to set STRIX_LEGACY_CATALOG=1 | #488 | ✓ shipped |
-| 37.10 | Minimal CORE 13 → 5; auto-fire compliance + remediation in finish_scan | — | in flight |
-| 37.11 | Per-asset trim to ACT-only (drop prepass dupes — katana, nuclei, openapi_ingest, …) | — | pending |
+| 37.10 | Minimal CORE 13 → 5; auto-fire compliance + remediation in finish_scan | #489 | ✓ shipped |
+| 37.11 | Per-asset trim to ACT-only (drop prepass dupes — katana, nuclei, openapi_ingest, …) | — | in flight |
 | 37.12 | Bench L2 Juice Shop with iter-37.10 + 37.11 trimmed catalog | — | pending |
 | 37.4 | Add 6 NEW OSS wrappers: smuggler.py, SAML Raider, hydra, mobsfscan, ffuf, schemathesis | — | pending |
 | 37.5 | DELETE the deprecated tools after grace period | — | pending |
 | 37.6 | Re-bench L2 Juice Shop with minimal catalog active (superseded by 37.12) | — | superseded |
 
-**Default for the L2 Lead today** (post iter-37.10): minimal OSS-anchored catalog with the trimmed core. The agent sees ≤15 tools per web target (5 core + 10 specialist), all of them OSS-backed or LLM-orchestration logic. Set `STRIX_LEGACY_CATALOG=1` to restore the pre-iter-37.2 99-tool catalog for backwards-compat.
+**Default for the L2 Lead today** (post iter-37.11): minimal ACT-only catalog. The agent sees ~10 tools per web target (5 core + 5 specialist), all of them OSS-backed deep-exploit or LLM-orchestration logic. Recon + broad-orient (katana, nuclei, openapi_ingest, semgrep, trivy, …) fire deterministically in `anchor_prepass.py` — the LLM only sees ACT-stage tools. Set `STRIX_LEGACY_CATALOG=1` to restore the pre-iter-37.2 99-tool catalog for backwards-compat.
+
+**Per-asset specialist sets (post iter-37.11):**
+
+| Asset | Specialist tools | Total catalog |
+|---|---|---|
+| `web_application` | scan_sqli_sqlmap, scan_xss_dalfox, scan_idor, scan_auth_flow, send_request | 10 |
+| `api` | scan_sqli_sqlmap, scan_idor, scan_auth_flow, map_graphql_inql, send_request | 10 |
+| `repository` / `local_code` | build_code_map, taint_analysis, verify_credentials_trufflehog, terminal_execute | 9 |
+| `container_image` | scan_image_dockle, terminal_execute | 7 |
+| `ip_address` | fingerprint_services_nmap, probe_hosts_httpx, scan_nuclei_templates, tls_audit, send_request, terminal_execute | 11 |
+| `domain` | domain_recon_pipeline, enumerate_subdomains_subfinder, scan_nuclei_templates, scan_dns_hygiene_checkdmarc, scan_typosquats_dnstwist, send_request | 11 |
+
+`ip_address` and `domain` keep recon tools in catalog because their prepass coverage is thin (IP) or absent (domain).
 
 **Minimal CORE (5 tools)** — one per OODA phase + terminate:
   * `workflow_status` — OBSERVE: where am I in the scan?

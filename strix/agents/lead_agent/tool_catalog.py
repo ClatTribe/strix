@@ -444,112 +444,133 @@ _BLOCKED_TOOLS: frozenset[str] = frozenset({
 # They're just not surfaced to the LLM as choices.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# iter-37.11 — per-asset trim to ACT-only.
+#
+# Rationale: the OSS anchor prepass (anchor_prepass.py:
+# `_ANCHORS_BY_TARGET_TYPE`) fires ~25 tools deterministically before
+# the LLM wakes up — recon + broad-signature detection are the
+# harness's job, not the LLM's. Tools that the prepass ALREADY runs
+# don't belong in the LLM's catalog (their slots cost decision-
+# paralysis tokens without buying new behavior — the LLM can't re-
+# discover something the prepass discovered first).
+#
+# Per-asset rule: drop the recon + orient tools whose result is
+# already in the prepass output; keep ONLY the ACT-stage tools the
+# LLM must call to make progress on a finding (deep exploit, session-
+# aware authz, LLM-orchestrated taint trace, etc.).
+#
+# Two assets stay unchanged because they have NO comprehensive
+# prepass coverage:
+#   * `ip_address` — prepass only runs `probe_open_tcp_ports` +
+#     per-port banner probes; no nmap/httpx/nuclei. LLM still needs
+#     them in catalog.
+#   * `domain`     — no prepass at all. LLM drives all recon.
+#
+# Catalog impact (per-asset specialist set):
+#   web_application: 10 → 5  ( drop crawl_with_katana, scan_nuclei_
+#                              templates, seed_auth, tls_audit,
+#                              browser_action — all in prepass or
+#                              auto-included via dispatcher)
+#   api:             10 → 5  ( drop openapi_spec_ingest,
+#                              crawl_with_katana, scan_nuclei_
+#                              templates, seed_auth, tls_audit)
+#   repository:       8 → 4  ( drop scan_sast, secrets_scan,
+#                              scan_sca_lockfiles, scan_iac)
+#   local_code:       8 → 4  ( drop scan_sast, secrets_scan,
+#                              scan_sca_lockfiles, scan_iac)
+#   container_image:  4 → 2  ( drop scan_container_image,
+#                              sbom_extract)
+#   ip_address:       6 → 6  (unchanged — no comprehensive prepass)
+#   domain:           7 → 7  (unchanged — no prepass)
+#
+# Total post-iter-37.11 (with iter-37.10's 5-tool core):
+#   web_application:  10 tools
+#   api:              10 tools
+#   repository:        9 tools
+#   ip_address:       11 tools
+#   container_image:   7 tools
+#   domain:           12 tools
+#
+# Dropped tools STAY REGISTERED + EXECUTABLE — sandbox tool-server,
+# direct invocation by tests, orchestrator-mode dispatch all still
+# see them. Only LLM-catalog visibility changes.
+# ---------------------------------------------------------------------------
+
 _MINIMAL_TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
     "web_application": frozenset({
-        # Recon (1 tool, OSS-backed)
-        "crawl_with_katana",            # katana — JS+sitemap+robots in one
-        # Generic detection (1 tool, OSS-backed, 10K+ templates)
-        "scan_nuclei_templates",        # nuclei — covers OWASP Top 10 + CVEs
-        # Deep exploit when nuclei flags candidates
+        # === ACT only — recon/orient handled by anchor_prepass ===
+        # Deep exploit when prepass nuclei flags candidates
         "scan_sqli_sqlmap",             # sqlmap — deep SQLi
         "scan_xss_dalfox",              # dalfox — deep XSS
         # LLM-orchestrated authz (no good OSS — session-aware)
         "scan_idor",                    # session-aware IDOR/BOLA/BFLA
-        # Auth flow orchestration (LLM-led; orchestrates probe_default_creds + hydra)
+        # Auth flow orchestration (LLM-led; subsumes seed_auth,
+        # which prepass also fires). Re-callable for new auth surfaces
+        # found mid-scan.
         "scan_auth_flow",
-        "seed_auth",
-        # TLS hygiene (OSS-backed)
-        "tls_audit",                    # testssl.sh
-        # HTTP primitive — generic LLM-driven HTTP for the cases
-        # nuclei doesn't cover (custom auth headers, multi-step flows).
+        # HTTP primitive — generic LLM-driven HTTP for the cases the
+        # prepass's nuclei/dispatcher didn't cover (custom auth
+        # headers, multi-step chain steps, post-auth recon spot-check).
         "send_request",
-        # Browser-driven primitive — for SPA-only interactions
-        # (rare; LLM choice-of-last-resort).
-        "browser_action",
     }),
     "api": frozenset({
-        # Recon — OpenAPI spec is exact inventory for APIs
-        "openapi_spec_ingest",
-        # Crawl for endpoints not in spec
-        "crawl_with_katana",
-        # Generic detection
-        "scan_nuclei_templates",
+        # === ACT only — recon/orient handled by anchor_prepass ===
         # Deep exploit
         "scan_sqli_sqlmap",
-        # GraphQL-specific (OSS-backed)
-        "map_graphql_inql",             # InQL
-        # LLM-orchestrated authz
-        "scan_idor",                    # API1/API5 — BOLA + BFLA
-        # Auth flow orchestration
+        # LLM-orchestrated authz (API1/API5 — BOLA + BFLA)
+        "scan_idor",
+        # Auth flow orchestration (subsumes seed_auth)
         "scan_auth_flow",
-        "seed_auth",
-        # TLS hygiene
-        "tls_audit",
+        # GraphQL-specific deep work (InQL — no OSS substitute for
+        # fine-grained schema mutation testing)
+        "map_graphql_inql",
         # HTTP primitive
         "send_request",
     }),
     "repository": frozenset({
-        # SAST — semgrep is the industry standard (1000+ rules, daily registry updates)
-        "scan_sast",
-        # Secrets — gitleaks (covers git history) + trufflehog (verify live)
-        "secrets_scan",
-        "verify_credentials_trufflehog",
-        # SCA — covers all package managers
-        "scan_sca_lockfiles",
-        # IaC misconfig (when Dockerfile / IaC files present)
-        "scan_iac",
+        # === ACT only — SAST + secrets + SCA + IaC fire in prepass ===
         # Code reasoning primitives (LLM-orchestrated, no OSS substitute)
         "build_code_map",
         "taint_analysis",
+        # Verify gitleaks/SAST credentials are LIVE
+        "verify_credentials_trufflehog",
         # Terminal for opening files etc.
         "terminal_execute",
     }),
     "local_code": frozenset({
-        # Same as repository — single-asset SAST stack
-        "scan_sast",
-        "secrets_scan",
-        "verify_credentials_trufflehog",
-        "scan_sca_lockfiles",
-        "scan_iac",
+        # Same shape as repository.
         "build_code_map",
         "taint_analysis",
+        "verify_credentials_trufflehog",
         "terminal_execute",
     }),
     "ip_address": frozenset({
-        # Port scan + service fingerprint (OSS-backed)
+        # ip_address has only a thin prepass (probe_open_tcp_ports
+        # + per-port banner probes) — the LLM still needs nmap +
+        # httpx + nuclei in catalog. Unchanged from iter-37.2.
         "fingerprint_services_nmap",    # nmap
-        # Concurrent HTTP probe on discovered ports
         "probe_hosts_httpx",
-        # CVE detection + service templates
         "scan_nuclei_templates",
-        # TLS audit on discovered TLS ports
         "tls_audit",
-        # HTTP primitive
         "send_request",
-        # Shell for protocol-specific probes
         "terminal_execute",
     }),
     "container_image": frozenset({
-        # Vuln + secrets + misconfig + SBOM (one tool covers all)
-        "scan_container_image",         # trivy
-        # Container lint
+        # trivy fires in prepass — drop scan_container_image.
+        # dockle isn't in prepass; LLM still needs it for container
+        # lint findings.
         "scan_image_dockle",            # dockle
-        # SBOM extract (separate from container scan when wrapper needs manifest)
-        "sbom_extract",
-        # Shell for image inspection
-        "terminal_execute",
+        "terminal_execute",             # docker save / mount inspection
     }),
     "domain": frozenset({
-        # Recon pipeline (OSS-backed)
+        # No prepass for domain — LLM drives all recon. Unchanged
+        # from iter-37.2.
         "domain_recon_pipeline",        # subfinder + bbot
         "enumerate_subdomains_subfinder",
-        # Generic detection
         "scan_nuclei_templates",
-        # DNS hygiene
         "scan_dns_hygiene_checkdmarc",  # checkdmarc
-        # Typosquat detection
         "scan_typosquats_dnstwist",     # dnstwist
-        # HTTP primitive for spot-check
         "send_request",
     }),
 }

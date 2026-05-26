@@ -129,16 +129,18 @@ def test_multi_target_union_catalog_includes_both_asset_types():
     catalog = get_lead_tool_catalog(
         target_types={"web_application", "repository"},
     )
-    # Web-only tools
-    assert "crawl_with_katana" in catalog
+    # Web-only ACT tools (iter-37.11: katana + nuclei + tls fire in
+    # prepass; dropped from catalog. Survivors: sqlmap/dalfox/idor/
+    # scan_auth_flow/send_request).
     assert "scan_xss_dalfox" in catalog
-    # Repo-only tools
-    assert "scan_sast" in catalog
-    assert "scan_sca_lockfiles" in catalog
-    assert "secrets_scan" in catalog
-    # Core tools in both (iter-37.10 minimal core: list_pending_findings
-    # is the L1.5-aware ranked-catalog accessor; create_vulnerability_report
-    # is the universal emission tool).
+    assert "scan_sqli_sqlmap" in catalog
+    # Repo-only ACT tools (iter-37.11: scan_sast/secrets_scan/
+    # scan_sca_lockfiles/scan_iac fire in prepass; dropped from catalog.
+    # Survivors: build_code_map/taint_analysis/verify_credentials_
+    # trufflehog/terminal_execute).
+    assert "build_code_map" in catalog
+    assert "taint_analysis" in catalog
+    # Core tools in both (iter-37.10 minimal core).
     assert "list_pending_findings" in catalog
     assert "create_vulnerability_report" in catalog
 
