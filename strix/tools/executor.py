@@ -47,6 +47,18 @@ _LEAD_BLOCKED_TOOLS: frozenset[str] = frozenset({
 
 
 async def execute_tool(tool_name: str, agent_state: Any | None = None, **kwargs: Any) -> Any:
+    # iter-37.3 — emit a deprecation warning on every invocation of a
+    # tool that's been retired in favor of an OSS engine. The tool
+    # still EXECUTES (so existing tests + sandbox tool-server keep
+    # working); the warning surfaces in logs and lets the caller see
+    # which OSS replacement to use. See docs/tool-catalog-
+    # rationalization.md for the full list + replacements.
+    try:
+        from strix.tools.deprecations import emit_deprecation_warning
+        emit_deprecation_warning(tool_name)
+    except Exception:  # noqa: BLE001
+        pass  # never block execution on a warning hook
+
     execute_in_sandbox = should_execute_in_sandbox(tool_name)
     sandbox_mode = os.getenv("STRIX_SANDBOX_MODE", "false").lower() == "true"
 
