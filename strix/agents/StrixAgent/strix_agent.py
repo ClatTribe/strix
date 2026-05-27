@@ -374,6 +374,28 @@ class StrixAgent(BaseAgent):
                     self.state.oss_prepass_summaries = prepass_summaries  # type: ignore[attr-defined]
                 except Exception:  # noqa: BLE001
                     pass
+
+            # iter-Q5.28 — ALSO stash on tracer.run_metadata so the
+            # telemetry pipeline (which reads from the tracer, not the
+            # agent's state) can surface the prepass result into
+            # simulation_run.json + run_meta.json. Before this, the
+            # `state.oss_prepass_summaries` data lived but nothing
+            # downstream read it — leaving us blind to anchor outcomes
+            # when debugging "0 findings" runs against fixtures we know
+            # should produce findings (OWASP Benchmark v1.2 SAST mode).
+            #
+            # Schema: list of PrepassSummary.to_dict() — one per
+            # target. Each entry carries `tools_run`, `tools_succeeded`,
+            # `tools_failed`, `total_findings`, `tool_results[]`
+            # (per-tool {tool_name, status, findings_count,
+            # error_reason}).
+            try:
+                from strix.telemetry.tracer import get_global_tracer
+                _t = get_global_tracer()
+                if _t is not None and hasattr(_t, "run_metadata"):
+                    _t.run_metadata["oss_anchor_prepass"] = prepass_summaries
+            except Exception:  # noqa: BLE001
+                pass
             if prepass_blocks:
                 task_description = (
                     "\n".join(prepass_blocks) + "\n\n" + task_description

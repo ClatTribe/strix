@@ -282,6 +282,29 @@ def build_simulation_run(tracer: Any) -> dict[str, Any]:
         summary.update(_gather_kg_counts(tracer))
         summary.update(_gather_tool_call_counts(tracer))
         summary.update(_gather_findings_counts(tracer))
+        # iter-Q5.28 — surface anchor_prepass per-tool outcomes so
+        # "0 findings" runs are debuggable post-hoc. Each target's
+        # entry carries the per-tool status / findings_count /
+        # error_reason so we can see e.g. "scan_sast ran ok, 2163
+        # raw findings, propagated 200 to host tracer" vs the prior
+        # opaque "no findings" black box.
+        prepass = rm.get("oss_anchor_prepass")
+        if prepass is not None:
+            # Defensive: round-trip through json to guarantee the
+            # value is fully serializable (no datetimes, no
+            # dataclass instances, no Path objects sneaking through
+            # PrepassSummary.to_dict()).
+            try:
+                import json as _json
+                summary["oss_anchor_prepass"] = _json.loads(
+                    _json.dumps(prepass, default=str),
+                )
+            except Exception:  # noqa: BLE001
+                # If serialization fails, fall back to a minimal
+                # marker so the absence-of-block doesn't mislead.
+                summary["oss_anchor_prepass"] = [
+                    {"target_summary": "(serialization failed)"}
+                ]
         return summary
     except Exception as e:  # noqa: BLE001
         logger.debug("simulation_run build failed: %s", e, exc_info=True)
