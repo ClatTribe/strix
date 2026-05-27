@@ -320,7 +320,7 @@ The wrapper should treat **code 3 as a non-error** (capped successfully, partial
 | Var | Default | Notes |
 |---|---|---|
 | `STRIX_SANDBOX_MODE` | `true` (DinD) | `false` to disable inner Docker sandbox — strix runs in-process. See §6. |
-| `STRIX_IMAGE` | `ghcr.io/usestrix/strix-sandbox:0.1.13` | Override the inner-sandbox image. **Use this for fork-built images** (e.g. `strix-sandbox:fork-<sha>`). See §6 "Fork-built sandbox images". |
+| `STRIX_IMAGE` | `strix-sandbox:local` (ClatTribe fork; built locally via `containers/Dockerfile`) | Override the inner-sandbox image. **Use this for forks that publish their own tag** (e.g. `strix-sandbox:fork-<sha>`). The upstream `ghcr.io/usestrix/strix-sandbox:0.1.13` tag is NOT mirrored to ClatTribe and 404s on pull. See §6 "Fork-built sandbox images". |
 | `STRIX_RUNTIME_BACKEND` | `docker` | Runtime driver. `docker` today; other backends are reserved. |
 | `STRIX_SANDBOX_EXECUTION_TIMEOUT` | `120` | Seconds — inner-sandbox per-command timeout. |
 | `STRIX_SANDBOX_CONNECT_TIMEOUT` | `10` | Seconds — inner-sandbox bring-up timeout. |
@@ -528,7 +528,7 @@ S3-backed FUSE / EFS / similar).
 | Dependency | Why | Where strix expects it |
 |---|---|---|
 | **Docker CLI** | Spawn the inner sandbox (`STRIX_SANDBOX_MODE=true`) | `shutil.which("docker")` at startup |
-| **`ghcr.io/usestrix/strix-sandbox:0.1.13`** image | The inner sandbox runtime image | Auto-pulled at scan start |
+| **`strix-sandbox:local`** image (ClatTribe fork — build locally) | The inner sandbox runtime image. The upstream `ghcr.io/usestrix/strix-sandbox:0.1.13` tag is NOT mirrored to ClatTribe. | Built via `docker build -t strix-sandbox:local -f containers/Dockerfile .` at the repo root |
 | **Git** | Clone `repository` targets, compute diffs for `--scope-mode diff` | `subprocess.run(["git", …])` |
 
 The Docker requirement is the single biggest wrapper-side
@@ -556,7 +556,9 @@ are opt-in.
 Strix's default execution model is **Docker-in-Docker (DinD)**:
 
 1. Wrapper invokes `strix -n -t <target>` in a pod/container.
-2. Strix at startup pulls `ghcr.io/usestrix/strix-sandbox:0.1.13`.
+2. Strix at startup spawns the locally-built `strix-sandbox:local`
+   image (or whatever `STRIX_IMAGE` env points at). The fork builds
+   this image — there is no GHCR mirror for ClatTribe.
 3. Strix spawns the sandbox container, executes the agent loop
    inside it, propagates results back to the outer cwd.
 
@@ -638,10 +640,12 @@ env-var flip.
 
 ### Fork-built sandbox images
 
-Production deployments typically build their own sandbox image
-rather than pulling `ghcr.io/usestrix/strix-sandbox:0.1.13`
-directly — pinned-fork builds, additional toolchain, internal
-registry, etc. The override knob is **`STRIX_IMAGE`**.
+The ClatTribe fork doesn't mirror the upstream
+`ghcr.io/usestrix/strix-sandbox:0.1.13` tag — production deployments
+build their own image from this repo's `containers/Dockerfile`
+(pinned-fork builds, additional toolchain, internal registry, etc.).
+The override knob is **`STRIX_IMAGE`**; the fork default is
+`strix-sandbox:local` (locally built).
 
 Naming convention used in our internal builds:
 

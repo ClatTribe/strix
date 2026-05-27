@@ -40,7 +40,15 @@ class Config:
     strix_disable_browser = "false"
 
     # Runtime Configuration
-    strix_image = "ghcr.io/usestrix/strix-sandbox:0.1.13"
+    #
+    # The ClatTribe fork builds its own sandbox image locally — the
+    # upstream `ghcr.io/usestrix/strix-sandbox:0.1.13` tag is NOT
+    # mirrored to ClatTribe's GHCR and would 404 on pull. The fork
+    # default is `strix-sandbox:local`, built via
+    # `docker build -t strix-sandbox:local -f containers/Dockerfile .`
+    # at the repo root. Override per-scan via STRIX_IMAGE env var
+    # if a different tag is needed.
+    strix_image = "strix-sandbox:local"
     strix_runtime_backend = "docker"
     # iter-27.5 raised this from 120s to 300s (entrypoint + tool_server).
     # iter-27.9: also raise the host-side Config default. The bench

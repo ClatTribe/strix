@@ -18,7 +18,7 @@ your fork changes determines which one you need to rebuild:
 
 | Layer | Built from | Default location | Used by |
 |---|---|---|---|
-| **Sandbox image** — Kali + nuclei/nmap/sqlmap/Caido/Playwright/Trivy etc. The Strix agent spawns this per-scan as the tool-execution environment. | [`containers/Dockerfile`](containers/Dockerfile) in this repo | `ghcr.io/usestrix/strix-sandbox:0.1.13` (default in [`strix/config/config.py:43`](strix/config/config.py:43)) | The Strix CLI itself, via Docker SDK |
+| **Sandbox image** — Kali + nuclei/nmap/sqlmap/Caido/Playwright/Trivy etc. The Strix agent spawns this per-scan as the tool-execution environment. | [`containers/Dockerfile`](containers/Dockerfile) in this repo | `strix-sandbox:local` — the ClatTribe fork builds its own (the upstream `ghcr.io/usestrix/strix-sandbox:0.1.13` tag is NOT mirrored to ClatTribe and 404s on pull). Set in [`strix/config/config.py:43`](strix/config/config.py:43); override via `STRIX_IMAGE` env. | The Strix CLI itself, via Docker SDK |
 | **Strix CLI** — the Python package that orchestrates scans. | [`pyproject.toml`](pyproject.toml) → wheel on PyPI as `strix-agent` | PyPI `strix-agent` | Whoever invokes `strix` (CI runner, wrapper worker, your shell) |
 
 Forks usually need **both** rebuilt, because most non-trivial changes
