@@ -137,6 +137,11 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_auth_flow",  # Phase 6 — default-creds + session capture
         "scan_business_logic",  # Phase 5.6 — workflow / business-rule abuse (A04:2021)
         "scan_idor",  # Phase 4.1 — cross-session IDOR (CWE-639/862)
+        # iter-Q5.10 — umbrella that routes to scan_idor / scan_auth_flow /
+        # scan_business_logic. Kept in legacy catalog so the reachability
+        # invariant test sees it; minimal mode hides the individual probes
+        # and exposes only the umbrella.
+        "dispatch_l2_probe",
         "scan_multi_role_auth",  # Phase 3.1 — multi-role authz orchestrator (IDOR precondition)
         "scan_oauth",  # Phase 2.11 — OAuth 2.0 / OIDC misconfiguration (CWE-352/602/601/922)
         "scan_saml_xsw",  # masterroadmap §1 P0 — SAML XML Signature Wrapping + SP config audit (CWE-347)
@@ -528,37 +533,29 @@ _MINIMAL_TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
     "web_application": frozenset({
         # iter-Q5.3 — deep-exploit OSS wrappers moved to anchor_prepass
         # per CLAUDE.md §1.5 (tools are the LLM's hands, not its brain).
-        # The previously-listed sqlmap / dalfox / smuggler / hydra / ffuf
-        # all fire deterministically in `anchor_prepass.py` now — the lead
-        # doesn't pick whether to deep-exploit; L1 always does it.
         #
-        # The lead can still re-fire any of them on a candidate via
-        # the future `rescan(tool_name, target, captured_state)`
-        # (iter-Q5.9) — that's the escape hatch for "new auth state,
-        # re-test SQLi as the authed user."
+        # iter-Q5.10 — scan_idor + scan_auth_flow + scan_business_logic
+        # collapsed under dispatch_l2_probe(kind, **kwargs). One catalog
+        # slot, three probe shapes, same capability surface. The
+        # underlying scan_* functions stay registered (orchestrator
+        # mode + direct tests still reach them); the LLM only sees the
+        # umbrella.
         #
         # === L2-NATIVE DETECTION (no OSS substitute — needs LLM
         # state-reasoning that anchor_prepass can't do) ===
-        # session-aware authz (IDOR / BOLA / BFLA), needs LLM to pair
-        # captured user-a + user-b sessions against ID-shaped URLs.
-        "scan_idor",
-        # auth flow orchestration: LLM picks form fields, drives
-        # register-then-login flow, captures session for downstream.
-        # Q5.10 collapses scan_idor + scan_auth_flow + scan_business_logic
-        # under dispatch_l2_probe(kind=...).
-        "scan_auth_flow",
+        "dispatch_l2_probe",  # kind ∈ {idor, auth_flow, business_logic}
         # === PRIMITIVE escape hatch ===
         "send_request",
     }),
     "api": frozenset({
-        # iter-Q5.3 + Q5.5 migration complete. sqlmap / smuggler / hydra /
-        # ffuf / schemathesis / map_graphql_inql now fire in
-        # anchor_prepass. The lead re-fires on candidates via
-        # rescan(...) (Q5.9).
+        # iter-Q5.3 + Q5.5 + Q5.10 — same collapse as web. dispatch_l2_probe
+        # replaces scan_idor + scan_auth_flow. business_logic is also
+        # available via kind="business_logic" (was previously not in
+        # api minimal — Q5.10 surfaces it for free as part of the
+        # umbrella).
         #
         # === L2-NATIVE DETECTION ===
-        "scan_idor",
-        "scan_auth_flow",
+        "dispatch_l2_probe",
         # === PRIMITIVE escape hatch ===
         "send_request",
     }),
