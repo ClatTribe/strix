@@ -1,0 +1,20 @@
+{
+  "__revision": "GDPR (EU 2016/679, in force 2018)",
+  "CWE-200": [
+    {"control_id": "Art. 32", "description": "Security of processing — measures to protect personal data"},
+    {"control_id": "Art. 5(1)(f)", "description": "Integrity and confidentiality of personal data"}
+  ],
+  "CWE-287": [
+    {"control_id": "Art. 32(1)(b)", "description": "Ability to ensure ongoing confidentiality, integrity, availability"}
+  ],
+  "CWE-639": [
+    {"control_id": "Art. 5(1)(f)", "description": "Confidentiality"},
+    {"control_id": "Art. 32(2)", "description": "Risk to rights and freedoms of natural persons"}
+  ],
+  "CWE-89": [
+    {"control_id": "Art. 32", "description": "Security of processing — input validation"}
+  ],
+  "CWE-79": [
+    {"control_id": "Art. 32", "description": "Security of processing — XSS could expose personal data"}
+  ]
+}

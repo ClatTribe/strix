@@ -187,6 +187,23 @@ from .web_search import *  # noqa: F403
 # lookup_cve_by_id / list_actively_exploited_cves / threat_intel_status.
 from strix.threat_intel import tools as _threat_intel_tools  # noqa: F401, E402
 
+# iter-Q5.7 — unified threat-intel query (collapses cve_lookup +
+# nvd_lookup + cve_intel_search + kev_diff_check behind one
+# signature). CORE READ/FETCH-EXTERNAL bucket.
+from strix.tools.threat_intel import *  # noqa: F403, E402
+
+# iter-Q5.8 — lookup_compliance_mapping — current SOC2/PCI/HIPAA/
+# GDPR/FedRAMP control IDs from a versioned corpus.
+from strix.tools.compliance_lookup import *  # noqa: F403, E402
+
+# iter-Q5.9 — rescan(tool_name, target, captured_state) — re-fire
+# an L1 OSS tool with new state. Allow-list + budget-capped.
+from strix.tools.rescan import *  # noqa: F403, E402
+
+# iter-Q5.10 — dispatch_l2_probe(kind, **kwargs) — umbrella for
+# scan_idor / scan_auth_flow / scan_business_logic.
+from strix.tools.specialist.dispatch_l2_probe import *  # noqa: F403, E402
+
 
 __all__ = [
     "ImplementedInClientSideOnlyError",

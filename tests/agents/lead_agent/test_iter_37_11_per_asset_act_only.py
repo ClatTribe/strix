@@ -180,20 +180,21 @@ def test_api_specialist_drops_prepass_duplicates():
 # ---------------------------------------------------------------------------
 
 
-def test_code_specialist_set_has_3_tools():
-    """iter-37.14 had 5 specialists. iter-Q5.6 dropped
-    scan_mobile_mobsfscan (already in anchor_prepass — duplicate) → 4.
-    iter-Q5.7 dropped taint_analysis to make room for query_threat_intel
-    being added to CORE without breaking the ≤10 cap. Per the L2 audit
-    §3.5 taint_analysis is in-house Python-only SAST (CLAUDE.md §11.1
-    violation); semgrep in prepass has broader coverage. → 3
-    specialists (build_code_map, verify_credentials_trufflehog,
-    terminal_execute)."""
+def test_code_specialist_set_has_2_tools():
+    """Sequential reductions:
+      iter-37.14: 5 specialists
+      iter-Q5.6: -scan_mobile_mobsfscan (prepass duplicate) → 4
+      iter-Q5.7: -taint_analysis (CLAUDE.md §11.1) → 3
+      iter-Q5.9: -verify_credentials_trufflehog (folded into rescan
+                 allow-list — it's a verifier, fits the rescan
+                 pattern; lead calls rescan(tool_name=
+                 "verify_credentials_trufflehog", ...)) → 2
+    Final: build_code_map + terminal_execute."""
     for asset in ("repository", "local_code"):
         tools = _MINIMAL_TOOLS_BY_TARGET_TYPE[asset]
-        assert len(tools) == 3, (
-            f"{asset} should have 3 ACT-only specialists post "
-            f"iter-Q5.7; got {len(tools)}: {sorted(tools)}"
+        assert len(tools) == 2, (
+            f"{asset} should have 2 ACT-only specialists post "
+            f"iter-Q5.9; got {len(tools)}: {sorted(tools)}"
         )
 
 
@@ -327,19 +328,19 @@ def test_api_total_catalog_at_or_under_14_tools():
     assert len(tools) <= 14
 
 
-def test_code_total_catalog_at_or_under_10_tools():
-    """iter-37.14: 5 core + 5 specialist (added mobsfscan) = 10."""
+def test_code_total_catalog_at_or_under_11_tools():
+    """Post-Q5.9: 9 CORE + 2 specialist = 11. Cap bumped via Q5.8/Q5.9
+    to accommodate FETCH EXTERNAL + RE-DISPATCH buckets per
+    CLAUDE.md §1.5.7."""
     for asset in ("repository", "local_code"):
         tools = get_lead_tool_catalog(target_types=[asset])
-        assert len(tools) <= 10, f"{asset} has {len(tools)} tools"
+        assert len(tools) <= 11, f"{asset} has {len(tools)} tools"
 
 
-def test_container_total_catalog_at_or_under_9_tools():
-    """Sequential growth: CORE 5 → 6 (Q5.6 get_finding) → 7 (Q5.7
-    query_threat_intel). Container is 7 core + 2 specialist = 9 —
-    still well under the ≤10 L2-CAP invariant."""
+def test_container_total_catalog_at_or_under_11_tools():
+    """Post-Q5.9: 9 CORE + 2 specialist = 11."""
     tools = get_lead_tool_catalog(target_types=["container_image"])
-    assert len(tools) <= 9
+    assert len(tools) <= 11
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,26 @@
+{
+  "__revision": "HIPAA Security Rule (45 CFR Part 164 Subpart C, 2024)",
+  "CWE-200": [
+    {"control_id": "164.308(a)(1)(ii)(B)", "description": "Risk Management — measures to reduce risks and vulnerabilities to a reasonable level"},
+    {"control_id": "164.312(e)(1)", "description": "Transmission Security — guard against unauthorized access to ePHI"}
+  ],
+  "CWE-287": [
+    {"control_id": "164.308(a)(5)(ii)(D)", "description": "Password Management — procedures for creating, changing, and safeguarding passwords"},
+    {"control_id": "164.312(d)", "description": "Person or Entity Authentication"}
+  ],
+  "CWE-639": [
+    {"control_id": "164.312(a)(1)", "description": "Access Control — technical policies to allow access only to those authorized"}
+  ],
+  "CWE-79": [
+    {"control_id": "164.308(a)(1)(ii)(D)", "description": "Information system activity review — XSS could enable session hijacking"}
+  ],
+  "CWE-89": [
+    {"control_id": "164.308(a)(1)(ii)(B)", "description": "Risk Management — SQLi could exfiltrate ePHI"}
+  ],
+  "CWE-521": [
+    {"control_id": "164.308(a)(5)(ii)(D)", "description": "Password Management"}
+  ],
+  "CWE-798": [
+    {"control_id": "164.308(a)(4)(ii)(B)", "description": "Access establishment and modification"}
+  ]
+}

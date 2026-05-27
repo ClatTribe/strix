@@ -1,0 +1,39 @@
+{
+  "__revision": "PCI-DSS v4.0 (2022, in force 2025)",
+  "CWE-89": [
+    {"control_id": "6.2.4", "description": "Software development processes are reviewed for common attacks including SQL injection"},
+    {"control_id": "6.5.1", "description": "Common coding vulnerabilities — Injection flaws including SQL injection"}
+  ],
+  "CWE-79": [
+    {"control_id": "6.2.4", "description": "Software dev — XSS protection"},
+    {"control_id": "6.5.7", "description": "Cross-site scripting (XSS) vulnerabilities"}
+  ],
+  "CWE-22": [
+    {"control_id": "6.2.4", "description": "Software dev — input validation"},
+    {"control_id": "6.5.8", "description": "Improper access control (e.g., insecure direct object references, directory traversal)"}
+  ],
+  "CWE-200": [
+    {"control_id": "3.2", "description": "Do not store sensitive authentication data after authorization"},
+    {"control_id": "3.4", "description": "Render PAN unreadable wherever stored"}
+  ],
+  "CWE-287": [
+    {"control_id": "8.3", "description": "Strong customer authentication"},
+    {"control_id": "8.2", "description": "Authentication policies"}
+  ],
+  "CWE-352": [
+    {"control_id": "6.5.9", "description": "Cross-site request forgery (CSRF)"}
+  ],
+  "CWE-639": [
+    {"control_id": "6.5.8", "description": "Improper access control — IDOR"}
+  ],
+  "CWE-521": [
+    {"control_id": "8.3.6", "description": "Minimum complexity requirements for passwords"},
+    {"control_id": "2.2", "description": "Apply secure configurations — change vendor defaults"}
+  ],
+  "CWE-798": [
+    {"control_id": "8.6", "description": "Authentication credentials must not be hard-coded"}
+  ],
+  "CWE-918": [
+    {"control_id": "6.5.10", "description": "Broken authentication and session management (SSRF)"}
+  ]
+}
