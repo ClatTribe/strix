@@ -129,13 +129,12 @@ def test_multi_target_union_catalog_includes_both_asset_types():
     catalog = get_lead_tool_catalog(
         target_types={"web_application", "repository"},
     )
-    # Web-only L2-native ACT tools. iter-Q5.3 moved sqlmap/dalfox/
-    # smuggler/hydra/ffuf to anchor_prepass per CLAUDE.md §1.5 (tools
-    # are LLM's hands, not its brain). Surviving web specialists:
-    # scan_idor / scan_auth_flow / send_request — all session-aware
-    # or LLM-orchestrated, no OSS substitute.
-    assert "scan_idor" in catalog
-    assert "scan_auth_flow" in catalog
+    # Post-Q5 web L2-native survivors:
+    #   * dispatch_l2_probe — Q5.10 collapse of scan_idor +
+    #     scan_auth_flow + scan_business_logic into one umbrella
+    #   * send_request — primitive escape hatch
+    # All session-aware / LLM-orchestrated; no OSS substitute.
+    assert "dispatch_l2_probe" in catalog
     assert "send_request" in catalog
     # Repo-only ACT tools (iter-37.11: scan_sast/secrets_scan/
     # scan_sca_lockfiles/scan_iac fire in prepass; dropped from catalog.

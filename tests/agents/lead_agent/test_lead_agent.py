@@ -141,17 +141,21 @@ def test_lead_agent_carries_tool_catalog_allowlist(base_config) -> None:
     # broad-orient (nuclei) dropped because the prepass fires them.
     # Assertions now reference the survivor set: the 5-tool core +
     # web's ACT-only specialists.
-    # iter-Q5.3 — sqlmap / dalfox / smuggler / hydra / ffuf moved
-    # from L2 catalog to anchor_prepass per CLAUDE.md §1.5 (tools are
-    # LLM's hands, not its brain). The survivor set is just the 5-tool
-    # core + 3 L2-native web specialists (idor, auth_flow, send_request).
-    assert "workflow_status" in allowlist        # core — observe
-    assert "list_pending_findings" in allowlist  # core — observe L1 queue
-    assert "create_vulnerability_report" in allowlist  # core — emit
-    assert "think" in allowlist                  # core — scratchpad
-    assert "finish_scan" in allowlist            # core — terminate
-    assert "scan_idor" in allowlist              # web — session-aware authz (no OSS substitute)
-    assert "scan_auth_flow" in allowlist         # web — auth orchestration
+    # Post-Q5.10 minimal catalog. Core grew to 6 (Q5.6 +get_finding);
+    # the 3 L2-native probes collapsed under dispatch_l2_probe;
+    # deep-exploit OSS wrappers moved to anchor_prepass (Q5.3).
+    assert "workflow_status" in allowlist          # CORE — observe state
+    assert "list_pending_findings" in allowlist    # CORE — observe findings
+    assert "get_finding" in allowlist              # CORE — deep-read single (Q5.6)
+    assert "think" in allowlist                    # CORE — scratchpad
+    assert "create_vulnerability_report" in allowlist  # CORE — emit
+    assert "finish_scan" in allowlist              # CORE — terminate
+    assert "dispatch_l2_probe" in allowlist        # L2-native umbrella (Q5.10)
+    # The collapsed individual probes MUST NOT be visible — reachable
+    # only through dispatch_l2_probe(kind=...).
+    assert "scan_idor" not in allowlist
+    assert "scan_auth_flow" not in allowlist
+    assert "scan_business_logic" not in allowlist
     # Deep-exploit OSS wrappers MUST NOT be visible to the LLM —
     # they fire as L1 always-on coverage in anchor_prepass.
     assert "scan_sqli_sqlmap" not in allowlist

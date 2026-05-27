@@ -39,20 +39,15 @@ def _clean_env():
 # ---------------------------------------------------------------------------
 
 
-def test_web_specialist_set_has_3_tools():
+def test_web_specialist_set_has_2_tools():
     """iter-37.11 trimmed to 5 ACT-only. iter-37.14 promoted 3 OSS
-    wrappers to 8. iter-Q5.3 dropped the deep-exploit OSS wrappers
-    (sqlmap, dalfox, smuggler, hydra, ffuf) to `anchor_prepass` per
-    CLAUDE.md §1.5 (tools are LLM's hands, not its brain) → 3
-    specialists (scan_idor, scan_auth_flow, send_request).
-
-    Maintenance note for future iter-Q5.10: scan_idor + scan_auth_flow
-    collapse under `dispatch_l2_probe(kind, **kwargs)` → 2 specialists
-    after that lands. Update this assertion when Q5.10 ships."""
+    wrappers to 8. iter-Q5.3 dropped deep-exploit OSS wrappers → 3.
+    iter-Q5.10 collapsed scan_idor + scan_auth_flow under
+    dispatch_l2_probe → 2 specialists (dispatch_l2_probe + send_request)."""
     web = _MINIMAL_TOOLS_BY_TARGET_TYPE["web_application"]
-    assert len(web) == 3, (
-        f"web_application should have 3 ACT-only specialists post "
-        f"iter-Q5.3; got {len(web)}: {sorted(web)}"
+    assert len(web) == 2, (
+        f"web_application should have 2 ACT-only specialists post "
+        f"iter-Q5.10; got {len(web)}: {sorted(web)}"
     )
 
 
@@ -75,12 +70,20 @@ def test_web_specialist_set_drops_deep_exploit_tools_to_prepass():
         )
 
 
-def test_web_specialist_set_keeps_llm_orchestrated():
-    """scan_idor + scan_auth_flow are LLM-orchestrated (no OSS
-    substitute for session-aware authz / multi-step auth)."""
+def test_web_specialist_set_keeps_llm_orchestrated_via_umbrella():
+    """iter-Q5.10 collapsed scan_idor + scan_auth_flow +
+    scan_business_logic under `dispatch_l2_probe(kind, **kwargs)`.
+    The 3 underlying probes are still LLM-orchestrated (no OSS
+    substitute) and still reachable — just through the umbrella, not
+    as separate catalog entries."""
     web = _MINIMAL_TOOLS_BY_TARGET_TYPE["web_application"]
-    assert "scan_idor" in web
-    assert "scan_auth_flow" in web
+    assert "dispatch_l2_probe" in web
+    # Underlying probes are HIDDEN from the LLM-visible catalog
+    # (per the collapse). They stay registered for orchestrator-mode
+    # dispatch + the umbrella's internal routing.
+    assert "scan_idor" not in web
+    assert "scan_auth_flow" not in web
+    assert "scan_business_logic" not in web
 
 
 def test_web_specialist_set_keeps_http_primitive():
@@ -113,17 +116,15 @@ def test_web_specialist_set_drops_prepass_duplicates():
 # ---------------------------------------------------------------------------
 
 
-def test_api_specialist_set_has_3_tools():
-    """iter-37.14 had 9 specialists. iter-Q5.3 dropped 5 OSS wrappers
-    (sqlmap, smuggler, hydra, ffuf, schemathesis) → 4. iter-Q5.5
-    moved map_graphql_inql to prepass → 3 specialists (scan_idor,
-    scan_auth_flow, send_request).
-
-    Maintenance note for future Q5.10: scan_idor + scan_auth_flow
-    collapse under dispatch_l2_probe → 2 specialists."""
+def test_api_specialist_set_has_2_tools():
+    """iter-37.14 had 9 specialists. Sequential reductions:
+      iter-Q5.3: dropped 5 OSS wrappers → 4
+      iter-Q5.5: moved map_graphql_inql to prepass → 3
+      iter-Q5.10: collapsed scan_idor + scan_auth_flow → 2
+    Final: dispatch_l2_probe + send_request."""
     api = _MINIMAL_TOOLS_BY_TARGET_TYPE["api"]
-    assert len(api) == 3, (
-        f"api should have 3 ACT-only specialists post iter-Q5.5; "
+    assert len(api) == 2, (
+        f"api should have 2 ACT-only specialists post iter-Q5.10; "
         f"got {len(api)}: {sorted(api)}"
     )
 
