@@ -152,36 +152,36 @@ L2 catalog (≤ 10 tools per asset type)
 
 **The rule for adding a new L2 tool:** name the bucket. If you can't — and especially if the proposed tool's job is "let the LLM declare a thought / plan / preference" — the work belongs in the LLM's response text, with the commit folded into an existing emission tool's parameter set. Tools that don't fit either belong in `anchor_prepass` (L1 detection) or as a terminal auto-artifact in `finish_scan`.
 
-### 1.5.8 Per-asset L2 catalog (first-principles target)
+### 1.5.8 Per-asset L2 catalog (shipped reality, post-Q5.15)
 
-Target state after iter-Q6.x ships (see `docs/proposals/2026-05-27-l2-from-first-principles.md`):
+Current shipped state (Q5.1–Q5.6, Q5.10, Q5.11/11b, Q5.12, Q5.15):
 
-| Asset | READ STATE | FETCH EXTERNAL | RE-DISPATCH | COMMIT + PRIMITIVES | **Total** |
-|---|---|---|---|---|---|
-| `web_application` | workflow_status, list_pending_findings, get_finding | query_threat_intel, lookup_compliance_mapping | rescan, dispatch_l2_probe | create_vulnerability_report, finish_scan, send_request | **10** |
-| `api` | same | same | rescan, dispatch_l2_probe | create_vulnerability_report, finish_scan, send_request | **10** |
-| `repository` / `local_code` | same | same | rescan, build_code_map | create_vulnerability_report, finish_scan, terminal_execute | **10** |
-| `container_image` | same | same | rescan | create_vulnerability_report, finish_scan, terminal_execute | **9** |
-| `ip_address` | same | same | rescan | create_vulnerability_report, finish_scan, send_request, terminal_execute | **10** |
-| `domain` | same | same | rescan | create_vulnerability_report, finish_scan, send_request | **9** |
+| Asset | CORE (6) | Specialists | **Total** |
+|---|---|---|---|
+| `web_application` | workflow_status, list_pending_findings, get_finding, think, create_vulnerability_report, finish_scan | dispatch_l2_probe, send_request | **8** |
+| `api` | same | dispatch_l2_probe, send_request | **8** |
+| `repository` / `local_code` | same | build_code_map, taint_analysis, verify_credentials_trufflehog, terminal_execute | **10** |
+| `container_image` | same | scan_image_dockle, terminal_execute | **8** |
+| `ip_address` | same | send_request, terminal_execute | **8** |
+| `domain` | same | send_request, terminal_execute | **8** |
 
-Universal: 3 READ STATE + 2 FETCH EXTERNAL + 1 RE-DISPATCH (rescan) + 2 COMMIT = **8 universal tools.** Per-asset add 1–2 from `{dispatch_l2_probe, build_code_map}` + 1–2 primitives = **9–10 total.**
+All 6 asset types ≤ 10 (Invariant L2-CAP honored). CI gate:
+`tests/agents/lead_agent/test_l2_cap_invariant.py`.
 
-Every deep-exploit OSS wrapper (sqlmap, dalfox, hydra, ffuf, smuggler, nuclei, nmap, httpx, subfinder, checkdmarc, dnstwist, mobsfscan, schemathesis, …) fires in `anchor_prepass`, not on LLM choice. The LLM only sees state-readers, real-time fetchers, re-dispatch primitives, and commit tools.
+The FETCH EXTERNAL bucket (`query_threat_intel`, `lookup_compliance_mapping`) is still pending (Q5.7 + Q5.8). The RE-DISPATCH bucket has only `dispatch_l2_probe` shipped; `rescan` (Q5.9) is pending. Customer-context per-scan config (Q5.13) and recon-artifact access (Q5.14) are pending. These iters can land without changing the cap arithmetic — see `docs/proposals/2026-05-27-l2-tool-cap-and-translation-toolkit.md` §8 for the remaining iter sequence.
 
 ### 1.5.9 What this catalog deliberately drops
 
-The post-Q5 plan included `think`, `propose_chain`, and `prioritize_findings`. None survive the first-principles filter:
+The post-Q5 plan included `propose_chain` and `prioritize_findings` as standalone tools. Neither survives the first-principles filter:
 
-| Tool | Bucket attempted | Why it's wrong | What replaces it |
-|---|---|---|---|
-| `think` | REASONING | Pure no-op echo. LLM can think in response text. | Capture `assistant_text` turns into `run_summary.lead_reasoning_trace[]` — no LLM-visible tool. |
-| `propose_chain` | REASONING | Chain narrative IS the LLM's response. | `chain_summary` parameter on `create_vulnerability_report`. |
-| `prioritize_findings` | REASONING | Customer ranking IS the LLM's response. | `customer_priority: int` parameter on `create_vulnerability_report`. |
+| Tool | Why wrong | What replaces it |
+|---|---|---|
+| `propose_chain` | Chain narrative IS the LLM's response | `chain_summary` parameter on `create_vulnerability_report` (Q5.11) |
+| `prioritize_findings` | Customer ranking IS the LLM's response | `customer_priority: int` parameter on `create_vulnerability_report` (Q5.11) |
 
-The REASONING bucket from the original Q5 taxonomy is **deliberately empty** under first principles. Every tool the LLM sees does something the LLM can't do alone.
+`think` survives — pre-Q5.15 it was a no-op echo, but Q5.15 converted it to persist to `run_summary.lead_reasoning_trace[]`. The PERSISTENCE side-effect is a legitimate system-of-record commit; that's what makes it a real tool now.
 
-**Historical state (pre-Q5, as of 2026-05-27):** web=13, api=14, repo=10, container=7, ip=11, domain=11 — 4 of 6 asset types violated the cap, AND the FETCH EXTERNAL bucket was empty so every CV-report carried training-data-stale threat metadata. iter-Q6.x is the remediation (replaces the originally-planned Q5.6 + Q5.7).
+**Historical state (pre-Q5, as of 2026-05-27):** web=13, api=14, repo=10, container=7, ip=11, domain=11 — 4 of 6 asset types violated the cap. Q5.3 + Q5.4 + Q5.5 + Q5.6 + Q5.10 closed the cap on all 6.
 
 ---
 
