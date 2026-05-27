@@ -126,7 +126,12 @@ services:
       #   STRIX_IMAGE=strix-sandbox:fork-4f3f93c \
       #   docker compose --profile sandbox up
       STRIX_SANDBOX_MODE: ${STRIX_SANDBOX_MODE:-false}
-      STRIX_IMAGE: ${STRIX_IMAGE:-ghcr.io/usestrix/strix-sandbox:0.1.13}
+      # ClatTribe fork builds its own sandbox image locally — the
+      # upstream `ghcr.io/usestrix/strix-sandbox:0.1.13` tag is NOT
+      # mirrored to ClatTribe. Build via:
+      #   docker build -t strix-sandbox:local -f containers/Dockerfile .
+      # then leave STRIX_IMAGE unset, or override per-deploy.
+      STRIX_IMAGE: ${STRIX_IMAGE:-strix-sandbox:local}
       # Single-lead architecture is the testing default (per
       # docs/wrapper-integration.md §6 + the 95%-idle wait_for_message
       # incident in legacy mode). Override to `legacy` only when

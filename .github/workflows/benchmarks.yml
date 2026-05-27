@@ -67,9 +67,17 @@ jobs:
           # python -m pip install -e .[dev]
           python -m pip install pyyaml
 
-      - name: Pull strix sandbox image
+      - name: Build strix sandbox image
+        # ClatTribe fork builds its own — the upstream
+        # ghcr.io/usestrix/strix-sandbox:0.1.13 tag is NOT mirrored.
+        # Container build is bounded (~5 min on cold cache) so the
+        # build runs every CI invocation rather than relying on a
+        # registry pull.
         run: |
-          docker pull ghcr.io/usestrix/strix-sandbox:0.1.13
+          docker build \
+            -t strix-sandbox:local \
+            -f containers/Dockerfile \
+            .
 
       - name: Run benchmarks
         env:
