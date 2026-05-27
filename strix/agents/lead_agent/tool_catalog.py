@@ -545,20 +545,14 @@ _MINIMAL_TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "send_request",
     }),
     "api": frozenset({
-        # iter-Q5.3 — same migration as web_application. sqlmap /
-        # smuggler / hydra / ffuf / schemathesis now fire in
+        # iter-Q5.3 + Q5.5 migration complete. sqlmap / smuggler / hydra /
+        # ffuf / schemathesis / map_graphql_inql now fire in
         # anchor_prepass. The lead re-fires on candidates via
         # rescan(...) (Q5.9).
         #
         # === L2-NATIVE DETECTION ===
         "scan_idor",
         "scan_auth_flow",
-        # GraphQL-specific deep work. Per the L2 audit
-        # (docs/proposals/2026-05-27-l2-tool-audit.md §11), this is
-        # actually an OSS wrapper and should move to prepass in Q5.5.
-        # Kept here for Q5.3 to avoid bundling unrelated work; the
-        # L2-CAP test xfail for `api` lifts when Q5.5 finishes the move.
-        "map_graphql_inql",
         # === PRIMITIVE escape hatch ===
         "send_request",
     }),
@@ -585,13 +579,12 @@ _MINIMAL_TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_mobile_mobsfscan",        # iter-37.14
     }),
     "ip_address": frozenset({
-        # ip_address has only a thin prepass (probe_open_tcp_ports
-        # + per-port banner probes) — the LLM still needs nmap +
-        # httpx + nuclei in catalog. Unchanged from iter-37.2.
-        "fingerprint_services_nmap",    # nmap
-        "probe_hosts_httpx",
-        "scan_nuclei_templates",
-        "tls_audit",
+        # iter-Q5.4: fingerprint_services_nmap + probe_hosts_httpx +
+        # scan_nuclei_templates + tls_audit moved to _ANCHORS_IP. Per
+        # CLAUDE.md §1.5 — recon and OSS signature detection fire
+        # deterministically in prepass; the L2 lead reads results via
+        # list_pending_findings.
+        # === PRIMITIVE escape hatches (per-asset) ===
         "send_request",
         "terminal_execute",
     }),
@@ -603,14 +596,14 @@ _MINIMAL_TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "terminal_execute",             # docker save / mount inspection
     }),
     "domain": frozenset({
-        # No prepass for domain — LLM drives all recon. Unchanged
-        # from iter-37.2.
-        "domain_recon_pipeline",        # subfinder + bbot
-        "enumerate_subdomains_subfinder",
-        "scan_nuclei_templates",
-        "scan_dns_hygiene_checkdmarc",  # checkdmarc
-        "scan_typosquats_dnstwist",     # dnstwist
+        # iter-Q5.5: domain_recon_pipeline + subfinder + nuclei +
+        # checkdmarc + dnstwist moved to _ANCHORS_DOMAIN. Per CLAUDE.md
+        # §1.5 — domain recon fires deterministically in prepass.
+        # === PRIMITIVE escape hatches ===
         "send_request",
+        # iter-Q5.12: terminal_execute added to domain catalog (was
+        # missing) — needed for ad-hoc dig / host / whois queries.
+        "terminal_execute",
     }),
 }
 

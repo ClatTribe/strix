@@ -117,12 +117,34 @@ def test_web_application_extends_api_with_dom_specialists() -> None:
     assert "dom_xss_static_probe" in web_names
 
 
-def test_domain_and_ip_address_have_empty_anchor_lists() -> None:
-    """No L1 signature corpus applies directly to a domain root or
-    bare IP — we fall through to the lead loop for recon-driven
-    surface mapping."""
-    assert _ANCHORS_BY_TARGET_TYPE["domain"] == []
-    assert _ANCHORS_BY_TARGET_TYPE["ip_address"] == []
+def test_domain_and_ip_address_have_anchor_coverage() -> None:
+    """iter-Q5.4/Q5.5 inverted the prior behaviour. Pre-Q5: domain +
+    IP fell through to the lead loop with no prepass coverage and the
+    LLM drove recon via catalog tools. Post-Q5: the OSS recon tools
+    (nmap / httpx / nuclei / tls_audit for IP; subfinder / checkdmarc /
+    dnstwist / nuclei / domain_recon_pipeline for domain) fire
+    deterministically per CLAUDE.md §1.5 — they're L1 detection, not
+    LLM-choice work."""
+    assert len(_ANCHORS_BY_TARGET_TYPE["ip_address"]) > 0
+    ip_anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["ip_address"]}
+    for name in (
+        "fingerprint_services_nmap",
+        "probe_hosts_httpx",
+        "scan_nuclei_templates",
+        "tls_audit",
+    ):
+        assert name in ip_anchors, f"{name} missing from _ANCHORS_IP"
+
+    assert len(_ANCHORS_BY_TARGET_TYPE["domain"]) > 0
+    domain_anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["domain"]}
+    for name in (
+        "domain_recon_pipeline",
+        "enumerate_subdomains_subfinder",
+        "scan_dns_hygiene_checkdmarc",
+        "scan_typosquats_dnstwist",
+        "scan_nuclei_templates",
+    ):
+        assert name in domain_anchors, f"{name} missing from _ANCHORS_DOMAIN"
 
 
 # ---------------------------------------------------------------------------
@@ -190,18 +212,26 @@ def test_unknown_target_type_skipped_cleanly() -> None:
     assert summary.tools_run == []
 
 
-def test_domain_target_skipped_with_documented_reason() -> None:
-    """domain targets have no L1 signature corpus — must skip with
-    a clear reason so the lead loop runs unaffected."""
-    summary = asyncio.run(run_oss_anchor_prepass(
-        target_type="domain",
-        target_value="example.com",
-        workspace_path="",
-        agent_state=mock.Mock(),
-    ))
-    assert summary.skipped_reason is not None
-    assert "no L1 signature corpus" in summary.skipped_reason
-    assert summary.tools_run == []
+def test_domain_target_runs_recon_prepass() -> None:
+    """iter-Q5.5: domain assets now have L1 anchor coverage
+    (subfinder / checkdmarc / dnstwist / nuclei / domain_recon_pipeline).
+    Pre-Q5.5 this test asserted the prepass skipped with a "no L1
+    signature corpus" reason. The prepass now invokes the OSS recon
+    tools; we mock the executor to avoid hitting the network."""
+    with mock.patch("strix.tools.executor.execute_tool") as mock_exec:
+        mock_exec.return_value = {"success": True, "status": "ok"}
+        summary = asyncio.run(run_oss_anchor_prepass(
+            target_type="domain",
+            target_value="example.com",
+            workspace_path="",
+            agent_state=mock.Mock(),
+        ))
+    # No skipped_reason — the prepass actually ran.
+    assert summary.skipped_reason is None
+    # At least one tool fired (mock returns success for all).
+    assert len(summary.tools_run) > 0
+    # The first tool fired should be the domain pipeline orchestrator.
+    assert "domain_recon_pipeline" in summary.tools_run
 
 
 def test_local_code_prepass_invokes_all_anchors_in_order() -> None:

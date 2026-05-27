@@ -113,18 +113,17 @@ def test_web_specialist_set_drops_prepass_duplicates():
 # ---------------------------------------------------------------------------
 
 
-def test_api_specialist_set_has_4_tools():
+def test_api_specialist_set_has_3_tools():
     """iter-37.14 had 9 specialists. iter-Q5.3 dropped 5 OSS wrappers
-    (sqlmap, smuggler, hydra, ffuf, schemathesis) to anchor_prepass
-    per CLAUDE.md §1.5 → 4 specialists (scan_idor, scan_auth_flow,
-    map_graphql_inql, send_request).
+    (sqlmap, smuggler, hydra, ffuf, schemathesis) → 4. iter-Q5.5
+    moved map_graphql_inql to prepass → 3 specialists (scan_idor,
+    scan_auth_flow, send_request).
 
-    Maintenance note for future Q5.5: map_graphql_inql is an OSS
-    wrapper too and moves to prepass in Q5.5 → 3 specialists. And
-    Q5.10 collapses scan_idor + scan_auth_flow → 2 specialists."""
+    Maintenance note for future Q5.10: scan_idor + scan_auth_flow
+    collapse under dispatch_l2_probe → 2 specialists."""
     api = _MINIMAL_TOOLS_BY_TARGET_TYPE["api"]
-    assert len(api) == 4, (
-        f"api should have 4 ACT-only specialists post iter-Q5.3; "
+    assert len(api) == 3, (
+        f"api should have 3 ACT-only specialists post iter-Q5.5; "
         f"got {len(api)}: {sorted(api)}"
     )
 
@@ -146,11 +145,18 @@ def test_api_specialist_drops_deep_exploit_tools_to_prepass():
         )
 
 
-def test_api_specialist_keeps_graphql_specific():
-    """GraphQL deep work (InQL) has no OSS substitute for fine-
-    grained schema mutation testing."""
+def test_api_specialist_drops_graphql_inql_to_prepass():
+    """iter-Q5.5: map_graphql_inql moved from L2 catalog to
+    anchor_prepass per CLAUDE.md §1.5 — it's an OSS wrapper (inql
+    CLI), not L2-native. Companion to the lighter
+    discover_graphql_endpoints already in prepass."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
     api = _MINIMAL_TOOLS_BY_TARGET_TYPE["api"]
-    assert "map_graphql_inql" in api
+    api_anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["api"]}
+    assert "map_graphql_inql" not in api
+    assert "map_graphql_inql" in api_anchors
 
 
 def test_api_specialist_drops_prepass_duplicates():
@@ -240,20 +246,50 @@ def test_container_specialist_drops_trivy_in_catalog():
 # ---------------------------------------------------------------------------
 
 
-def test_ip_address_keeps_recon_in_catalog():
-    """ip_address has only thin prepass (port discovery + banner
-    probes) — LLM still needs nmap/httpx/nuclei in catalog."""
+def test_ip_address_drops_recon_to_prepass():
+    """iter-Q5.4: nmap / httpx / nuclei / tls_audit moved from ip_address
+    L2 catalog to _ANCHORS_IP. Per CLAUDE.md §1.5 — tools are LLM's
+    hands, not its brain. ip recon now fires deterministically."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
     tools = _MINIMAL_TOOLS_BY_TARGET_TYPE["ip_address"]
-    assert "fingerprint_services_nmap" in tools
-    assert "probe_hosts_httpx" in tools
-    assert "scan_nuclei_templates" in tools
+    ip_anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["ip_address"]}
+    for prepass_tool in (
+        "fingerprint_services_nmap",
+        "probe_hosts_httpx",
+        "scan_nuclei_templates",
+        "tls_audit",
+    ):
+        assert prepass_tool not in tools, (
+            f"{prepass_tool} should be prepass-only post Q5.4"
+        )
+        assert prepass_tool in ip_anchors, (
+            f"{prepass_tool} missing from _ANCHORS_IP"
+        )
 
 
-def test_domain_keeps_recon_in_catalog():
-    """domain has no prepass — LLM drives all recon."""
+def test_domain_drops_recon_to_prepass():
+    """iter-Q5.5: domain_recon_pipeline / subfinder / nuclei / checkdmarc /
+    dnstwist moved from domain L2 catalog to _ANCHORS_DOMAIN."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
     tools = _MINIMAL_TOOLS_BY_TARGET_TYPE["domain"]
-    assert "domain_recon_pipeline" in tools or "enumerate_subdomains_subfinder" in tools
-    assert "scan_nuclei_templates" in tools
+    domain_anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["domain"]}
+    for prepass_tool in (
+        "domain_recon_pipeline",
+        "enumerate_subdomains_subfinder",
+        "scan_nuclei_templates",
+        "scan_dns_hygiene_checkdmarc",
+        "scan_typosquats_dnstwist",
+    ):
+        assert prepass_tool not in tools, (
+            f"{prepass_tool} should be prepass-only post Q5.5"
+        )
+        assert prepass_tool in domain_anchors, (
+            f"{prepass_tool} missing from _ANCHORS_DOMAIN"
+        )
 
 
 # ---------------------------------------------------------------------------

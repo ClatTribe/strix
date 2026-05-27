@@ -206,7 +206,11 @@ def test_lead_agent_falls_back_to_all_target_types_when_scan_config_absent(
     # all appear in the union when no scan_config is supplied.
     assert "send_request" in allowlist  # web_application
     assert "build_code_map" in allowlist  # repository
-    assert "domain_recon_pipeline" in allowlist  # domain (replaces subdomain_enum_tool — OSS-anchored)
+    # iter-Q5.5 — domain_recon_pipeline moved to anchor_prepass.
+    # The domain catalog specialists are now just send_request +
+    # terminal_execute. terminal_execute is in the union from repo +
+    # container catalogs anyway.
+    assert "terminal_execute" in allowlist  # repository / container / ip / domain
 
 
 def test_lead_agent_target_types_normalised_lowercase() -> None:
