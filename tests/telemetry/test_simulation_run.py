@@ -178,6 +178,97 @@ def test_findings_counts_total_and_novel() -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# iter-Q5.28 — oss_anchor_prepass surfacing
+# ---------------------------------------------------------------------------
+
+
+def test_oss_anchor_prepass_absent_when_run_metadata_lacks_key() -> None:
+    """Default state — no anchor_prepass run, no key in output.
+    Keeps the schema minimal for runs that skip the prepass."""
+    out = build_simulation_run(_StubTracer())
+    assert "oss_anchor_prepass" not in out
+
+
+def test_oss_anchor_prepass_surfaced_when_present() -> None:
+    """When anchor_prepass ran (any target type), per-target summaries
+    must appear in simulation_run.json so "0 findings" debugging
+    has the per-tool outcome data. Without this, the bench is blind
+    to whether scan_sast / scan_sca_lockfiles / etc. ran at all,
+    succeeded with no findings, or errored — the bug iter-Q5.28
+    investigation hit on the OWASP BenchmarkJava local_code run."""
+    prepass = [
+        {
+            "target_type": "local_code",
+            "target_value": "/workspace/repo",
+            "tools_run": ["scan_sast", "scan_sca_lockfiles"],
+            "tools_succeeded": ["scan_sast"],
+            "tools_failed": [],
+            "total_findings": 17,
+            "tool_results": [
+                {
+                    "tool_name": "scan_sast",
+                    "status": "ok",
+                    "findings_count": 17,
+                    "error_reason": None,
+                },
+                {
+                    "tool_name": "scan_sca_lockfiles",
+                    "status": "partial",
+                    "findings_count": 0,
+                    "error_reason": "no lockfile found",
+                },
+            ],
+        }
+    ]
+    tracer = _StubTracer(
+        run_metadata={"oss_anchor_prepass": prepass},
+    )
+    out = build_simulation_run(tracer)
+    assert "oss_anchor_prepass" in out
+    assert out["oss_anchor_prepass"] == prepass
+
+
+def test_oss_anchor_prepass_serialization_round_trips_non_json_types() -> None:
+    """Defensive: PrepassSummary.to_dict() may carry datetime / Path /
+    other non-JSON types. The builder must round-trip via json.dumps
+    so the final simulation_run.json is always pure JSON."""
+    from datetime import datetime, timezone
+    from pathlib import Path
+    prepass = [
+        {
+            "target_type": "local_code",
+            "started_at": datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc),
+            "source_path": Path("/workspace/repo"),
+        }
+    ]
+    tracer = _StubTracer(run_metadata={"oss_anchor_prepass": prepass})
+    out = build_simulation_run(tracer)
+    assert "oss_anchor_prepass" in out
+    # Round-tripped — non-JSON types coerced to strings via default=str.
+    import json
+    serialized = json.dumps(out["oss_anchor_prepass"])
+    assert "2026-05-28" in serialized
+    assert "/workspace/repo" in serialized
+
+
+def test_oss_anchor_prepass_serialization_failure_falls_back_gracefully() -> None:
+    """If the prepass data is structurally unserializable, the key
+    is still emitted with a marker — so the absence-of-block
+    doesn't mislead future debuggers into thinking the prepass
+    didn't run."""
+    class _Unserializable:
+        def __repr__(self): raise RuntimeError("boom")
+    # Wrap in a custom object that json.dumps(default=str) also
+    # can't handle (default=str calls __str__, which calls __repr__).
+    prepass = [{"data": _Unserializable()}]
+    tracer = _StubTracer(run_metadata={"oss_anchor_prepass": prepass})
+    out = build_simulation_run(tracer)
+    # Either successfully serialized (default=str caught it) OR
+    # fallback marker emitted — both valid; the key must be present.
+    assert "oss_anchor_prepass" in out
+
+
 def test_duration_computed_from_iso_timestamps() -> None:
     tracer = _StubTracer(run_metadata={
         "start_time": "2026-05-19T10:00:00+00:00",
