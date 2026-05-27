@@ -68,7 +68,10 @@ _FIXTURE_DIR = (
     Path(__file__).parent / "fixtures" / "web" / "owasp-benchmark"
 )
 _DEFAULT_TARGET_URL = os.environ.get(
-    "OWASP_BENCH_FIXTURE_URL", "http://host.docker.internal:8080",
+    # iter-Q5.26: the fixture deploys the webapp at /benchmark/ context
+    # (cargo plugin's default behavior with our patched server.xml).
+    # Pointing strix at the root would yield a Tomcat 404 page.
+    "OWASP_BENCH_FIXTURE_URL", "http://host.docker.internal:8080/benchmark/",
 )
 _DEFAULT_EXPECTED_CSV = os.environ.get(
     "OWASP_BENCH_EXPECTED_CSV",
@@ -129,22 +132,37 @@ def _run_strix(
 
     Returns (exit_code, wall_seconds). Findings are read from the
     run_dir's vulnerabilities.json afterwards.
+
+    iter-Q5.26: corrected the invocation to match the actual strix
+    CLI (was using a stale `python -m strix.cli scan` form that
+    never existed in the shipped package). The current entry point
+    is `strix.interface.main:main` exposed as the `strix` binary;
+    the L2 Juice Shop bench at `bench_l2_juiceshop_full.py:run_strix`
+    is the canonical invocation pattern we mirror here:
+        strix -n -t <type>:<URL> -m <mode> --no-preflight
+    `-n` is non-interactive (no TTY prompts).
+    `--no-preflight` skips the host-side DNS check that fails on
+    `host.docker.internal` (per the L2 bench's own comment block).
+    `STRIX_RUN_DIR` instructs strix to write `vulnerabilities.json`
+    + `run_summary.json` under the bench's run_dir.
     """
     run_dir.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "STRIX_RUN_DIR": str(run_dir)}
-    # Conservative defaults — bench takes long enough already.
+    # Strix expects target form `<asset_type>:<url>` (the iter-19
+    # `4c23c19` runner change). For OWASP Benchmark, the asset is a
+    # web_application — the deployed Tomcat webapp.
+    target_arg = f"web_application:{target_url}"
     cmd = [
-        sys.executable, "-m", "strix.cli", "scan",
-        "--target-type", "web_application",
-        "--target", target_url,
-        "--scan-mode", scan_mode,
-        "--run-name", run_dir.name,
+        "strix", "-n",
+        "-t", target_arg,
+        "-m", scan_mode,
+        "--no-preflight",
         *extra_args,
     ]
     print(f"[bench] {' '.join(cmd)}")
     start = time.monotonic()
     proc = subprocess.run(  # noqa: S603
-        cmd, env=env, check=False,
+        cmd, cwd=run_dir, env=env, check=False,
     )
     wall = time.monotonic() - start
     return (proc.returncode, wall)
@@ -152,8 +170,33 @@ def _run_strix(
 
 def _load_findings(run_dir: Path) -> list[dict]:
     """Read vulnerabilities.json from the run dir. Returns the
-    `vulnerability_reports` list (possibly empty)."""
-    p = run_dir / "vulnerabilities.json"
+    `vulnerability_reports` list (possibly empty).
+
+    iter-Q5.26: strix actually writes findings to
+    `<run_dir>/strix_runs/<run_id>/vulnerabilities.json` (the
+    canonical location set by `strix.runtime.output_tiering`).
+    Try that path layout first; fall back to the bench's
+    direct-in-run_dir layout for `--existing-findings` callers
+    pointing at a flat dir.
+    """
+    # Strix-canonical location: cwd-relative `strix_runs/<run_id>/`.
+    strix_runs = run_dir / "strix_runs"
+    if strix_runs.is_dir():
+        # Pick the most recently modified run_id subdir.
+        candidates = sorted(
+            (p for p in strix_runs.iterdir() if p.is_dir()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for candidate in candidates:
+            vp = candidate / "vulnerabilities.json"
+            if vp.is_file():
+                p = vp
+                break
+        else:
+            p = run_dir / "vulnerabilities.json"
+    else:
+        p = run_dir / "vulnerabilities.json"
     if not p.is_file():
         return []
     try:
