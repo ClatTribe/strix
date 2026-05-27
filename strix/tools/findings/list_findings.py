@@ -250,3 +250,91 @@ def list_pending_findings(
         "truncated_tail": truncated,
         "demoted_hidden": demoted_hidden,
     }
+
+
+# ---------------------------------------------------------------------------
+# iter-Q5.6 — get_finding(id): single-finding deep read
+# ---------------------------------------------------------------------------
+
+
+@register_tool(sandbox_execution=False, provenance="framework")
+def get_finding(
+    report_id: str,
+) -> dict[str, Any]:
+    """Return the full vulnerability report for one finding ID.
+
+    Companion to `list_pending_findings` — that tool returns a compact
+    ranked catalog with ~8 fields per row; `get_finding` returns the
+    full structured report (description, evidence, code_locations,
+    chain_summary, corroborated_by, kill_chain, technical_analysis,
+    poc fields, remediation, every L1.5-enrichment block) for ONE
+    finding. Use when composing a chain narrative or writing a
+    customer-facing report and you need the full context of a
+    specific finding, vs. reading every field of every finding.
+
+    Args:
+        report_id: the `id` from a `list_pending_findings` row.
+
+    Returns:
+        ```
+        {
+          success: bool,
+          status: "ok" | "not_found" | "partial",
+          report_id: str,
+          finding: <full report dict>,  # only on ok
+          reason: str,                  # on not_found / partial
+        }
+        ```
+
+    Why this exists (CLAUDE.md §1.5.6 — tools are LLM's hands, not its
+    brain): the tracer's vulnerability_reports list lives outside the
+    LLM's conversation context. The lead can't grep it directly; it
+    needs this tool to read it. Pure READ STATE — no side-effects.
+    """
+    if not isinstance(report_id, str) or not report_id.strip():
+        return {
+            "success": False,
+            "status": "error",
+            "report_id": report_id,
+            "reason": "report_id is required (non-empty string)",
+        }
+    rid = report_id.strip()
+
+    try:
+        from strix.telemetry.tracer import get_global_tracer
+        tracer = get_global_tracer()
+        if tracer is None:
+            return {
+                "success": True,
+                "status": "partial",
+                "report_id": rid,
+                "reason": "tracer not initialised yet",
+            }
+        reports = list(getattr(tracer, "vulnerability_reports", []) or [])
+    except Exception as e:  # noqa: BLE001
+        logger.debug("get_finding tracer lookup failed: %s", e)
+        return {
+            "success": False,
+            "status": "error",
+            "report_id": rid,
+            "reason": f"tracer lookup failed: {type(e).__name__}",
+        }
+
+    for r in reports:
+        if r.get("id") == rid:
+            return {
+                "success": True,
+                "status": "ok",
+                "report_id": rid,
+                "finding": dict(r),  # shallow copy so caller can't mutate
+            }
+
+    return {
+        "success": True,
+        "status": "not_found",
+        "report_id": rid,
+        "reason": (
+            f"no vulnerability report with id={rid!r}; call "
+            f"`list_pending_findings` to see available IDs"
+        ),
+    }
