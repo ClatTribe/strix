@@ -118,7 +118,16 @@ async def _execute_tool_in_sandbox(tool_name: str, agent_state: Any, **kwargs: A
             if response_data.get("error"):
                 posthog.error("tool_execution_error", f"{tool_name}: {response_data['error']}")
                 raise RuntimeError(f"Sandbox execution error: {response_data['error']}")
-            return response_data.get("result")
+            result = response_data.get("result")
+            # iter-35.4 — extract any findings the sandbox tool emitted
+            # via tracer.add_vulnerability_report (the sandbox tracer is
+            # hookless), re-emit each on the host tracer so the full
+            # L1.5 hook chain (FP filter / surface_priority /
+            # exploitability / corroborator / post_emit_verifier) fires.
+            # Tools didn't need to be modified — this works for every
+            # sandbox tool that already calls tracer in-body.
+            result = _propagate_sandbox_findings_to_host(tool_name, result)
+            return result
         except httpx.HTTPStatusError as e:
             posthog.error("tool_http_error", f"{tool_name}: HTTP {e.response.status_code}")
             if e.response.status_code == 401:
@@ -128,6 +137,119 @@ async def _execute_tool_in_sandbox(tool_name: str, agent_state: Any, **kwargs: A
             error_type = type(e).__name__
             posthog.error("tool_request_error", f"{tool_name}: {error_type}")
             raise RuntimeError(f"Request error calling tool server: {error_type}") from e
+
+
+# iter-35.4 — fields that L1.5 hooks attach during emission. Stripped
+# before re-emission on the host so the host's hooks attach their own
+# (potentially different) values rather than inheriting the sandbox-
+# side computations (which may be partial — e.g. corroborator can't
+# see the host's existing finding set from inside the sandbox).
+_L15_HOOK_ATTACHED_FIELDS: frozenset[str] = frozenset({
+    "id", "fingerprint", "report_id",
+    "surface_priority", "exploitability",
+    "corroborated_by", "corroborators",
+    "post_emit_verifier", "verified_by_post_emit",
+    "auto_dismissed", "dismissal_reason",
+    "l15_dismissed", "l15_dismissal_reason",
+    "discovery_method",
+    "epss", "kev", "campaign",
+    "threat_intel", "threat_intel_status",
+    "merged_from", "merged_into",
+    "scan_run_id", "emitted_at",
+    "root_cause_collapsed_into",
+    "_sandbox_emitted_findings",  # never recurse the sidecar itself
+})
+
+
+def _propagate_sandbox_findings_to_host(
+    tool_name: str, result: Any,
+) -> Any:
+    """iter-35.4 — extract sandbox-emitted findings from the result
+    sidecar and re-emit each on the host tracer.
+
+    Sandbox tools historically called `tracer.add_vulnerability_report`
+    from inside their body. The sandbox-side tracer is a fresh
+    singleton without the L1.5 enrichment hook chain attached, so
+    those findings landed in a dead store — never reaching the host
+    process, never gaining surface_priority / exploitability /
+    corroborated_by annotations, never appearing in vulnerabilities.json
+    or run_summary.json.
+
+    The sandbox tool_server now captures the new findings post-call
+    and ships them back inside the result as a
+    `_sandbox_emitted_findings` list. We extract that list here, strip
+    the fields L1.5 hooks attach (they'll be recomputed by the host's
+    hooks against the host's tracer state), and replay each finding
+    through `tracer.add_vulnerability_report(**filtered)` — which
+    triggers the canonical L1.5 chain end-to-end.
+
+    Best-effort: any failure during propagation is logged + swallowed
+    so a misbehaving tool can't crash the executor.
+    """
+    # Common case: no sidecar present.
+    if not isinstance(result, dict):
+        return result
+    sidecar = result.pop("_sandbox_emitted_findings", None)
+    # Unwrap if the sandbox wrapped a non-dict result.
+    if "_sandbox_wrapped_result" in result and len(result) <= 2:
+        # Replace the wrapper with the original return value before
+        # giving it back to callers. The sidecar (already extracted)
+        # propagates separately via the host tracer.
+        result = result.get("_sandbox_wrapped_result")
+
+    if not sidecar:
+        return result
+
+    import inspect
+    try:
+        from strix.telemetry.tracer import get_global_tracer
+    except Exception:  # noqa: BLE001
+        # Tracer module not importable in this context — preserve
+        # the result and skip propagation. Findings will be visible
+        # in the sidecar if the caller cares.
+        return result
+    host_tracer = get_global_tracer()
+    if host_tracer is None:
+        return result
+
+    # Build the set of kwargs add_vulnerability_report accepts so we
+    # can filter the captured dict — extra keys would error.
+    try:
+        params = set(
+            inspect.signature(host_tracer.add_vulnerability_report).parameters,
+        ) - {"self"}
+    except (TypeError, ValueError):
+        # If signature introspection fails, fall back to a permissive
+        # core set so we don't drop findings.
+        params = {
+            "title", "severity", "description", "endpoint", "method",
+            "category", "cwe", "cve", "target", "verification_status",
+            "confidence", "code_locations",
+            "discovery_source_tool",
+        }
+
+    for raw in sidecar:
+        if not isinstance(raw, dict):
+            continue
+        kwargs = {
+            k: v for k, v in raw.items()
+            if k in params and k not in _L15_HOOK_ATTACHED_FIELDS
+        }
+        # Drop a few specific keys we never want to inherit verbatim.
+        kwargs.pop("id", None)
+        kwargs.pop("fingerprint", None)
+        kwargs.pop("report_id", None)
+        # Tag the propagation source so audit can trace which path
+        # the finding came in via.
+        try:
+            host_tracer.add_vulnerability_report(**kwargs)
+        except Exception as e:  # noqa: BLE001
+            posthog.error(
+                "sandbox_findings_propagation_error",
+                f"{tool_name}: {type(e).__name__}: {e}",
+            )
+
+    return result
 
 
 async def _execute_tool_locally(tool_name: str, agent_state: Any | None, **kwargs: Any) -> Any:

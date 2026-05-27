@@ -207,6 +207,39 @@ order. Each can mutate or drop the report:
 If you add a new hook, **append it to this list in CLAUDE.md** so the
 order is documented.
 
+### 5.1 Sandbox tools and the L1.5 chain (iter-35.4)
+
+Tools running inside the sandbox container that called
+`tracer.add_vulnerability_report` from inside their body were
+historically writing to the **sandbox-side tracer singleton** — a
+fresh, hookless instance with no L1.5 chain attached. Findings landed
+in a dead store: trajectory.jsonl + run_summary.findings_summary
+counted them, but `vulnerabilities.json` showed `count: 0`, and
+**none** of the L1.5 enrichment (FP filter, surface_priority,
+exploitability, corroborator, post_emit_verifier) fired for those
+findings. ~53 tools were affected.
+
+**iter-35.4 fix (no per-tool changes):**
+
+```
+sandbox tool calls tracer.add_vulnerability_report(...)
+   ↓ (writes to sandbox tracer singleton)
+sandbox tool_server._run_tool                            ← strix/runtime/tool_server.py
+   ↓ snapshots vulnerability_reports diff post-call
+   ↓ truncates sandbox tracer back to pre-call state
+   ↓ injects findings into result["_sandbox_emitted_findings"]
+[HTTP response]
+host _execute_tool_in_sandbox                            ← strix/tools/executor.py
+   ↓ extracts _sandbox_emitted_findings sidecar
+   ↓ strips L1.5-hook-attached fields per finding
+   ↓ host_tracer.add_vulnerability_report(**filtered)    ← L1.5 hooks fire here
+```
+
+The propagation is best-effort — any failure during re-emission is
+logged via posthog + swallowed; it never crashes the executor path.
+The sidecar key (`_sandbox_emitted_findings`) is stripped from the
+returned result so callers don't see implementation detail.
+
 ---
 
 ## 6. The bench framework (iter-31 series)

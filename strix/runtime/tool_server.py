@@ -74,7 +74,34 @@ class ToolExecutionResponse(BaseModel):
     error: str | None = None
 
 
+_tracer_lock = asyncio.Lock()
+
+
 async def _run_tool(agent_id: str, tool_name: str, kwargs: dict[str, Any]) -> Any:
+    """Run a tool inside the sandbox and capture any findings the
+    tool emits via ``tracer.add_vulnerability_report``.
+
+    iter-35.4 — sandbox tools historically called the tracer directly
+    from inside their body, but the sandbox-side tracer is a fresh,
+    hookless singleton (the L1.5 enrichment chain runs on the host's
+    tracer). The findings effectively vanished — no FP filter,
+    surface_priority, exploitability, corroborator, or
+    post_emit_verifier ran for the ~53 tools matching this pattern.
+
+    The fix: snapshot the sandbox tracer before the tool runs,
+    capture any new ``vulnerability_reports`` entries afterward,
+    truncate the sandbox tracer back to baseline (so it doesn't
+    accumulate cross-call state), and ship the captured findings
+    back to the host inside the result dict via the
+    ``_sandbox_emitted_findings`` sidecar key. The host's
+    ``_execute_tool_in_sandbox`` extracts the sidecar and re-emits
+    each finding through the host's ``tracer.add_vulnerability_report``
+    — that path runs the full L1.5 hook chain.
+
+    The lock serialises pre/post snapshots across concurrent in-flight
+    tool calls so each call sees only the findings IT emitted. Without
+    the lock, two parallel ``scan_*`` tools could mix their findings.
+    """
     from strix.tools.argument_parser import convert_arguments
     from strix.tools.context import set_current_agent_id
     from strix.tools.registry import get_tool_by_name
@@ -86,7 +113,73 @@ async def _run_tool(agent_id: str, tool_name: str, kwargs: dict[str, Any]) -> An
         raise ValueError(f"Tool '{tool_name}' not found")
 
     converted_kwargs = convert_arguments(tool_func, kwargs)
-    return await asyncio.to_thread(tool_func, **converted_kwargs)
+
+    # iter-35.4 — pre/post snapshot of the sandbox tracer to capture
+    # findings the tool emitted in-band. The lock keeps concurrent
+    # tool runs from cross-contaminating each other's captures.
+    async with _tracer_lock:
+        sandbox_tracer = _get_sandbox_tracer()
+        pre_count = (
+            len(sandbox_tracer.vulnerability_reports) if sandbox_tracer else 0
+        )
+        try:
+            result = await asyncio.to_thread(tool_func, **converted_kwargs)
+        except BaseException:
+            # Restore pre-call state on failure so a crashed tool
+            # doesn't leave half-emitted findings dangling.
+            if sandbox_tracer is not None:
+                del sandbox_tracer.vulnerability_reports[pre_count:]
+            raise
+
+        captured: list[dict[str, Any]] = []
+        if sandbox_tracer is not None and len(
+            sandbox_tracer.vulnerability_reports,
+        ) > pre_count:
+            captured = list(
+                sandbox_tracer.vulnerability_reports[pre_count:],
+            )
+            # Truncate so the sandbox tracer doesn't accumulate state
+            # across tool calls — it's not the authoritative store.
+            del sandbox_tracer.vulnerability_reports[pre_count:]
+
+    if captured:
+        # Inject the sidecar into the result so the host can re-emit
+        # with L1.5 hooks. Handles dict-shaped results (most tools)
+        # AND SpecialistResult / arbitrary objects (rare).
+        result = _attach_findings_sidecar(result, captured)
+
+    return result
+
+
+def _get_sandbox_tracer() -> Any:
+    """Return the sandbox-side tracer singleton, or None if the
+    tracer subsystem is unavailable (tests, partial init, etc.)."""
+    try:
+        from strix.telemetry.tracer import get_global_tracer
+        return get_global_tracer()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _attach_findings_sidecar(
+    result: Any, captured: list[dict[str, Any]],
+) -> Any:
+    """Inject ``_sandbox_emitted_findings`` into the tool's return
+    value so the host executor can extract and re-emit on the host
+    tracer. Dict results get a new key; non-dict results are wrapped
+    in a dict so the sidecar survives the HTTP round-trip."""
+    if isinstance(result, dict):
+        # Don't overwrite if the tool already set this key — preserve
+        # whichever value is more complete.
+        if "_sandbox_emitted_findings" not in result:
+            result["_sandbox_emitted_findings"] = captured
+        return result
+    # Non-dict result (str, list, SpecialistResult, etc.) — wrap so
+    # the sidecar travels. The host's executor handles unwrapping.
+    return {
+        "_sandbox_wrapped_result": result,
+        "_sandbox_emitted_findings": captured,
+    }
 
 
 @app.post("/execute", response_model=ToolExecutionResponse)
