@@ -353,4 +353,28 @@ class StrixAgent(BaseAgent):
                     "\n".join(prepass_blocks) + "\n\n" + task_description
                 )
 
+        # iter-Q1.4 — `STRIX_L2_DISABLED=1` ablation flag. When set,
+        # return after the prepass completes WITHOUT spawning the lead
+        # agent loop. Used by the multi-trial ablation harness to
+        # measure the L2 LLM's net contribution
+        # (`value_l2 = score_with_l2 − score_without_l2`).
+        try:
+            from benchmarks.per_target.bench_ablation_flags import (
+                is_l2_disabled,
+            )
+        except Exception:  # noqa: BLE001
+            def is_l2_disabled() -> bool:
+                return False
+        if is_l2_disabled():
+            import logging
+            logging.getLogger(__name__).info(
+                "iter-Q1.4 — STRIX_L2_DISABLED=1; "
+                "skipping agent_loop, returning prepass result only.",
+            )
+            return {
+                "status": "ok",
+                "skipped_l2": True,
+                "reason": "STRIX_L2_DISABLED=1 (iter-Q1.4 ablation)",
+            }
+
         return await self.agent_loop(task=task_description)
