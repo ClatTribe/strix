@@ -39,12 +39,15 @@ def _clean_env():
 # ---------------------------------------------------------------------------
 
 
-def test_web_specialist_set_has_5_tools():
-    """iter-37.11: trim from 10 → 5 ACT-only specialists."""
+def test_web_specialist_set_has_8_tools():
+    """iter-37.11: trim from 10 → 5 ACT-only specialists.
+    iter-37.14: promoted 3 OSS wrappers (hydra, ffuf, smuggler) →
+    8 specialists. Still well under the 50-tool decision-paralysis
+    threshold."""
     web = _MINIMAL_TOOLS_BY_TARGET_TYPE["web_application"]
-    assert len(web) == 5, (
-        f"web_application should have 5 ACT-only specialists; "
-        f"got {len(web)}: {sorted(web)}"
+    assert len(web) == 8, (
+        f"web_application should have 8 ACT-only specialists post "
+        f"iter-37.14; got {len(web)}: {sorted(web)}"
     )
 
 
@@ -94,11 +97,13 @@ def test_web_specialist_set_drops_prepass_duplicates():
 # ---------------------------------------------------------------------------
 
 
-def test_api_specialist_set_has_5_tools():
+def test_api_specialist_set_has_9_tools():
+    """iter-37.14: 5 + 4 new OSS wrappers (hydra, ffuf, schemathesis,
+    smuggler) = 9 specialists."""
     api = _MINIMAL_TOOLS_BY_TARGET_TYPE["api"]
-    assert len(api) == 5, (
-        f"api should have 5 ACT-only specialists; got {len(api)}: "
-        f"{sorted(api)}"
+    assert len(api) == 9, (
+        f"api should have 9 ACT-only specialists post iter-37.14; "
+        f"got {len(api)}: {sorted(api)}"
     )
 
 
@@ -129,12 +134,14 @@ def test_api_specialist_drops_prepass_duplicates():
 # ---------------------------------------------------------------------------
 
 
-def test_code_specialist_set_has_4_tools():
+def test_code_specialist_set_has_5_tools():
+    """iter-37.14: + scan_mobile_mobsfscan (MobSF mobile SAST) →
+    5 specialists per code asset."""
     for asset in ("repository", "local_code"):
         tools = _MINIMAL_TOOLS_BY_TARGET_TYPE[asset]
-        assert len(tools) == 4, (
-            f"{asset} should have 4 ACT-only specialists; got "
-            f"{len(tools)}: {sorted(tools)}"
+        assert len(tools) == 5, (
+            f"{asset} should have 5 ACT-only specialists post "
+            f"iter-37.14; got {len(tools)}: {sorted(tools)}"
         )
 
 
@@ -215,27 +222,30 @@ def test_domain_keeps_recon_in_catalog():
 # ---------------------------------------------------------------------------
 
 
-def test_web_total_catalog_at_or_under_10_tools():
-    """5 core (iter-37.10) + 5 specialist (iter-37.11) = 10. The
-    audit doc target (docs/tool-catalog-rationalization.md) was
-    ~8-15 per asset; we're at 10, well inside that band."""
+def test_web_total_catalog_at_or_under_13_tools():
+    """iter-37.11: 5 core + 5 specialist = 10.
+    iter-37.14: + 3 OSS wrappers (hydra/ffuf/smuggler) = 13. Still
+    well under the 50-tool decision-paralysis threshold + matches
+    the audit doc's ~8-15 band."""
     tools = get_lead_tool_catalog(target_types=["web_application"])
-    assert len(tools) <= 10, (
-        f"web_application catalog is {len(tools)} tools — iter-37.11 "
-        f"target is ≤10 (5 core + 5 specialist)."
+    assert len(tools) <= 13, (
+        f"web_application catalog is {len(tools)} tools — iter-37.14 "
+        f"target is ≤13 (5 core + 8 specialist)."
     )
 
 
-def test_api_total_catalog_at_or_under_10_tools():
+def test_api_total_catalog_at_or_under_14_tools():
+    """iter-37.14: 5 core + 9 specialist (added hydra, ffuf,
+    schemathesis, smuggler) = 14."""
     tools = get_lead_tool_catalog(target_types=["api"])
-    assert len(tools) <= 10
+    assert len(tools) <= 14
 
 
-def test_code_total_catalog_at_or_under_9_tools():
-    """5 core + 4 specialist = 9."""
+def test_code_total_catalog_at_or_under_10_tools():
+    """iter-37.14: 5 core + 5 specialist (added mobsfscan) = 10."""
     for asset in ("repository", "local_code"):
         tools = get_lead_tool_catalog(target_types=[asset])
-        assert len(tools) <= 9, f"{asset} has {len(tools)} tools"
+        assert len(tools) <= 10, f"{asset} has {len(tools)} tools"
 
 
 def test_container_total_catalog_at_or_under_7_tools():

@@ -534,6 +534,13 @@ _MINIMAL_TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         # prepass's nuclei/dispatcher didn't cover (custom auth
         # headers, multi-step chain steps, post-auth recon spot-check).
         "send_request",
+        # iter-37.14 — OSS-anchored wrappers promoted from legacy.
+        # Per the iter-37 policy ("popular OSS tools per asset for
+        # broader/deeper coverage"), these get LLM visibility so the
+        # lead can fire them on candidates surfaced by the prepass.
+        "probe_default_creds_hydra",    # hydra — creds brute (replaces in-house probe_default_creds)
+        "scan_fuzz_ffuf",               # ffuf — content/param/vhost fuzzing
+        "scan_smuggling_smuggler",      # smuggler.py — HTTP request smuggling (replaces in-house scan_request_smuggling_active)
     }),
     "api": frozenset({
         # === ACT only — recon/orient handled by anchor_prepass ===
@@ -548,6 +555,11 @@ _MINIMAL_TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "map_graphql_inql",
         # HTTP primitive
         "send_request",
+        # iter-37.14 — OSS-anchored wrappers promoted from legacy.
+        "probe_default_creds_hydra",    # hydra — replaces in-house probe_default_creds
+        "scan_fuzz_ffuf",               # ffuf — param/path discovery
+        "scan_api_schemathesis",        # schemathesis — OpenAPI property-based fuzzing
+        "scan_smuggling_smuggler",      # smuggler.py — replaces in-house scan_request_smuggling_active
     }),
     "repository": frozenset({
         # === ACT only — SAST + secrets + SCA + IaC fire in prepass ===
@@ -558,6 +570,10 @@ _MINIMAL_TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "verify_credentials_trufflehog",
         # Terminal for opening files etc.
         "terminal_execute",
+        # iter-37.14 — mobile-app SAST (MobSF). Auto-unpacks .apk/.aab
+        # via apktool, runs semgrep-style rules on Java/Kotlin/Swift
+        # source + AndroidManifest.xml audits.
+        "scan_mobile_mobsfscan",
     }),
     "local_code": frozenset({
         # Same shape as repository.
@@ -565,6 +581,7 @@ _MINIMAL_TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "taint_analysis",
         "verify_credentials_trufflehog",
         "terminal_execute",
+        "scan_mobile_mobsfscan",        # iter-37.14
     }),
     "ip_address": frozenset({
         # ip_address has only a thin prepass (probe_open_tcp_ports
