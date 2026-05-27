@@ -269,7 +269,68 @@ def create_vulnerability_report(  # noqa: PLR0912, PLR0913
     recommended_action: str | None = None,
     fix_time_estimate: str | None = None,
     proof_artifact_path: str | None = None,
+    # iter-Q5.11 — L2-audience parameters. Per CLAUDE.md §1.5.6
+    # (tools are LLM's hands, not its brain), reasoning lives in the
+    # response text; commit lives on this tool.
+    chain_summary: str | None = None,
+    customer_priority: int | None = None,
+    # iter-Q5.11b — inconclusive observation shape. Lets the lead
+    # commit "I saw a UUID in a response that could be a session ID,
+    # investigate later" without forcing a CVSS / poc / remediation
+    # set the lead doesn't have yet.
+    observation: bool = False,
 ) -> dict[str, Any]:
+    """Emit a vulnerability report (or inconclusive observation).
+
+    Q5.11 parameters:
+      - chain_summary: free-form prose describing how this finding
+        chains with others (replaces the proposed-and-rejected
+        standalone `propose_chain` tool — chain narrative IS the
+        LLM's response; only the commit needs a tool). Surfaces in
+        run_summary.chains_emitted and feeds bench_chains.
+      - customer_priority: integer 1-N (1 = highest) — re-rank for
+        THIS customer's context, distinct from intrinsic
+        severity. Replaces the proposed-and-rejected standalone
+        `prioritize_findings` tool. Feeds bench_severity.
+
+    Q5.11b parameter:
+      - observation: when True, the report is an inconclusive
+        observation (not a confirmed vulnerability). CVSS / poc /
+        remediation become OPTIONAL; severity is forced to
+        "observation" (a synthetic tier below "info"). Observations
+        surface in `list_pending_findings` only when called with
+        `include_demoted=True`. Use for "saw a suspicious shape,
+        worth investigating later" notes the LLM would otherwise
+        lose to compaction.
+    """
+    # iter-Q5.11b — observation mode relaxes required-field
+    # validation. The lead would otherwise lose inconclusive signals
+    # to compaction; this gives them a structured commit.
+    if observation:
+        # Provide synthetic minimal CVSS + poc fields so the rest of
+        # the pipeline runs uniformly. The synthetic block is marked
+        # with severity="observation" downstream so triage views
+        # can filter it.
+        if not cvss_breakdown or not cvss_breakdown.strip():
+            cvss_breakdown = (
+                "<cvss><base><AV>N</AV><AC>L</AC><PR>N</PR><UI>N</UI>"
+                "<S>U</S><C>N</C><I>N</I><A>N</A></base></cvss>"
+            )
+        if not poc_description or not poc_description.strip():
+            poc_description = "(observation only — no PoC)"
+        if not poc_script_code or not poc_script_code.strip():
+            poc_script_code = "# observation — no executable PoC"
+        if not remediation_steps or not remediation_steps.strip():
+            remediation_steps = "(observation only — pending investigation)"
+        if not technical_analysis or not technical_analysis.strip():
+            technical_analysis = (
+                f"Inconclusive observation on {target!r}. "
+                f"Surface: {description}. Next step: re-probe to "
+                f"confirm or dismiss."
+            )
+        if not impact or not impact.strip():
+            impact = "(observation — impact pending investigation)"
+
     validation_errors = _validate_required_fields(
         title=title,
         description=description,
@@ -308,6 +369,13 @@ def create_vulnerability_report(  # noqa: PLR0912, PLR0913
 
     assert parsed_cvss is not None
     cvss_score, severity, cvss_vector = calculate_cvss_and_severity(**parsed_cvss)
+
+    # iter-Q5.11b — observation-mode override. The lead committed to
+    # "I saw something worth investigating" rather than "I confirmed
+    # a vulnerability." Force the synthetic tier so triage views can
+    # filter it from confirmed findings.
+    if observation:
+        severity = "observation"
 
     try:
         from strix.telemetry.tracer import get_global_tracer
@@ -439,6 +507,9 @@ def create_vulnerability_report(  # noqa: PLR0912, PLR0913
                 recommended_action=recommended_action,
                 fix_time_estimate=fix_time_estimate,
                 proof_artifact_path=proof_artifact_path,
+                # iter-Q5.11 — L2-audience reasoning commits.
+                chain_summary=chain_summary,
+                customer_priority=customer_priority,
             )
 
             response: dict[str, Any] = {
