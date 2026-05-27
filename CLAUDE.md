@@ -474,6 +474,33 @@ Both flags wired into the strix runtime (`tracer.add_vulnerability_report` + `St
 
 ---
 
+## 6.5 The L1-only bench's sandbox-aware target rewrite (iter-Q5.21)
+
+`benchmarks/per_target/bench_l1_only.py` has two execution modes that
+demand opposite host-name rewrites in the fixture's `target` field:
+
+| Mode | What runs where | `target` rewrite |
+|---|---|---|
+| **default** (no `--with-sandbox`) | Host-side Python directly runs the prepass tools | `host.docker.internal → localhost` so host process reaches host's docker-compose ports |
+| **`--with-sandbox`** | Prepass tools dispatch into the strix-sandbox container | `localhost / 127.0.0.1 → host.docker.internal` so sandbox-side tools reach host's ports via the host-gateway alias |
+
+The sandbox is spawned with `extra_hosts={"host.docker.internal":
+"host-gateway"}` in `strix/runtime/docker_runtime.py:188`, so the
+docker-alias form is the only form sandbox-side probes can resolve to
+the host. Without the rewrite, sandbox-side `probe_open_tcp_ports`
+scans the sandbox itself (where ports 21/6379/8080 are not exposed),
+and ip/vulnerable-services regresses from recall=1.0 to 0.0.
+
+The threading is: `run_one_fixture` detects sandbox routing via
+`getattr(agent_state, "sandbox_id", None)`, passes `in_sandbox=...`
+to `resolve_all_targets` / `resolve_target`, which call
+`_rewrite_host_for_context(target, in_sandbox=...)` for every
+network target_type (`web_application`, `api`, `ip_address`).
+`local_code` / `repository` / `container_image` are unaffected. Pinned
+in `tests/benchmarks/test_bench_l1_sandbox_target_rewrite.py`.
+
+---
+
 ## 7. The L2 bench harness (juice shop full)
 
 `benchmarks/per_target/bench_l2_juiceshop_full.py` spawns the strix CLI

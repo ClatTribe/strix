@@ -410,8 +410,53 @@ def parse_expected(fixture_dir: Path) -> tuple[dict[str, Any], list[Expected]]:
     return manifest, expected
 
 
+def _rewrite_host_for_context(target: str, *, in_sandbox: bool) -> str:
+    """Rewrite host references based on the bench's execution context
+    (iter-Q5.21).
+
+    Two contexts:
+
+    - **Host execution** (`in_sandbox=False`, the default / no-sandbox
+      bench): rewrite `host.docker.internal` → `localhost` so the
+      host-side Python prepass can reach the fixture's exposed ports.
+      This is the historic behavior, preserved for the lower-bound
+      measurement.
+
+    - **Sandbox execution** (`in_sandbox=True`, `--with-sandbox`): the
+      prepass tools execute *inside* the strix-sandbox container. From
+      in there, `127.0.0.1` / `localhost` mean the sandbox itself, not
+      the host machine. Rewrite both to `host.docker.internal` so the
+      sandbox's host-gateway alias (added by
+      `strix/runtime/docker_runtime.py:188` via
+      `extra_hosts={"host.docker.internal": "host-gateway"}`) reaches
+      the host's exposed ports.
+
+    Without this guard the ip/vulnerable-services fixture went from
+    recall=1.0 (host-side) to recall=0.0 (sandbox-routed) because the
+    sandbox-side `probe_open_tcp_ports` was scanning the sandbox itself
+    rather than the host's docker-compose ports.
+    """
+    if not target:
+        return target
+    if in_sandbox:
+        # Sandbox side: rewrite host-local refs to the docker-host alias.
+        # Order: rewrite 127.0.0.1 first (more specific) then localhost,
+        # then leave host.docker.internal as a no-op.
+        return (
+            target
+            .replace("127.0.0.1", "host.docker.internal")
+            .replace("localhost", "host.docker.internal")
+        )
+    # Host side: collapse host.docker.internal → localhost. Same as
+    # pre-Q5.21 behavior.
+    return target.replace("host.docker.internal", "localhost")
+
+
 def resolve_all_targets(
-    fixture_dir: Path, manifest: dict[str, Any],
+    fixture_dir: Path,
+    manifest: dict[str, Any],
+    *,
+    in_sandbox: bool = False,
 ) -> list[tuple[str, str]]:
     """Returns a list of (target_type, target_value) the prepass
     should scan. Handles primary + `additional_targets` (paired-asset
@@ -421,10 +466,15 @@ def resolve_all_targets(
     The primary target comes first; additional targets follow in
     manifest order. Each target gets its own prepass invocation; the
     bench unions the findings across all targets before scoring.
+
+    `in_sandbox=True` (iter-Q5.21) flips the host-name rewrite from
+    `host.docker.internal → localhost` to `localhost / 127.0.0.1 →
+    host.docker.internal` so sandbox-routed tools can reach
+    host-exposed ports via the docker host-gateway alias.
     """
     out: list[tuple[str, str]] = []
     # Primary target via the single-target resolver.
-    primary = resolve_target(fixture_dir, manifest)
+    primary = resolve_target(fixture_dir, manifest, in_sandbox=in_sandbox)
     if primary[0] and primary[1]:
         out.append(primary)
 
@@ -439,20 +489,31 @@ def resolve_all_targets(
         if tt in ("local_code", "repository"):
             full = (fixture_dir / tg).resolve()
             out.append((tt, str(full)))
+        elif tt in ("web_application", "api", "ip_address"):
+            # Apply the same context-aware host rewrite as the primary.
+            out.append((tt, _rewrite_host_for_context(str(tg), in_sandbox=in_sandbox)))
         else:
             out.append((tt, str(tg)))
     return out
 
 
-def resolve_target(fixture_dir: Path, manifest: dict[str, Any]) -> tuple[str, str]:
+def resolve_target(
+    fixture_dir: Path,
+    manifest: dict[str, Any],
+    *,
+    in_sandbox: bool = False,
+) -> tuple[str, str]:
     """Pick (target_type, target_value) the prepass should scan.
 
-    For network targets (api / web_application / ip_address) we prefer
-    the manifest's `docker.wait_url` over the bare `target` field when
-    available. Fixtures typically set `target` to a sandbox-internal
-    URL like `http://host.docker.internal:5001` — that doesn't resolve
-    from host Python, but `wait_url` is the host-accessible equivalent
-    (`http://localhost:5001`).
+    For network targets (api / web_application / ip_address) the
+    fixture's `target` field is rewritten according to the bench's
+    execution context (see `_rewrite_host_for_context`):
+
+    - Host side (default): `host.docker.internal → localhost`.
+    - Sandbox side (`in_sandbox=True`, set by --with-sandbox path):
+      `localhost / 127.0.0.1 → host.docker.internal` so sandbox tools
+      reach the host's docker-compose ports via the host-gateway alias
+      (iter-Q5.21).
     """
     target_type = manifest.get("target_type", "")
     if target_type in ("local_code", "repository"):
@@ -460,8 +521,8 @@ def resolve_target(fixture_dir: Path, manifest: dict[str, Any]) -> tuple[str, st
         full = (fixture_dir / rel).resolve()
         return target_type, str(full)
     if target_type in ("web_application", "api"):
-        # Prefer the manifest's `target` field (with host.docker.internal
-        # → localhost rewrite). Fall back to wait_url if no target.
+        # Prefer the manifest's `target` field (with context-aware host
+        # rewrite). Fall back to wait_url if no target.
         #
         # We deliberately DON'T use docker.wait_url as the primary —
         # wait_url is a health-check endpoint that may point deep into
@@ -469,7 +530,7 @@ def resolve_target(fixture_dir: Path, manifest: dict[str, Any]) -> tuple[str, st
         # not the app root). Probes appended to that URL would all go to
         # the wrong place.
         target = manifest.get("target", "")
-        target = (target or "").replace("host.docker.internal", "localhost")
+        target = _rewrite_host_for_context(target or "", in_sandbox=in_sandbox)
         if target:
             return target_type, target.rstrip("/")
         # Last-ditch: take scheme://netloc from wait_url (strip the path).
@@ -478,17 +539,20 @@ def resolve_target(fixture_dir: Path, manifest: dict[str, Any]) -> tuple[str, st
         if isinstance(wait_url, str) and wait_url:
             try:
                 from urllib.parse import urlparse
-                p = urlparse(wait_url)
+                rewritten = _rewrite_host_for_context(wait_url, in_sandbox=in_sandbox)
+                p = urlparse(rewritten)
                 if p.scheme and p.netloc:
                     return target_type, f"{p.scheme}://{p.netloc}"
             except Exception:  # noqa: BLE001
                 pass
-            return target_type, wait_url.rstrip("/")
+            return target_type, _rewrite_host_for_context(
+                wait_url, in_sandbox=in_sandbox
+            ).rstrip("/")
         return target_type, ""
     if target_type == "ip_address":
-        # Same host-rewrite logic.
+        # Same context-aware host rewrite.
         target = manifest.get("target", "")
-        target = (target or "").replace("host.docker.internal", "localhost")
+        target = _rewrite_host_for_context(target or "", in_sandbox=in_sandbox)
         return target_type, target
     if target_type == "container_image":
         return target_type, manifest.get("target", "")
@@ -584,7 +648,16 @@ async def run_one_fixture(
     back to the no-sandbox `_FakeAgentState` (bench lower bound).
     """
     manifest, expected = parse_expected(fixture_dir)
-    targets = resolve_all_targets(fixture_dir, manifest)
+    # iter-Q5.21: when the prepass routes through a real sandbox
+    # (agent_state carries a sandbox_id), the L1 tools execute *inside*
+    # the strix-sandbox container. Resolve targets in that context so
+    # `127.0.0.1 / localhost` get rewritten to `host.docker.internal`
+    # (which the sandbox can reach via the host-gateway alias added in
+    # strix/runtime/docker_runtime.py:188). Without this rewrite,
+    # ip/vulnerable-services scans the sandbox itself instead of the
+    # host's docker-compose ports and recall collapses to 0.
+    _in_sandbox = bool(getattr(agent_state, "sandbox_id", None))
+    targets = resolve_all_targets(fixture_dir, manifest, in_sandbox=_in_sandbox)
     rel = fixture_dir.relative_to(REPO_ROOT) if str(fixture_dir).startswith(str(REPO_ROOT)) else fixture_dir
     primary_type, primary_value = targets[0] if targets else ("", "")
     print(f"\n=== {rel} ({primary_type}) ===", flush=True)
