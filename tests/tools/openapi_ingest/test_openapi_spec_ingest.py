@@ -506,46 +506,76 @@ def test_api_target_type_registered_in_catalog() -> None:
     assert "api" in list_target_types()
 
 
-def test_api_catalog_includes_openapi_ingest() -> None:
+def test_api_anchor_prepass_includes_openapi_ingest() -> None:
+    """Post iter-37.2: openapi_spec_ingest fires in anchor_prepass for
+    api targets, not in the LLM-visible catalog. The ingested endpoint
+    inventory feeds downstream specialists (scan_api_bola, scan_idor)
+    via SecurityContext, not via the L2 lead's tool choice."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
     from strix.agents.lead_agent.tool_catalog import get_lead_tool_catalog
+
+    anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["api"]}
+    assert "openapi_spec_ingest" in anchors
     tools = get_lead_tool_catalog(target_types=["api"])
-    assert "openapi_spec_ingest" in tools
+    assert "openapi_spec_ingest" not in tools
 
 
 def test_api_catalog_excludes_browser_dom_tools() -> None:
     """API targets don't render HTML — DOM / browser / source-map
-    tools waste budget. Verify they're dropped vs web_application.
+    tools waste budget. They're not in the api catalog.
 
-    iter-37.2 — under the minimal OSS-anchored catalog, the
-    web_application catalog includes `browser_action` for SPA-only
-    interactions (last-resort primitive), but API catalog does NOT.
-    HTML-context XSS scanner (scan_xss_dalfox) is web-only too.
+    iter-Q5.3: dalfox moved from L2 to anchor_prepass per CLAUDE.md
+    §1.5 (tools are LLM's hands, not its brain). It still fires
+    (web_application only, in prepass) — just not via LLM choice.
+    browser_action is excluded from the post-Q5 minimal catalog
+    entirely.
     """
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
     from strix.agents.lead_agent.tool_catalog import get_lead_tool_catalog
+
     api_tools = get_lead_tool_catalog(target_types=["api"])
     web_tools = get_lead_tool_catalog(target_types=["web_application"])
-    # HTML-context XSS scanner (dalfox) — web-only.
+    api_anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["api"]}
+    web_anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["web_application"]}
+
+    # dalfox: web-only deep XSS — fires in web prepass, not api prepass,
+    # and not in either LLM-visible catalog post-Q5.3.
     assert "scan_xss_dalfox" not in api_tools
-    assert "scan_xss_dalfox" in web_tools
-    # Browser/DOM tools — web-only.
+    assert "scan_xss_dalfox" not in web_tools
+    assert "scan_xss_dalfox" not in api_anchors
+    assert "scan_xss_dalfox" in web_anchors
+    # browser_action: post-Q5 minimal catalog excludes it everywhere.
     assert "browser_action" not in api_tools
-    assert "browser_action" in web_tools
+    assert "browser_action" not in web_tools
 
 
-def test_api_catalog_keeps_core_dast_specialists() -> None:
-    """The minimal API catalog (iter-37.2) keeps the OSS-anchored
-    DAST stack: nuclei (generic), sqlmap (SQLi), InQL (GraphQL),
-    plus LLM-orchestrated authz + auth tools."""
+def test_api_core_dast_specialists_fire_in_prepass() -> None:
+    """Post iter-37.x + Q5.3: the OSS-anchored DAST stack (nuclei,
+    sqlmap, InQL, tls_audit, openapi_spec_ingest) fires in
+    anchor_prepass for api targets. The L2 catalog keeps the
+    L2-native specialists (scan_idor, scan_auth_flow) and the
+    map_graphql_inql wrapper pending its Q5.5 move to prepass."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
     from strix.agents.lead_agent.tool_catalog import get_lead_tool_catalog
-    api_tools = get_lead_tool_catalog(target_types=["api"])
-    # iter-37.2 — minimal OSS-anchored detection stack
+
+    api_anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["api"]}
+    api_catalog = get_lead_tool_catalog(target_types=["api"])
+
+    # Prepass coverage (the L1-dashboard surface).
     for name in (
-        "scan_nuclei_templates",  # OSS generic detection
-        "scan_sqli_sqlmap",       # OSS SQLi (replaces in-house scan_sqli)
-        "map_graphql_inql",       # OSS GraphQL introspection
-        "scan_idor",              # LLM-orchestrated authz (BOLA/BFLA merged)
-        "scan_auth_flow",         # LLM-orchestrated auth
-        "openapi_spec_ingest",    # API endpoint inventory
-        "tls_audit",              # OSS TLS audit (testssl.sh)
+        "scan_nuclei_templates",   # OSS generic detection
+        "scan_sqli_sqlmap",        # OSS SQLi (iter-Q5.3)
+        "openapi_spec_ingest",     # API endpoint inventory
+        "tls_audit",               # OSS TLS audit (testssl.sh)
     ):
-        assert name in api_tools, f"{name} missing from api catalog"
+        assert name in api_anchors, f"{name} missing from api prepass"
+    # L2-native specialists stay in catalog (needs LLM state-reasoning,
+    # no OSS substitute).
+    for name in ("scan_idor", "scan_auth_flow", "map_graphql_inql"):
+        assert name in api_catalog, f"{name} missing from api catalog"

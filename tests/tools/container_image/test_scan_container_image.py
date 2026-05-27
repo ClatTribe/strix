@@ -466,16 +466,27 @@ def test_scan_container_image_registered_in_specialist_registry() -> None:
     assert desc.category == "container-image-specialist"
 
 
-def test_scan_container_image_in_lead_container_image_catalog() -> None:
+def test_scan_container_image_in_container_image_anchor_prepass() -> None:
+    """Post iter-37.x + Q5.3: scan_container_image (trivy) is L1
+    detection and fires in anchor_prepass. The L2 lead reads results
+    via list_pending_findings; it does not call trivy directly. Per
+    CLAUDE.md §1.5 (tools are LLM's hands, not its brain)."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
     from strix.agents.lead_agent.tool_catalog import get_lead_tool_catalog
 
+    anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["container_image"]}
+    assert "scan_container_image" in anchors
+
     catalog = get_lead_tool_catalog(target_types=["container_image"])
-    assert "scan_container_image" in catalog
     # The container_image catalog should NOT carry DAST tools — they
     # don't apply to a registry-resident artefact.
     assert "scan_xss" not in catalog
     assert "scan_sqli" not in catalog
     assert "browser_action" not in catalog
+    # trivy itself is prepass-only — not in the LLM-visible catalog.
+    assert "scan_container_image" not in catalog
 
 
 def test_lead_asset_routing_for_container_image() -> None:

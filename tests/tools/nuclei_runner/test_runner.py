@@ -233,7 +233,17 @@ def test_scan_nuclei_templates_registered() -> None:
     assert desc.category == "nuclei-runner"
 
 
-def test_scan_nuclei_templates_in_lead_web_application_catalog() -> None:
+def test_scan_nuclei_templates_in_web_application_anchor_prepass() -> None:
+    """Post iter-37.x + Q5.3: nuclei is L1 detection (always-on
+    coverage), not LLM-visible. Fires in anchor_prepass for both
+    web_application and api targets per CLAUDE.md §1.5 (tools are
+    LLM's hands, not its brain). The L2 lead reads results via
+    `list_pending_findings`; it does not call nuclei directly."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
     from strix.agents.lead_agent.tool_catalog import get_lead_tool_catalog
+    anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["web_application"]}
+    assert "scan_nuclei_templates" in anchors
     catalog = get_lead_tool_catalog(target_types=["web_application"])
-    assert "scan_nuclei_templates" in catalog
+    assert "scan_nuclei_templates" not in catalog
