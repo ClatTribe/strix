@@ -1,22 +1,36 @@
 # Strix benchmark suite — per-layer recall matrix
 
-**Status as of 2026-05-27** (post iter-Q1.5). This doc is the canonical answer to "how is strix measured, and how does each measurement compare to industry?"
+**Status as of 2026-05-28** (post iter-Q1.5b). This doc is the canonical answer to "how is strix measured, and how does each measurement compare to industry?"
 
 ## Two layers of measurement
 
 ### Layer 1: per-layer recall matrix (primary, iter-Q1 series)
 
-The Q1 proposal (`docs/proposals/2026-05-27-benchmark-suite-strategy.md`) replaced the previous single-fixture headline ("Juice Shop recall") with a per-layer matrix. Every iter PR cites the relevant layer's headline number alongside the closest neutral competitor's published score.
+The Q1 proposal (`docs/proposals/2026-05-27-benchmark-suite-strategy.md`) replaced the previous single-fixture headline ("Juice Shop recall") with a per-layer matrix. iter-Q1.5b then split the L1 row into sub-layers, because the L1 detection layer wraps fundamentally different technologies — SAST over source, DAST over deployed HTTP, SCA over lockfiles, container scanners over Docker layers, network probes over IP services — each with its own asset type, OSS-tool set, fixture, and competitor leaderboard.
 
-| Layer | Bench harness | Headline metric | Neutral comparison |
-|---|---|---|---|
-| **L0** — signature corpus freshness | [`bench_vulhub_cve_corpus.py`](../benchmarks/per_target/bench_vulhub_cve_corpus.py) | KEV hit rate (cron pages at <90%) | n/a — cron pager threshold |
-| **L1** — OSS-tool detection | [`bench_owasp_benchmark.py`](../benchmarks/per_target/bench_owasp_benchmark.py) | Per-CWE Youden index | Veracode 51%, Checkmarx 47%, Fortify 35%, SonarQube 6%, ZAP 13% |
-| **L1.5** — enrichment value | Same as L1 with `STRIX_L15_DISABLED=1` (ablation) | Δ-Youden = L1.5's contribution | Internal |
-| **L2** — LLM chain exploitation | [`bench_webgoat_dual.py`](../benchmarks/per_target/bench_webgoat_dual.py) + [`bench_l2_juiceshop_full.py`](../benchmarks/per_target/bench_l2_juiceshop_full.py) | (detection_rate, completion_rate). chain_gap = L2 chain value | WebGoat published lesson-completion rates |
-| Multi-trial wrapper | [`bench_multi_trial.py`](../benchmarks/per_target/bench_multi_trial.py) | median + p10/p90 over N=5 trials | Single-trial bench is noise |
+Every iter PR cites the relevant sub-layer's headline number alongside the closest neutral competitor's published score.
 
-**Decision rule** (CLAUDE.md §6): every L1/L1.5 PR cites OWASP Benchmark per-CWE Youden delta; every L2 PR reports both `detection_rate` AND `completion_rate`. PRs improving L2 but regressing L1 are rejected without explicit justification.
+| Layer | Asset type | Bench harness | Tools fired (representative) | Headline metric | Neutral comparison |
+|---|---|---|---|---|---|
+| **L0** — signature corpus freshness | n/a (corpus-level) | [`bench_vulhub_cve_corpus.py`](../benchmarks/per_target/bench_vulhub_cve_corpus.py) | nuclei templates + KEV ingest | KEV hit rate (cron pages at <90%) | n/a — cron pager threshold |
+| **L1-SAST** — source-code analysis | `local_code` / `repository` | [`bench_owasp_benchmark.py`](../benchmarks/per_target/bench_owasp_benchmark.py) (rewired to `local_code` in iter-Q5.27) | semgrep, bandit, trivy fs, gitleaks, trufflehog, checkov, hadolint, mobsfscan | Per-CWE Youden index, OWASP Benchmark v1.2 (2,740 Java cases) | **Veracode 51%, Checkmarx 47%, Fortify 35%, SonarQube 6%** (see §6.1.1 — ZAP 13% on the same leaderboard is the DAST result, not the SAST comparison) |
+| **L1-DAST** — deployed-webapp probing | `web_application` | [`bench_wavsep.py`](../benchmarks/per_target/bench_wavsep.py) *(iter-Q5.28, not yet shipped)* | katana, nuclei, sqlmap, dalfox, smuggler, ffuf, scan_sqli, scan_xss, scan_idor, scan_auth_flow, csrf_check, cors_deep_check, fingerprint_tech_stack, openapi_spec_ingest | Per-class TP/FP, WAVSEP corpus (~5,000 cases) | Acunetix, Burp Active Scan, Netsparker — Shay Chen's DAST tool comparison |
+| **L1-API** — deployed-API probing | `api` | [`bench_l1_only.py`](../benchmarks/per_target/bench_l1_only.py) on `api/vampi`, `api/crapi` | openapi_spec_ingest, schemathesis, scan_api_bola/bfla/mass_assignment, map_graphql_inql, scan_idor + OWASP Top-10 specialists | Recall on fixture `expected.yaml.must_find[]` | n/a — no neutral leaderboard. References: VAmPI / crAPI working-group writeups |
+| **L1-SCA** — dependency / lockfile vulns | `local_code` (with lockfiles) | [`bench_l1_only.py`](../benchmarks/per_target/bench_l1_only.py) on `code/sca-*` | trivy fs, grype, osv-scanner | Recall on must-find CVEs in known-vulnerable lockfiles | Snyk / Dependabot self-published — no neutral leaderboard |
+| **L1-container** — image-layer vulns | `container_image` | [`bench_l1_only.py`](../benchmarks/per_target/bench_l1_only.py) on `container/nginx-vuln` | trivy image, dockle | Recall on image CVEs + misconfigs | Trivy / Snyk Container / Anchore self-published — no neutral leaderboard |
+| **L1-network** — IP-service probing | `ip_address` | [`bench_l1_only.py`](../benchmarks/per_target/bench_l1_only.py) on `ip/vulnerable-services` (+ Vulhub recipes via iter-Q5.30) | nmap, httpx, scan_nuclei_templates, tls_audit | Recall on misconfig + service-CVE corpus | Tenable / Qualys / Rapid7 — no open neutral scorecard |
+| **L1-recon** — asset discovery | `domain` | n/a (no fixture yet, iter-Q5.31 pending) | subfinder, bbot, checkdmarc, dnstwist, domain_recon_pipeline | Subdomain / asset discovery rate | subfinder vs amass vs assetfinder published rates — no neutral leaderboard |
+| **L1.5** — enrichment value | (per-asset, same as L1 sub-layer) | Same harness as the L1 sub-layer with `STRIX_L15_DISABLED=1` | The L1.5 hook chain (FP filter, surface_priority, exploitability, corroborator, post_emit_verifier, threat_intel.enrich) | Δ-headline-metric at each sub-layer | Internal — measures own value |
+| **L2** — LLM chain exploitation | (per-asset) | [`bench_webgoat_dual.py`](../benchmarks/per_target/bench_webgoat_dual.py) + [`bench_l2_juiceshop_full.py`](../benchmarks/per_target/bench_l2_juiceshop_full.py) | LLM lead agent + per-asset specialist catalog (≤12 tools, CLAUDE.md §1.5.8) | (detection_rate, completion_rate). chain_gap = L2 chain value | WebGoat published lesson-completion rates |
+| Multi-trial wrapper | (any) | [`bench_multi_trial.py`](../benchmarks/per_target/bench_multi_trial.py) | n/a | median + p10/p90 over N=5 trials | Single-trial bench is noise |
+
+#### 6.1.1 Why OWASP Benchmark v1.2 sits at L1-SAST, not L1-DAST
+
+The published OWASP Benchmark leaderboard mixes SAST and DAST tools scoring against the *same Java corpus*. Veracode/Checkmarx/Fortify/SonarQube analyze the .java source files directly (SAST). ZAP probes the deployed Tomcat webapp over HTTP (DAST). The leaderboard reports both, but they're not directly comparable — ZAP at 13% reflects the natural ceiling for *DAST against a corpus designed around source-level taint patterns*, not a ZAP-specific gap. Strix's L1-DAST sub-layer would land in the same single-digit-to-teens band against the deployed BenchmarkJava webapp because that's a structural property of DAST on this corpus, not a strix gap.
+
+The right comparison: point strix at the *source tree* (`local_code`) where semgrep + bandit do their work, and compare to the SAST cohort (Veracode/Checkmarx/Fortify/SonarQube). iter-Q5.27 (open) rewires the OWASP fixture this way. iter-Q5.28 (open) adds WAVSEP as a proper L1-DAST headline so DAST has its own neutral competitor scoring too.
+
+**Decision rule** (sub-layer-aware, iter-Q1.5b): every L1-SAST iter PR cites OWASP Benchmark per-CWE Youden delta as `local_code`. Every L1-DAST iter PR cites WAVSEP delta (when shipped; fallback: `bench_l1_only.py` on the relevant web fixtures). Every L2 iter PR reports both `detection_rate` AND `completion_rate`. PRs improving L2 but regressing L1 at any sub-layer are rejected without explicit justification. A PR touching multiple sub-layers must cite the delta for each.
 
 ### Layer 2: per-fixture must_find recall (secondary, iter-28 series)
 
@@ -32,9 +46,28 @@ Below this header — the original per-fixture must_find tables. These are still
 ## How to run each bench
 
 ```bash
-# L1 — OWASP Benchmark v1.2 (Java SAST, ~3000 test cases)
+# L1-SAST — OWASP Benchmark v1.2 (Java source, ~2740 test cases)
+# Post-iter-Q5.27: runs against the cloned source tree, not the deployed webapp.
 docker compose -f benchmarks/per_target/fixtures/web/owasp-benchmark/docker-compose.yml build
 python -m benchmarks.per_target.bench_owasp_benchmark --scan-mode standard
+
+# L1-DAST — WAVSEP (~5000 deployed test cases) — iter-Q5.28, not yet shipped
+# python -m benchmarks.per_target.bench_wavsep --scan-mode standard
+# Fallback today: per-fixture web recall via bench_l1_only.py
+python -m benchmarks.per_target.bench_l1_only --with-sandbox --fixture web/juiceshop
+
+# L1-API — VAmPI / crAPI per-fixture recall
+python -m benchmarks.per_target.bench_l1_only --with-sandbox --fixture api/vampi
+python -m benchmarks.per_target.bench_l1_only --with-sandbox --fixture api/crapi
+
+# L1-SCA — lockfile-aware code fixtures
+python -m benchmarks.per_target.bench_l1_only --with-sandbox --fixture code/sca-vuln-deps
+
+# L1-container — image-layer scanning
+python -m benchmarks.per_target.bench_l1_only --with-sandbox --fixture container/nginx-vuln
+
+# L1-network — IP-service detection
+python -m benchmarks.per_target.bench_l1_only --with-sandbox --fixture ip/vulnerable-services
 
 # L2 — WebGoat dual mode (detection ∧ completion)
 python -m benchmarks.per_target.bench_webgoat_dual --scan-mode standard
@@ -48,7 +81,7 @@ python -m benchmarks.per_target.bench_vulhub_cve_corpus
 # Multi-trial wrapper around any of the above
 python -m benchmarks.per_target.bench_multi_trial --bench owasp_benchmark --trials 5
 
-# L1.5 ablation — measure L1.5 hooks' contribution
+# L1.5 ablation — measure L1.5 hooks' contribution at the relevant sub-layer
 STRIX_L15_DISABLED=1 python -m benchmarks.per_target.bench_multi_trial \
     --bench owasp_benchmark --trials 5 --output no_l15.json
 python -m benchmarks.per_target.bench_multi_trial \
