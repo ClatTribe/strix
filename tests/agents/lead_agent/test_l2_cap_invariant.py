@@ -71,13 +71,13 @@ REGISTERED_ASSET_TYPES: tuple[str, ...] = (
 # Target end-state (post-Q5.5, per CLAUDE.md §1.5.8):
 #   web=10, api=10, repo=10, local_code=10, container=9, ip=10, domain=10
 _BASELINE_CATALOG_COUNTS: dict[str, int] = {
-    "web_application": 8,    # iter-Q5.10: collapsed scan_idor + scan_auth_flow → dispatch_l2_probe (9 → 8)
-    "api": 8,                # iter-Q5.10: same collapse (9 → 8)
-    "repository": 10,        # unchanged
-    "local_code": 10,        # unchanged
-    "container_image": 8,    # unchanged
-    "ip_address": 8,         # unchanged
-    "domain": 8,             # unchanged
+    "web_application": 9,    # iter-Q5.7: +query_threat_intel to CORE (8 → 9)
+    "api": 9,                # iter-Q5.7: +query_threat_intel (8 → 9)
+    "repository": 10,        # iter-Q5.7: +query_threat_intel, -taint_analysis (10 → 10)
+    "local_code": 10,        # iter-Q5.7: same
+    "container_image": 9,    # iter-Q5.7: +query_threat_intel (8 → 9)
+    "ip_address": 9,         # iter-Q5.7: +query_threat_intel (8 → 9)
+    "domain": 9,             # iter-Q5.7: +query_threat_intel (8 → 9)
 }
 
 

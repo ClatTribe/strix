@@ -141,7 +141,10 @@ def test_multi_target_union_catalog_includes_both_asset_types():
     # Survivors: build_code_map/taint_analysis/verify_credentials_
     # trufflehog/terminal_execute).
     assert "build_code_map" in catalog
-    assert "taint_analysis" in catalog
+    # iter-Q5.7 dropped taint_analysis from repo catalog (in-house SAST
+    # violating CLAUDE.md §11.1; semgrep in prepass has broader coverage).
+    # verify_credentials_trufflehog stays — it's a verifier, not detector.
+    assert "verify_credentials_trufflehog" in catalog
     # Core tools in both (iter-37.10 minimal core).
     assert "list_pending_findings" in catalog
     assert "create_vulnerability_report" in catalog
