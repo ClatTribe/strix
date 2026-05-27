@@ -68,6 +68,11 @@ _CORE_TOOLS: frozenset[str] = frozenset({
     # iter-Q5.7 — unified threat-intel fetcher (collapses 4 wrappers).
     # FETCH EXTERNAL bucket; 24h cache.
     "query_threat_intel",
+    # iter-Q5.8 — current compliance mappings (SOC2/PCI/HIPAA/GDPR/FedRAMP).
+    "lookup_compliance_mapping",
+    # iter-Q5.9 — re-fire an L1 OSS tool with new captured state.
+    # Allow-list + budget-capped.
+    "rescan",
     # iter-26.5 + 26.6 — dequeue & fire L1.5 auto-confirmations
     # (SAST→DAST) and finding-triggered probe bundles. Idempotent;
     # safe to call repeatedly between dispatches.
@@ -563,32 +568,27 @@ _MINIMAL_TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "send_request",
     }),
     "repository": frozenset({
-        # iter-Q5.6 + Q5.7 cap-pressure cleanup:
-        #   - scan_mobile_mobsfscan dropped (already in anchor_prepass
-        #     via iter-37.14; was a duplicate)
-        #   - taint_analysis dropped (Q5.7 cap pressure). Per the L2
-        #     audit (docs/proposals/2026-05-27-l2-tool-audit.md §3.5),
-        #     this is in-house Python-only SAST violating CLAUDE.md
-        #     §11.1 ("no in-house detection engines"). The semgrep
-        #     prepass entry has strictly broader coverage. Q5.19 will
-        #     formally retire taint_analysis after a parity bench;
-        #     this PR removes it from the LLM-visible catalog so the
-        #     cap stays honored with query_threat_intel added to CORE.
+        # Sequential cap-pressure cleanup:
+        #   iter-Q5.6: -scan_mobile_mobsfscan (prepass duplicate)
+        #   iter-Q5.7: -taint_analysis (CLAUDE.md §11.1 violation;
+        #              semgrep prepass has broader coverage)
+        #   iter-Q5.9: -verify_credentials_trufflehog (folded into
+        #              rescan allow-list — it's a verifier, fits
+        #              the rescan pattern better; lead calls
+        #              rescan(tool_name="verify_credentials_trufflehog",
+        #              target=..., captured_state={"secret_path": ...})
+        #              when it wants to confirm a specific surfaced
+        #              secret is still credentialed)
         #
         # === ACT only — SAST + secrets + SCA + IaC fire in prepass ===
         # Code reasoning primitive (LLM-orchestrated, no OSS substitute)
         "build_code_map",
-        # Verify gitleaks/SAST credentials are LIVE. Distinct from
-        # secrets_scan (which DETECTS in prepass) — this VERIFIES a
-        # surfaced secret is still credentialed.
-        "verify_credentials_trufflehog",
         # Terminal for opening files etc.
         "terminal_execute",
     }),
     "local_code": frozenset({
         # Same shape as repository.
         "build_code_map",
-        "verify_credentials_trufflehog",
         "terminal_execute",
     }),
     "ip_address": frozenset({
@@ -757,6 +757,17 @@ _MINIMAL_CORE_TOOLS: frozenset[str] = frozenset({
     # FETCH EXTERNAL bucket that was previously empty — the lead
     # no longer writes CVE/threat metadata from training-data memory.
     "query_threat_intel",
+
+    # === FETCH EXTERNAL: compliance control mapping ===
+    # iter-Q5.8 — versioned corpus of CWE → SOC2/PCI-DSS/HIPAA/GDPR/
+    # FedRAMP control IDs. Refreshed on cron. The lead writes
+    # compliance mapping from current corpus, not training-data memory.
+    "lookup_compliance_mapping",
+
+    # === RE-DISPATCH: re-fire an L1 OSS tool with new captured state ===
+    # iter-Q5.9 — runs a prepass tool again with auth cookies / params
+    # captured mid-scan. Allow-list validated; budget-capped at 5/scan.
+    "rescan",
 
     # === ORIENT: scratchpad ===
     # No-op tool that gives the LLM a place to record reasoning.

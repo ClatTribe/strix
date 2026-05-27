@@ -48,27 +48,30 @@ def _clean_env():
 # ---------------------------------------------------------------------------
 
 
-def test_minimal_core_has_exactly_7_tools():
+def test_minimal_core_has_exactly_9_tools():
     """Sequential CORE growth:
       iter-37.10: trimmed 13 → 5
       iter-Q5.6: +get_finding → 6
-      iter-Q5.7: +query_threat_intel (FETCH EXTERNAL bucket) → 7
-    All 7 belong in READ STATE / FETCH EXTERNAL / ORIENT / ACT /
-    TERMINATE buckets per CLAUDE.md §1.5.7."""
-    assert len(_MINIMAL_CORE_TOOLS) == 7, (
-        f"Minimal core should be exactly 7 tools post iter-Q5.7 "
+      iter-Q5.7: +query_threat_intel → 7
+      iter-Q5.8: +lookup_compliance_mapping → 8
+      iter-Q5.9: +rescan → 9
+    All 9 belong in READ STATE / FETCH EXTERNAL / RE-DISPATCH /
+    ORIENT / ACT / TERMINATE buckets per CLAUDE.md §1.5.7."""
+    assert len(_MINIMAL_CORE_TOOLS) == 9, (
+        f"Minimal core should be exactly 9 tools post iter-Q5.9 "
         f"(workflow_status + list_pending_findings + get_finding + "
-        f"query_threat_intel + think + create_vulnerability_report + "
-        f"finish_scan); got {len(_MINIMAL_CORE_TOOLS)}: "
-        f"{sorted(_MINIMAL_CORE_TOOLS)}"
+        f"query_threat_intel + lookup_compliance_mapping + rescan + "
+        f"think + create_vulnerability_report + finish_scan); "
+        f"got {len(_MINIMAL_CORE_TOOLS)}: {sorted(_MINIMAL_CORE_TOOLS)}"
     )
 
 
-def test_minimal_core_under_7():
-    """Belt-and-suspenders bound — even minor regressions stay
-    caught. Q5.7 bumped the headline target to ≤7 (FETCH EXTERNAL
-    bucket is non-empty now per CLAUDE.md §1.5.7)."""
-    assert len(_MINIMAL_CORE_TOOLS) <= 7
+def test_minimal_core_under_10():
+    """Belt-and-suspenders bound. Q5.9 bumped CORE to 9 (FETCH
+    EXTERNAL + RE-DISPATCH buckets both populated). Cap stays ≤10
+    so per-asset adds bring total to 11 (the new empirical cap;
+    Q5.20 will measure 10-vs-11 degradation)."""
+    assert len(_MINIMAL_CORE_TOOLS) <= 10
 
 
 # ---------------------------------------------------------------------------
@@ -216,10 +219,11 @@ def test_web_total_catalog_under_16_tools():
     )
 
 
-def test_container_total_catalog_under_10_tools():
-    """5 core + 4 per-asset specialist = 9."""
+def test_container_total_catalog_under_12_tools():
+    """Post-Q5.9: 9 core + 2 per-asset specialist = 11. Cap bumped
+    per Q5.9 to accommodate FETCH EXTERNAL + RE-DISPATCH buckets."""
     tools = get_lead_tool_catalog(target_types=["container_image"])
-    assert len(tools) <= 10
+    assert len(tools) <= 12
 
 
 def test_code_total_catalog_under_14_tools():

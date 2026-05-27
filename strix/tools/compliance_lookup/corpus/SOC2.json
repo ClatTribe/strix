@@ -1,0 +1,40 @@
+{
+  "__revision": "SOC2 TSC 2017 (updated 2022)",
+  "CWE-89": [
+    {"control_id": "CC6.6", "description": "Logical access security measures protect against threats from sources outside system boundaries"},
+    {"control_id": "CC6.1", "description": "Logical access security software, infrastructure, and architectures over protected information assets"}
+  ],
+  "CWE-79": [
+    {"control_id": "CC6.6", "description": "Logical access security measures"},
+    {"control_id": "CC8.1", "description": "Authorization of changes including new and revised application input/output controls"}
+  ],
+  "CWE-22": [
+    {"control_id": "CC6.6", "description": "Logical access security measures"},
+    {"control_id": "CC6.1", "description": "Logical access controls over data"}
+  ],
+  "CWE-200": [
+    {"control_id": "CC6.7", "description": "Restricting the transmission, movement, and removal of information to authorized internal and external users"},
+    {"control_id": "C1.1", "description": "Confidentiality of information"}
+  ],
+  "CWE-287": [
+    {"control_id": "CC6.1", "description": "Implements logical access security software and architectures"},
+    {"control_id": "CC6.2", "description": "Authentication credentials are issued, modified, or revoked under appropriate authorization"}
+  ],
+  "CWE-352": [
+    {"control_id": "CC6.6", "description": "Logical access security measures protect against threats"}
+  ],
+  "CWE-639": [
+    {"control_id": "CC6.3", "description": "Authorization issues for users gaining access to information"}
+  ],
+  "CWE-521": [
+    {"control_id": "CC6.1", "description": "Logical access security architectures"},
+    {"control_id": "CC6.2", "description": "Credential management"}
+  ],
+  "CWE-798": [
+    {"control_id": "CC6.1", "description": "Credential management — credentials must not be hard-coded"}
+  ],
+  "CWE-918": [
+    {"control_id": "CC6.6", "description": "Logical access security measures — SSRF defenses"},
+    {"control_id": "CC6.1", "description": "Network architecture controls"}
+  ]
+}
