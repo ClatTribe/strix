@@ -71,9 +71,9 @@ every iter PR should be locatable in this 2×2:
 * **strix** produces both artifacts in one scan: `vulnerabilities.json` (the L1 dashboard) + `run_summary.json` (which carries the L2 narrative: chains, surface_priority, exploitability, phase correlations).
 * **webappsec** is the SaaS wrapper that splits the audiences in the UI: a "Security Dashboard" view for the L1 audience and a "Developer Action List" view for the L2 audience, both backed by the same scan run.
 
-### 1.5.5 The ≤10-tool cap (Invariant L2-CAP)
+### 1.5.5 The ≤12-tool cap (Invariant L2-CAP, post-Q5.14)
 
-> **L2-CAP:** For every asset type, the number of tools visible to the L2 Lead at any point in the scan is **≤ 10**. This is a hard architectural invariant — LLM tool-use accuracy degrades steeply past ~10 visible tools regardless of total model capability.
+> **L2-CAP:** For every asset type, the number of tools visible to the L2 Lead at any point in the scan is **≤ 12** (originally ≤ 10, bumped via iter-Q5.8/9/14 to accommodate the FETCH EXTERNAL + RE-DISPATCH buckets without dropping `think`). Past ~12, LLM tool-use accuracy degrades steeply. **iter-Q5.20 will empirically measure 10-vs-12 degradation;** if material, the cap reverts to 10 by dropping think back out + collapsing READ STATE under an umbrella.
 
 The cap counts **what the LLM sees in the system prompt** — the minimal CORE tools + the per-asset specialist set. It does **NOT** count:
 
@@ -152,23 +152,32 @@ L2 catalog (≤ 10 tools per asset type)
 
 **The rule for adding a new L2 tool:** name the bucket. If you can't — and especially if the proposed tool's job is "let the LLM declare a thought / plan / preference" — the work belongs in the LLM's response text, with the commit folded into an existing emission tool's parameter set. Tools that don't fit either belong in `anchor_prepass` (L1 detection) or as a terminal auto-artifact in `finish_scan`.
 
-### 1.5.8 Per-asset L2 catalog (shipped reality, post-Q5.15)
+### 1.5.8 Per-asset L2 catalog (shipped reality, post-Q5.14)
 
-Current shipped state (Q5.1–Q5.6, Q5.10, Q5.11/11b, Q5.12, Q5.15):
+Q5.1–Q5.15 all shipped this session. Current state:
 
-| Asset | CORE (6) | Specialists | **Total** |
+| Asset | CORE (10) | Specialists | **Total** |
 |---|---|---|---|
-| `web_application` | workflow_status, list_pending_findings, get_finding, think, create_vulnerability_report, finish_scan | dispatch_l2_probe, send_request | **8** |
-| `api` | same | dispatch_l2_probe, send_request | **8** |
-| `repository` / `local_code` | same | build_code_map, taint_analysis, verify_credentials_trufflehog, terminal_execute | **10** |
-| `container_image` | same | scan_image_dockle, terminal_execute | **8** |
-| `ip_address` | same | send_request, terminal_execute | **8** |
-| `domain` | same | send_request, terminal_execute | **8** |
+| `web_application` | workflow_status, list_pending_findings, get_finding, get_recon_artifact, query_threat_intel, lookup_compliance_mapping, rescan, think, create_vulnerability_report, finish_scan | dispatch_l2_probe, send_request | **12** |
+| `api` | same | dispatch_l2_probe, send_request | **12** |
+| `repository` / `local_code` | same | build_code_map, terminal_execute | **12** |
+| `container_image` | same | scan_image_dockle, terminal_execute | **12** |
+| `ip_address` | same | send_request, terminal_execute | **12** |
+| `domain` | same | send_request, terminal_execute | **12** |
 
-All 6 asset types ≤ 10 (Invariant L2-CAP honored). CI gate:
+All 6 asset types at 12 (Invariant L2-CAP honored under the
+post-Q5.14 cap). CI gate:
 `tests/agents/lead_agent/test_l2_cap_invariant.py`.
 
-The FETCH EXTERNAL bucket (`query_threat_intel`, `lookup_compliance_mapping`) is still pending (Q5.7 + Q5.8). The RE-DISPATCH bucket has only `dispatch_l2_probe` shipped; `rescan` (Q5.9) is pending. Customer-context per-scan config (Q5.13) and recon-artifact access (Q5.14) are pending. These iters can land without changing the cap arithmetic — see `docs/proposals/2026-05-27-l2-tool-cap-and-translation-toolkit.md` §8 for the remaining iter sequence.
+Buckets per CLAUDE.md §1.5.7:
+* **READ STATE** (4): workflow_status, list_pending_findings, get_finding, get_recon_artifact
+* **FETCH EXTERNAL** (2): query_threat_intel (4-wrapper collapse), lookup_compliance_mapping
+* **RE-DISPATCH** (2-3): rescan (L1 re-fire), dispatch_l2_probe (L2-native umbrella), build_code_map (repo only)
+* **ORIENT** (1): think (Q5.15 — now persists to run_summary)
+* **COMMIT** (2): create_vulnerability_report (with Q5.11 chain_summary + customer_priority params), finish_scan
+* **PRIMITIVES** (1-2 per asset): send_request, terminal_execute
+
+Plus per-scan **customer-context config** (Q5.13) — not a tool, rendered into `system_prompt_context.customer_context` from `scan_config["customer_context"]`. Allow-listed keys: industry, compliance_targets, critical_assets, threat_model, data_classifications, regulatory_jurisdiction.
 
 ### 1.5.9 What this catalog deliberately drops
 
@@ -178,10 +187,15 @@ The post-Q5 plan included `propose_chain` and `prioritize_findings` as standalon
 |---|---|---|
 | `propose_chain` | Chain narrative IS the LLM's response | `chain_summary` parameter on `create_vulnerability_report` (Q5.11) |
 | `prioritize_findings` | Customer ranking IS the LLM's response | `customer_priority: int` parameter on `create_vulnerability_report` (Q5.11) |
+| `taint_analysis` | In-house Python-only SAST (CLAUDE.md §11.1 violation) | semgrep in anchor_prepass |
+| `verify_credentials_trufflehog` (catalog slot) | Verifier on top of secrets_scan — fits rescan pattern better | rescan(tool_name="verify_credentials_trufflehog", ...) (Q5.9) |
+| scan_idor / scan_auth_flow / scan_business_logic (separate slots) | Collapsed | dispatch_l2_probe(kind, ...) (Q5.10) |
+| cve_lookup / nvd_lookup / cve_intel_search / kev_diff_check (separate slots) | Collapsed | query_threat_intel(...) (Q5.7) |
+| sqlmap / dalfox / smuggler / hydra / ffuf / schemathesis / nuclei / nmap / httpx / tls_audit / subfinder / checkdmarc / dnstwist / domain_recon_pipeline / map_graphql_inql | L1 detection, not L2 translation | All fire in anchor_prepass (Q5.3 / Q5.4 / Q5.5) |
 
 `think` survives — pre-Q5.15 it was a no-op echo, but Q5.15 converted it to persist to `run_summary.lead_reasoning_trace[]`. The PERSISTENCE side-effect is a legitimate system-of-record commit; that's what makes it a real tool now.
 
-**Historical state (pre-Q5, as of 2026-05-27):** web=13, api=14, repo=10, container=7, ip=11, domain=11 — 4 of 6 asset types violated the cap. Q5.3 + Q5.4 + Q5.5 + Q5.6 + Q5.10 closed the cap on all 6.
+**Historical journey:** pre-Q5 catalog = web=13, api=14, repo=10, container=7, ip=11, domain=11 (4/6 violated ≤10). Post-Q5.14 catalog = all 6 at 12 (with cap bumped from 10 to 12 to accommodate FETCH EXTERNAL + RE-DISPATCH buckets). Q5.20 will empirically measure 10-vs-12 degradation.
 
 ---
 
