@@ -235,6 +235,14 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "seed_auth",                    # iter-28.4 — register test user, capture JWT/cookie
         "discover_graphql_endpoints",   # iter-28.5 — GraphQL endpoint discovery + introspection
         "probe_default_creds",          # iter-28.6 — SecLists default-credentials brute
+        # iter-37.4 — 3 new OSS wrappers closing coverage gaps. Live
+        # in the LEGACY catalog (reachable under STRIX_LEGACY_CATALOG=1
+        # + via orchestrator-mode dispatch); the minimal catalog stays
+        # ACT-only per iter-37.11. Move into minimal after iter-37.12
+        # bench shows positive recall delta.
+        "probe_default_creds_hydra",    # iter-37.4 — hydra-backed creds brute
+        "scan_fuzz_ffuf",               # iter-37.4 — ffuf web fuzzer
+        "scan_smuggling_smuggler",      # iter-37.4 — smuggler.py HTTP smuggling
     }),
     "repository": frozenset({
         # Specialist-tools
@@ -261,6 +269,11 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "verify_credentials_trufflehog",
         # File primitives
         "terminal_execute",
+        # iter-37.4 — mobsfscan (mobile-app static analysis on
+        # Android Java/Kotlin + iOS Swift/Objective-C source +
+        # AndroidManifest.xml audits). Legacy catalog only;
+        # mobile_app isn't a registered minimal asset type yet.
+        "scan_mobile_mobsfscan",
         # Threat-intel — provided via `_CORE_TOOLS` /
         # `query_threat_intel` (iter-22.9). No per-target dup.
     }),
@@ -272,6 +285,8 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "scan_sast",            # Phase 7 — SAST
         "scan_iac",             # Phase 11 — IaC
         "terminal_execute",
+        # iter-37.4 — see comment on `repository`.
+        "scan_mobile_mobsfscan",
         # iter-22.9: threat-intel via _CORE_TOOLS / query_threat_intel
     }),
     "api": frozenset({
@@ -340,6 +355,12 @@ _TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "seed_auth",                    # iter-28.4 — register test user, capture JWT/cookie
         "discover_graphql_endpoints",   # iter-28.5 — GraphQL endpoint discovery + introspection
         "probe_default_creds",          # iter-28.6 — SecLists default-credentials brute
+        # iter-37.4 — 4 new OSS wrappers for API targets (legacy
+        # catalog only — minimal stays ACT-only per iter-37.11).
+        "probe_default_creds_hydra",    # iter-37.4 — hydra creds brute
+        "scan_fuzz_ffuf",               # iter-37.4 — ffuf param/path fuzz
+        "scan_api_schemathesis",        # iter-37.4 — OpenAPI property fuzzer
+        "scan_smuggling_smuggler",      # iter-37.4 — HTTP smuggling
     }),
     "domain": frozenset({
         "scan_misconfig",
