@@ -65,6 +65,8 @@ _CORE_TOOLS: frozenset[str] = frozenset({
     # composing chain narratives or writing developer-facing prose
     # against a specific finding's full evidence + L1.5 enrichment.
     "get_finding",
+    # iter-Q5.14 — read prepass-persisted recon artifacts.
+    "get_recon_artifact",
     # iter-Q5.7 — unified threat-intel fetcher (collapses 4 wrappers).
     # FETCH EXTERNAL bucket; 24h cache.
     "query_threat_intel",
@@ -747,6 +749,13 @@ _MINIMAL_CORE_TOOLS: frozenset[str] = frozenset({
     # when composing a chain narrative or writing the developer-
     # facing description.
     "get_finding",
+
+    # === OBSERVE: raw recon artifact access ===
+    # iter-Q5.14 — read prepass-persisted artifacts (endpoints,
+    # openapi_spec, graphql_schema, sbom, subdomains, tech_stack,
+    # auth_endpoints) from <run_dir>/recon/. Closes Gap 2 from the
+    # consolidated Q5 §7 — raw recon was previously lost to compaction.
+    "get_recon_artifact",
 
     # === FETCH EXTERNAL: real-time threat intel ===
     # iter-Q5.7 + Q5.7a — unified threat-intel query that collapses

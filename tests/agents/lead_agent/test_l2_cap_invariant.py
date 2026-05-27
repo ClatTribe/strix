@@ -53,7 +53,7 @@ from strix.agents.lead_agent.tool_catalog import (
 # `think` (kept per Q5.15 — persists to lead_reasoning_trace).
 # Q5.20 will empirically measure 10-vs-11 degradation; if degradation
 # is material we'll drop think back out and revert to 10.
-L2_CAP = 11
+L2_CAP = 12
 
 # Every asset type the harness knows about. Source of truth: the
 # `_MINIMAL_TOOLS_BY_TARGET_TYPE` keys.
@@ -76,13 +76,13 @@ REGISTERED_ASSET_TYPES: tuple[str, ...] = (
 # Target end-state (post-Q5.5, per CLAUDE.md §1.5.8):
 #   web=10, api=10, repo=10, local_code=10, container=9, ip=10, domain=10
 _BASELINE_CATALOG_COUNTS: dict[str, int] = {
-    "web_application": 11,   # iter-Q5.8+Q5.9: +lookup_compliance_mapping +rescan (9 → 11)
-    "api": 11,               # same
-    "repository": 11,        # also -verify_credentials_trufflehog (moved to rescan allow-list)
-    "local_code": 11,        # same
-    "container_image": 11,   # +CORE additions
-    "ip_address": 11,        # +CORE additions
-    "domain": 11,            # +CORE additions
+    "web_application": 12,   # iter-Q5.14: +get_recon_artifact (11 → 12)
+    "api": 12,               # same
+    "repository": 12,        # same
+    "local_code": 12,        # same
+    "container_image": 12,   # same
+    "ip_address": 12,        # same
+    "domain": 12,            # same
 }
 
 

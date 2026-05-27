@@ -48,20 +48,18 @@ def _clean_env():
 # ---------------------------------------------------------------------------
 
 
-def test_minimal_core_has_exactly_9_tools():
+def test_minimal_core_has_exactly_10_tools():
     """Sequential CORE growth:
       iter-37.10: trimmed 13 → 5
       iter-Q5.6: +get_finding → 6
       iter-Q5.7: +query_threat_intel → 7
       iter-Q5.8: +lookup_compliance_mapping → 8
       iter-Q5.9: +rescan → 9
-    All 9 belong in READ STATE / FETCH EXTERNAL / RE-DISPATCH /
+      iter-Q5.14: +get_recon_artifact → 10
+    All 10 belong in READ STATE / FETCH EXTERNAL / RE-DISPATCH /
     ORIENT / ACT / TERMINATE buckets per CLAUDE.md §1.5.7."""
-    assert len(_MINIMAL_CORE_TOOLS) == 9, (
-        f"Minimal core should be exactly 9 tools post iter-Q5.9 "
-        f"(workflow_status + list_pending_findings + get_finding + "
-        f"query_threat_intel + lookup_compliance_mapping + rescan + "
-        f"think + create_vulnerability_report + finish_scan); "
+    assert len(_MINIMAL_CORE_TOOLS) == 10, (
+        f"Minimal core should be exactly 10 tools post iter-Q5.14; "
         f"got {len(_MINIMAL_CORE_TOOLS)}: {sorted(_MINIMAL_CORE_TOOLS)}"
     )
 

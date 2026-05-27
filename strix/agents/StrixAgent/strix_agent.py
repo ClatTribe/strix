@@ -72,6 +72,32 @@ class StrixAgent(BaseAgent):
                 # the CLI already validated structure at parse time.
                 pass
 
+        # iter-Q5.13 — customer-context per-scan config. Per the
+        # consolidated Q5 proposal §7 (Gap 1): the lead's
+        # `customer_priority` decisions on `create_vulnerability_report`
+        # are guesses without this. Now the lead sees:
+        #   - industry         e.g. "fintech" / "healthcare" / "saas"
+        #   - compliance_targets ["SOC2", "PCI-DSS", "HIPAA", ...]
+        #   - critical_assets   [endpoint patterns the customer cares about]
+        #   - threat_model      "external_attacker" / "insider" / etc.
+        # ALL OPTIONAL. When absent the block is empty; the lead
+        # falls back to intrinsic CVSS severity.
+        customer_context = scan_config.get("customer_context") or {}
+        if isinstance(customer_context, dict) and customer_context:
+            # Pre-filter to documented keys so the system prompt
+            # doesn't carry arbitrary operator junk.
+            allowed_keys = (
+                "industry", "compliance_targets",
+                "critical_assets", "threat_model",
+                "data_classifications", "regulatory_jurisdiction",
+            )
+            filtered = {
+                k: customer_context[k] for k in allowed_keys
+                if k in customer_context
+            }
+            if filtered:
+                context["customer_context"] = filtered
+
         return context
 
     async def execute_scan(self, scan_config: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0912
