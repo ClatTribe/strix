@@ -71,6 +71,65 @@ every iter PR should be locatable in this 2×2:
 * **strix** produces both artifacts in one scan: `vulnerabilities.json` (the L1 dashboard) + `run_summary.json` (which carries the L2 narrative: chains, surface_priority, exploitability, phase correlations).
 * **webappsec** is the SaaS wrapper that splits the audiences in the UI: a "Security Dashboard" view for the L1 audience and a "Developer Action List" view for the L2 audience, both backed by the same scan run.
 
+### 1.5.5 The ≤10-tool cap (Invariant L2-CAP)
+
+> **L2-CAP:** For every asset type, the number of tools visible to the L2 Lead at any point in the scan is **≤ 10**. This is a hard architectural invariant — LLM tool-use accuracy degrades steeply past ~10 visible tools regardless of total model capability.
+
+The cap counts **what the LLM sees in the system prompt** — the minimal CORE tools + the per-asset specialist set. It does **NOT** count:
+
+* Tools that fire deterministically in `anchor_prepass` (the LLM never sees them — they're L1 always-on coverage).
+* Tools that auto-fire inside `finish_scan` (compliance evidence, remediation plan — terminal artifacts).
+
+A CI invariant test (`tests/agents/lead_agent/test_l2_cap_invariant.py`, ships in iter-Q5.2) gates any PR that raises any asset's catalog past the cap.
+
+### 1.5.6 L2 tool taxonomy — 4 buckets
+
+Every tool in the L2 catalog must fit one of these four buckets. Tools that don't fit either belong in `anchor_prepass` (L1 detection) or as a terminal auto-artifact:
+
+```
+L2 catalog (≤ 10 tools per asset type)
+├── CORE (5 — identical for every asset type)
+│     OBSERVE:   workflow_status, list_pending_findings
+│     ORIENT:    think
+│     ACT:       create_vulnerability_report  (upsert via existing_report_id)
+│     TERMINATE: finish_scan                  (auto-fires compliance + remediation)
+│
+├── REASONING (translation-specific, 0–2 per asset)
+│     propose_chain          — assembles multi-finding exploit narrative
+│     prioritize_findings    — re-ranks for THIS customer's context
+│
+├── L2-NATIVE DETECTION (only tools requiring LLM state-reasoning, 0–3 per asset)
+│     scan_idor              — session-aware authz (no OSS substitute)
+│     scan_auth_flow         — auth orchestration (no OSS substitute)
+│     scan_business_logic    — app-specific reasoning (no OSS substitute)
+│     build_code_map         — repo-only — LLM-driven code understanding
+│     taint_analysis         — repo-only — LLM-led taint chains
+│     map_graphql_inql       — api-only  — InQL deep work
+│
+└── PRIMITIVES (escape hatches, 0–2 per asset)
+      send_request           — arbitrary HTTP
+      terminal_execute       — arbitrary shell (repo / IP / container)
+```
+
+**The rule for adding a new L2 tool:** name the bucket. If you can't, the tool belongs in `anchor_prepass` (it's L1 detection) or in `finish_scan` (it's a terminal artifact).
+
+### 1.5.7 Per-asset L2 catalog (post-Q5)
+
+The target state after iter-Q5.x ships (see `docs/proposals/2026-05-27-l2-tool-cap-and-translation-toolkit.md`):
+
+| Asset | CORE | REASONING | L2-NATIVE DETECTION | PRIMITIVES | **Total** |
+|---|---|---|---|---|---|
+| `web_application` | 5 | propose_chain, prioritize_findings | scan_idor, scan_auth_flow, scan_business_logic | send_request | **10** |
+| `api` | 5 | propose_chain, prioritize_findings | scan_idor, scan_auth_flow, map_graphql_inql | send_request | **10** |
+| `repository` / `local_code` | 5 | propose_chain | build_code_map, taint_analysis, scan_business_logic | terminal_execute | **10** |
+| `container_image` | 5 | — | — | terminal_execute | **6** |
+| `ip_address` | 5 | prioritize_findings | — | send_request, terminal_execute | **8** |
+| `domain` | 5 | prioritize_findings | — | send_request | **7** |
+
+Every deep-exploit OSS wrapper (sqlmap, dalfox, hydra, ffuf, smuggler, nuclei, nmap, httpx, subfinder, checkdmarc, dnstwist, mobsfscan, schemathesis, …) fires in `anchor_prepass`, not on LLM choice. The LLM only sees translation + L2-native-detection + primitives.
+
+**Current state (pre-Q5, as of 2026-05-27):** web=13, api=14, repo=10, container=7, ip=11, domain=11 — 4 of 6 asset types violate the cap. iter-Q5.x is the remediation.
+
 ---
 
 ## 2. The detection layer model (L0 → L3)
