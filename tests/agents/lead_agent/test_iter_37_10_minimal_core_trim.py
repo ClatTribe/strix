@@ -48,23 +48,27 @@ def _clean_env():
 # ---------------------------------------------------------------------------
 
 
-def test_minimal_core_has_exactly_6_tools():
-    """iter-37.10 trimmed CORE from 13 → 5. iter-Q5.6 added
-    get_finding (single-finding deep read companion to
-    list_pending_findings) → 6. All 6 belong in READ STATE / ORIENT /
-    ACT / TERMINATE buckets per CLAUDE.md §1.5.7."""
-    assert len(_MINIMAL_CORE_TOOLS) == 6, (
-        f"Minimal core should be exactly 6 tools post iter-Q5.6 "
+def test_minimal_core_has_exactly_7_tools():
+    """Sequential CORE growth:
+      iter-37.10: trimmed 13 → 5
+      iter-Q5.6: +get_finding → 6
+      iter-Q5.7: +query_threat_intel (FETCH EXTERNAL bucket) → 7
+    All 7 belong in READ STATE / FETCH EXTERNAL / ORIENT / ACT /
+    TERMINATE buckets per CLAUDE.md §1.5.7."""
+    assert len(_MINIMAL_CORE_TOOLS) == 7, (
+        f"Minimal core should be exactly 7 tools post iter-Q5.7 "
         f"(workflow_status + list_pending_findings + get_finding + "
-        f"think + create_vulnerability_report + finish_scan); "
-        f"got {len(_MINIMAL_CORE_TOOLS)}: {sorted(_MINIMAL_CORE_TOOLS)}"
+        f"query_threat_intel + think + create_vulnerability_report + "
+        f"finish_scan); got {len(_MINIMAL_CORE_TOOLS)}: "
+        f"{sorted(_MINIMAL_CORE_TOOLS)}"
     )
 
 
-def test_minimal_core_under_6():
-    """Belt-and-suspenders bound — the headline target is ≤6 tools,
-    so even minor regressions stay caught."""
-    assert len(_MINIMAL_CORE_TOOLS) <= 6
+def test_minimal_core_under_7():
+    """Belt-and-suspenders bound — even minor regressions stay
+    caught. Q5.7 bumped the headline target to ≤7 (FETCH EXTERNAL
+    bucket is non-empty now per CLAUDE.md §1.5.7)."""
+    assert len(_MINIMAL_CORE_TOOLS) <= 7
 
 
 # ---------------------------------------------------------------------------
@@ -125,11 +129,15 @@ def test_correlate_findings_dropped_from_core():
     assert "correlate_findings" not in _MINIMAL_CORE_TOOLS
 
 
-def test_query_threat_intel_dropped_from_core():
-    """tracer.add_vulnerability_report auto-enriches every finding
-    with CWE/CVE/KEV/EPSS at emission. The LLM-callable lookup is
-    redundant for the in-scan path."""
-    assert "query_threat_intel" not in _MINIMAL_CORE_TOOLS
+def test_query_threat_intel_in_core_post_q5_7():
+    """iter-37.10 originally dropped query_threat_intel — the L1.5
+    auto-enrichment on tracer.add_vulnerability_report covers the
+    auto-fired case. iter-Q5.7 ADDED IT BACK because the FETCH
+    EXTERNAL bucket was empty + the LLM needs to query real-time
+    intel mid-scan, not just at finding emission (e.g. while
+    composing a chain narrative the LLM may want to check whether
+    a related CVE hit KEV last week). Per CLAUDE.md §1.5.7."""
+    assert "query_threat_intel" in _MINIMAL_CORE_TOOLS
 
 
 def test_emit_compliance_evidence_dropped_from_core():

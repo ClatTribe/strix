@@ -87,12 +87,13 @@ def test_chain_reasoning_in_minimal_core():
     assert "correlate_findings" not in _MINIMAL_CORE_TOOLS
 
 
-def test_threat_intel_in_minimal_core():
-    """iter-37.10: query_threat_intel dropped from core. The tracer
-    auto-enriches every finding with CWE/CVE/KEV/EPSS at emission
-    time (tracer.py:1689). LLM-callable lookup is redundant for the
-    in-scan path."""
-    assert "query_threat_intel" not in _MINIMAL_CORE_TOOLS
+def test_threat_intel_in_minimal_core_post_q5_7():
+    """iter-Q5.7 added query_threat_intel back to core. The tracer's
+    auto-enrichment fires at emission time, but the LLM needs the
+    callable surface mid-scan (e.g. while writing a chain narrative
+    the LLM may want to check whether CVE-X hit KEV last week).
+    Per CLAUDE.md §1.5.7 — FETCH EXTERNAL bucket can't be empty."""
+    assert "query_threat_intel" in _MINIMAL_CORE_TOOLS
 
 
 def test_http_primitive_in_minimal_core():

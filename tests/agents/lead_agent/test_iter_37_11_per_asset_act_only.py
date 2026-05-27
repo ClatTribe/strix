@@ -180,27 +180,34 @@ def test_api_specialist_drops_prepass_duplicates():
 # ---------------------------------------------------------------------------
 
 
-def test_code_specialist_set_has_4_tools():
+def test_code_specialist_set_has_3_tools():
     """iter-37.14 had 5 specialists. iter-Q5.6 dropped
-    scan_mobile_mobsfscan (already in anchor_prepass — was a duplicate
-    in catalog) to make room for get_finding being added to CORE
-    without breaking the ≤10 cap → 4 specialists (build_code_map,
-    taint_analysis, verify_credentials_trufflehog, terminal_execute)."""
+    scan_mobile_mobsfscan (already in anchor_prepass — duplicate) → 4.
+    iter-Q5.7 dropped taint_analysis to make room for query_threat_intel
+    being added to CORE without breaking the ≤10 cap. Per the L2 audit
+    §3.5 taint_analysis is in-house Python-only SAST (CLAUDE.md §11.1
+    violation); semgrep in prepass has broader coverage. → 3
+    specialists (build_code_map, verify_credentials_trufflehog,
+    terminal_execute)."""
     for asset in ("repository", "local_code"):
         tools = _MINIMAL_TOOLS_BY_TARGET_TYPE[asset]
-        assert len(tools) == 4, (
-            f"{asset} should have 4 ACT-only specialists post "
-            f"iter-Q5.6; got {len(tools)}: {sorted(tools)}"
+        assert len(tools) == 3, (
+            f"{asset} should have 3 ACT-only specialists post "
+            f"iter-Q5.7; got {len(tools)}: {sorted(tools)}"
         )
 
 
-def test_code_specialist_keeps_llm_orchestrated():
-    """build_code_map + taint_analysis are LLM-orchestrated and have
-    no OSS substitute."""
+def test_code_specialist_keeps_build_code_map():
+    """build_code_map is LLM-orchestrated repo-translation primitive —
+    no OSS substitute. taint_analysis was dropped per L2 audit + Q5.7
+    cap-pressure (semgrep in prepass covers it)."""
     for asset in ("repository", "local_code"):
         tools = _MINIMAL_TOOLS_BY_TARGET_TYPE[asset]
         assert "build_code_map" in tools
-        assert "taint_analysis" in tools
+        # iter-Q5.7: taint_analysis no longer in catalog (semgrep
+        # prepass has broader coverage; CLAUDE.md §11.1 — no
+        # in-house detection engines).
+        assert "taint_analysis" not in tools
 
 
 def test_code_specialist_drops_prepass_orient_tools():
@@ -327,12 +334,12 @@ def test_code_total_catalog_at_or_under_10_tools():
         assert len(tools) <= 10, f"{asset} has {len(tools)} tools"
 
 
-def test_container_total_catalog_at_or_under_8_tools():
-    """iter-Q5.6: CORE grew from 5 → 6 (get_finding). Container
-    container is 6 core + 2 specialist = 8 — still well under the
-    ≤10 L2-CAP invariant."""
+def test_container_total_catalog_at_or_under_9_tools():
+    """Sequential growth: CORE 5 → 6 (Q5.6 get_finding) → 7 (Q5.7
+    query_threat_intel). Container is 7 core + 2 specialist = 9 —
+    still well under the ≤10 L2-CAP invariant."""
     tools = get_lead_tool_catalog(target_types=["container_image"])
-    assert len(tools) <= 8
+    assert len(tools) <= 9
 
 
 # ---------------------------------------------------------------------------

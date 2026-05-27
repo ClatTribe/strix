@@ -65,6 +65,9 @@ _CORE_TOOLS: frozenset[str] = frozenset({
     # composing chain narratives or writing developer-facing prose
     # against a specific finding's full evidence + L1.5 enrichment.
     "get_finding",
+    # iter-Q5.7 — unified threat-intel fetcher (collapses 4 wrappers).
+    # FETCH EXTERNAL bucket; 24h cache.
+    "query_threat_intel",
     # iter-26.5 + 26.6 — dequeue & fire L1.5 auto-confirmations
     # (SAST→DAST) and finding-triggered probe bundles. Idempotent;
     # safe to call repeatedly between dispatches.
@@ -560,21 +563,24 @@ _MINIMAL_TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "send_request",
     }),
     "repository": frozenset({
-        # iter-Q5.6 cap-pressure cleanup: scan_mobile_mobsfscan moved
-        # to anchor_prepass per iter-37.14 — removing the L2-catalog
-        # duplicate so adding get_finding to CORE doesn't push repo
-        # past the ≤10 cap. The lead doesn't pick whether to run
-        # MobSF; it fires deterministically as L1 detection.
+        # iter-Q5.6 + Q5.7 cap-pressure cleanup:
+        #   - scan_mobile_mobsfscan dropped (already in anchor_prepass
+        #     via iter-37.14; was a duplicate)
+        #   - taint_analysis dropped (Q5.7 cap pressure). Per the L2
+        #     audit (docs/proposals/2026-05-27-l2-tool-audit.md §3.5),
+        #     this is in-house Python-only SAST violating CLAUDE.md
+        #     §11.1 ("no in-house detection engines"). The semgrep
+        #     prepass entry has strictly broader coverage. Q5.19 will
+        #     formally retire taint_analysis after a parity bench;
+        #     this PR removes it from the LLM-visible catalog so the
+        #     cap stays honored with query_threat_intel added to CORE.
         #
         # === ACT only — SAST + secrets + SCA + IaC fire in prepass ===
-        # Code reasoning primitives (LLM-orchestrated, no OSS substitute)
+        # Code reasoning primitive (LLM-orchestrated, no OSS substitute)
         "build_code_map",
-        "taint_analysis",
         # Verify gitleaks/SAST credentials are LIVE. Distinct from
         # secrets_scan (which DETECTS in prepass) — this VERIFIES a
-        # surfaced secret is still credentialed. Keeps catalog slot
-        # because the LLM decides which surfaced secrets are worth
-        # the verification call.
+        # surfaced secret is still credentialed.
         "verify_credentials_trufflehog",
         # Terminal for opening files etc.
         "terminal_execute",
@@ -582,7 +588,6 @@ _MINIMAL_TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
     "local_code": frozenset({
         # Same shape as repository.
         "build_code_map",
-        "taint_analysis",
         "verify_credentials_trufflehog",
         "terminal_execute",
     }),
@@ -742,6 +747,16 @@ _MINIMAL_CORE_TOOLS: frozenset[str] = frozenset({
     # when composing a chain narrative or writing the developer-
     # facing description.
     "get_finding",
+
+    # === FETCH EXTERNAL: real-time threat intel ===
+    # iter-Q5.7 + Q5.7a — unified threat-intel query that collapses
+    # cve_lookup + nvd_lookup + cve_intel_search + kev_diff_check.
+    # 24h cache. Returns CVSS + KEV + EPSS + advisories + exploit
+    # availability. Domain-shape route (Q5.7a) adds passive DNS +
+    # WHOIS + reputation. Per CLAUDE.md §1.5.6, this closes the
+    # FETCH EXTERNAL bucket that was previously empty — the lead
+    # no longer writes CVE/threat metadata from training-data memory.
+    "query_threat_intel",
 
     # === ORIENT: scratchpad ===
     # No-op tool that gives the LLM a place to record reasoning.
