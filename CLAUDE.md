@@ -428,17 +428,31 @@ returned result so callers don't see implementation detail.
 
 Per `docs/proposals/2026-05-27-benchmark-suite-strategy.md`, the canonical measurement is **per-layer recall** with neutral, competitor-cited benchmarks. Every iter PR must cite the relevant bench delta.
 
-| Layer | Bench harness | Headline metric | External comparison |
-|---|---|---|---|
-| **L0** (CVE corpus freshness) | `bench_vulhub_cve_corpus.py` | KEV hit rate (cron pages at <90%) | n/a — cron pager |
-| **L1** (detection) | `bench_owasp_benchmark.py` | Per-CWE Youden index | Veracode 51%, Checkmarx 47%, Fortify 35%, SonarQube 6%, ZAP 13% |
-| **L1.5** (enrichment) | Same as L1 with `STRIX_L15_DISABLED=1` | Δ-Youden = L1.5's contribution | Internal — measures own value |
-| **L2** (chain exploitation) | `bench_webgoat_dual.py` + `bench_l2_juiceshop_full.py` | (detection_rate, completion_rate). Gap = L2 chain value | n/a — internal attribution |
-| Multi-trial wrapper | `bench_multi_trial.py` | median + p10/p90 over N=5 trials | Single-trial bench is noise |
+**iter-Q1.5b update:** L1 was originally a single row, but the L1 layer wraps fundamentally different detection technologies — SAST over source code, DAST over deployed HTTP, SCA over lockfiles, container-image scanners over Docker layers, network probes over IP services. Each maps to a different asset type, fires a different OSS-tool set, and is benchmarked against a different fixture / competitor leaderboard. Lumping them under one "L1" row blurred the per-asset-type measurement (and caused iter-Q1.1 to wire OWASP Benchmark v1.2 — a Java SAST corpus — as `web_application` DAST, producing a misleadingly low 0% Youden because no DAST tool scoring against deployed JSPs would do any better). The matrix below splits L1 by sub-layer:
 
-**Decision rule (Q1 proposal, codified):**
+| Layer | Asset type | Bench harness | Tools fired | Headline metric | External comparison |
+|---|---|---|---|---|---|
+| **L0** (CVE corpus freshness) | n/a (corpus-level) | `bench_vulhub_cve_corpus.py` | nuclei templates + KEV ingest | KEV hit rate (cron pages at <90%) | n/a — cron pager |
+| **L1-SAST** (source-code detection) | `local_code` / `repository` | `bench_owasp_benchmark.py` (re-wired to `local_code`, iter-Q5.27) | semgrep, bandit, trivy fs, gitleaks, trufflehog, checkov, hadolint, mobsfscan | Per-CWE Youden index against OWASP Benchmark v1.2 (2,740 Java cases) | **Veracode 51%, Checkmarx 47%, Fortify 35%, SonarQube 6%** (DAST tools on the leaderboard like ZAP 13% are not the SAST comparison — see §6.1.1) |
+| **L1-DAST** (deployed-webapp detection) | `web_application` | `bench_wavsep.py` *(iter-Q5.28, not yet shipped)* | katana, nuclei, sqlmap, dalfox, smuggler, ffuf, schemathesis, scan_sqli / scan_xss / scan_idor / scan_auth_flow / csrf_check / cors_deep_check / fingerprint / openapi_spec_ingest | Per-class TP/FP against WAVSEP (~5,000 cases) | Acunetix, Burp Active Scan, Netsparker — published in Shay Chen's DAST comparison |
+| **L1-API** (deployed-API detection) | `api` | `bench_l1_only.py --fixture api/vampi` + `api/crapi` (no external leaderboard) | openapi_spec_ingest, schemathesis, scan_api_bola/bfla/mass_assignment, map_graphql_inql, scan_idor + the same OWASP Top-10 specialists as DAST | Recall against fixture `expected.yaml.must_find[]` | n/a — internal only (OWASP doesn't publish vendor comparison scorecards for APIs). Closest references: VAmPI / crAPI working-group writeups |
+| **L1-SCA** (lockfile / SBOM vulns) | `local_code` / `repository` (with lockfiles) | `bench_l1_only.py --fixture code/sca-*` | trivy fs, grype, osv-scanner | Recall on must-find CVEs in known-vulnerable lockfile fixtures | Snyk / Dependabot self-published coverage stats (no neutral leaderboard) |
+| **L1-container** (image-layer vulns) | `container_image` | `bench_l1_only.py --fixture container/nginx-vuln` | trivy image, dockle | Recall on known image CVEs + misconfigs | Trivy / Snyk Container / Anchore self-published — no neutral leaderboard |
+| **L1-network** (IP-service detection) | `ip_address` | `bench_l1_only.py --fixture ip/vulnerable-services` (+ Vulhub CVE recipes via iter-Q5.30) | nmap, httpx, scan_nuclei_templates, tls_audit | Recall on misconfig + service-CVE corpus | Tenable / Qualys / Rapid7 — no open neutral scorecard |
+| **L1-recon** (asset discovery) | `domain` | n/a (no fixture yet) | subfinder, bbot, checkdmarc, dnstwist, domain_recon_pipeline | Subdomain / asset discovery rate | subfinder vs amass vs assetfinder published rates — no neutral leaderboard |
+| **L1.5** (enrichment) | (per-asset-type, same as L1 sub-layer) | Same harness as the L1 sub-layer with `STRIX_L15_DISABLED=1` | The L1.5 hook chain (FP filter, surface_priority, exploitability, corroborator, post_emit_verifier, threat_intel.enrich) | Δ-headline-metric = L1.5's contribution at that sub-layer | Internal — measures own value at each sub-layer |
+| **L2** (LLM chain exploitation) | (per-asset-type) | `bench_webgoat_dual.py` + `bench_l2_juiceshop_full.py` | LLM lead agent + per-asset specialist catalog (≤12 tools, CLAUDE.md §1.5.8) | (detection_rate, completion_rate). chain_gap = L2 chain value | n/a — internal attribution; WebGoat / Juice Shop have no LLM-vs-LLM leaderboard |
+| Multi-trial wrapper | (any) | `bench_multi_trial.py` | n/a | median + p10/p90 over N=5 trials | Single-trial bench is noise |
 
-> Every L1/L1.5 iter PR must run `bench_owasp_benchmark.py` and report the per-CWE Youden delta on affected categories. Every L2 iter PR must report both `detection_rate` and `completion_rate` from `bench_webgoat_dual.py`. PRs that improve L2 numbers but regress L1 numbers are **rejected** without explicit justification.
+#### 6.1.1 Why OWASP Benchmark v1.2 sits at L1-SAST, not L1-DAST
+
+The published OWASP Benchmark leaderboard mixes SAST and DAST tools scoring against the same Java corpus. Veracode/Checkmarx/Fortify/SonarQube analyze the .java source files directly (SAST). ZAP probes the deployed Tomcat webapp over HTTP (DAST). The leaderboard reports both, but they're not comparable — ZAP at 13% reflects the natural ceiling for *DAST against a corpus designed around source-level taint patterns*, not "ZAP is bad". Strix's L1-DAST sub-layer would land in the same single-digit-to-teens band on the deployed BenchmarkJava webapp because that's a structural property of DAST on this corpus, not a strix gap. The right comparison: point strix at the *source tree* (`local_code`) where semgrep + bandit do their work, and compare to the SAST cohort (Veracode/Checkmarx/Fortify/SonarQube).
+
+iter-Q5.26 wired the OWASP fixture as `web_application` and produced 0% Youden — a real measurement but for the wrong sub-layer. iter-Q5.27 (open) rewires it as `local_code`. iter-Q5.28 (open) adds WAVSEP as the L1-DAST headline so we have neutral DAST competitor scores too.
+
+**Decision rule (Q1 proposal, codified — sub-layer-aware after iter-Q1.5b):**
+
+> Every L1-SAST iter PR must run `bench_owasp_benchmark.py` (as `local_code`) and report the per-CWE Youden delta on affected categories. Every L1-DAST iter PR must run `bench_wavsep.py` (when shipped) or fall back to `bench_l1_only.py --fixture web/...` for the web_application fixtures. Every L2 iter PR must report both `detection_rate` and `completion_rate` from `bench_webgoat_dual.py`. PRs that improve L2 numbers but regress L1 numbers at any sub-layer are **rejected** without explicit justification. A PR touching multiple sub-layers must cite the delta for each.
 
 ### 6.2 Per-metric scorers (iter-31 series, secondary)
 
