@@ -311,23 +311,57 @@ def findings_to_flags(
     findings: Iterable[dict],
 ) -> list[StrixFlag]:
     """Map a list of strix findings (vulnerability_reports entries)
-    to BenchmarkJava flags. Each finding's `endpoint` is parsed for
-    a `BenchmarkTestNNNNN` segment; the `cwe` is mapped to a category.
+    to BenchmarkJava flags. The test name comes from any field that
+    can carry the `BenchmarkTestNNNNN` token; the `cwe` is mapped to
+    a category.
+
+    iter-Q5.27: when strix scans BenchmarkJava as `local_code`
+    (SAST), semgrep + bandit emit findings whose
+    `BenchmarkTestNNNNN` identifier lives in the file path (e.g.
+    `src/main/java/.../BenchmarkTest00001.java`), not in an HTTP
+    endpoint. Search every field that plausibly carries the token:
+
+      * `endpoint` — DAST mode (test_name in the URL path)
+      * `target` — top-level target
+      * `file` — SAST emission's source file
+      * `location.file` / `location.path` — nested location form
+      * `path` — top-level path attribute
+      * `title` / `description` — best-effort fallback
 
     Findings without a matching test_name OR an unmapped CWE are
-    DROPPED (they're findings strix made that don't correspond to a
-    BenchmarkJava test case — e.g. it found a CORS misconfig on
-    Tomcat itself, not on a BenchmarkTestXXXXX endpoint)."""
+    DROPPED — they're findings strix made that don't correspond to a
+    BenchmarkJava test case (e.g. a Tomcat-self CORS misconfig)."""
     import re
 
     test_name_re = re.compile(r"\bBenchmarkTest\d{5}\b")
     flags: list[StrixFlag] = []
     for f in findings:
-        endpoint = f.get("endpoint") or f.get("target") or ""
-        m = test_name_re.search(str(endpoint))
-        if not m:
+        # iter-Q5.27: collect every candidate string that might carry
+        # the BenchmarkTestNNNNN token. Earlier candidates take
+        # precedence (endpoint preserved as the primary signal for
+        # DAST runs).
+        candidates: list[str] = [
+            str(f.get("endpoint") or ""),
+            str(f.get("target") or ""),
+            str(f.get("file") or ""),
+            str(f.get("path") or ""),
+            str(f.get("title") or ""),
+            str(f.get("description") or "")[:500],
+        ]
+        loc = f.get("location")
+        if isinstance(loc, dict):
+            candidates.append(str(loc.get("file") or ""))
+            candidates.append(str(loc.get("path") or ""))
+        test_name: str | None = None
+        for c in candidates:
+            if not c:
+                continue
+            m = test_name_re.search(c)
+            if m:
+                test_name = m.group(0)
+                break
+        if test_name is None:
             continue
-        test_name = m.group(0)
         category = cwe_to_category(f.get("cwe"))
         if category is None:
             continue
