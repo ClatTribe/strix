@@ -1,34 +1,23 @@
-# L2 ≤10-tool cap + L2 translation toolkit
+# L2 tool catalog — first-principles design + ≤10 cap (consolidated)
 
-**Status:** **SUPERSEDED in part by Q6** — the ≤10 cap (§1.1) and the per-asset reorg framing (§3.3 — moving deep-exploit OSS wrappers to `anchor_prepass`) remain canonical. The REASONING-bucket additions (§3.4 `propose_chain` / `prioritize_findings` as standalone tools) are **REPLACED** by `create_vulnerability_report` parameters per `docs/proposals/2026-05-27-l2-from-first-principles.md` (Q6). The 4-bucket taxonomy in §3.1 is **REPLACED** by the first-principles 4-bucket taxonomy (READ STATE / FETCH EXTERNAL / RE-DISPATCH / COMMIT) in CLAUDE.md §1.5.7.
+**Status:** consolidated proposal — supersedes the earlier Q5/Q6 split between this doc and `2026-05-27-l2-from-first-principles.md`
 **Owner:** ClatTribe/strix
 **Created:** 2026-05-27
-**Superseded:** 2026-05-27 (same-day, by Q6 after applying the first-principles filter to this doc's catalog)
-**Depends on:** CLAUDE.md §1.5 (product-goal framing, L1 / L2 audience split)
-**Related:** iter-37 series (`docs/tool-catalog-rationalization.md`), Q3 (`docs/proposals/2026-05-27-l1-parity-measurement.md`), Q6 (`docs/proposals/2026-05-27-l2-from-first-principles.md`)
+**Last consolidated:** 2026-05-27
+**Depends on:** CLAUDE.md §1.5 (product-goal framing, L1 / L2 audience split, tool-existence principle)
+**Related:** iter-37 series (`docs/tool-catalog-rationalization.md`), Q3 (`docs/proposals/2026-05-27-l1-parity-measurement.md`), L2 tool audit (`docs/proposals/2026-05-27-l2-tool-audit.md`)
+**Companion (now folded into this doc):** `docs/proposals/2026-05-27-l2-from-first-principles.md` — kept as a historical companion; the canonical catalog lives here.
 
 ---
 
-## 0. What survives and what doesn't (read this first)
+## 0. TL;DR
 
-This doc captured the right *constraint* (≤10 tools per asset) and the right *direction* (move deep-exploit OSS wrappers out of L2's catalog) but proposed the *wrong type of additions* to fill the freed slots. Specifically, it added `propose_chain` and `prioritize_findings` as standalone REASONING tools. Per the principle now codified in **CLAUDE.md §1.5.6 — "Tools are the LLM's hands, not its brain"** — those aren't tools at all. The chain narrative and customer-priority ranking are reasoning outputs that *commit* via parameters on `create_vulnerability_report`, not via separate tool calls.
-
-**Canonical parts of this doc (still valid):**
-- §1.1 — the ≤10-tool constraint
-- §1.2 — the current-state audit (4/6 asset types violate)
-- §2 — the "wrong tools in L2's catalog" critique (deep-exploit OSS wrappers belong in anchor_prepass)
-- §3.3 — the move-OUT list (sqlmap / dalfox / hydra / ffuf / smuggler / nuclei / nmap / httpx / subfinder / checkdmarc / dnstwist / mobsfscan / schemathesis / domain_recon_pipeline → anchor_prepass)
-- §4 — risks + mitigations (unchanged)
-- §6 — acceptance criteria (unchanged)
-
-**Superseded parts (replaced by Q6):**
-- §3.1 (4-bucket taxonomy CORE/REASONING/L2-NATIVE/PRIMITIVES) — replaced by Q6's READ STATE / FETCH EXTERNAL / RE-DISPATCH / COMMIT in CLAUDE.md §1.5.7
-- §3.2 (per-asset target table with `propose_chain`/`prioritize_findings` rows) — replaced by CLAUDE.md §1.5.8 (first-principles per-asset table)
-- §3.4 (`propose_chain` + `prioritize_findings` as standalone tools) — replaced by `chain_summary` + `customer_priority` parameters on `create_vulnerability_report` per Q6.7
-- §5 iter sequence Q5.6 + Q5.7 — replaced by Q6.2, Q6.3, Q6.7 iters
-- §7 connection-to-other-Qs — partially superseded; Q6 is now the controlling proposal for the L2 catalog shape
-
-The rest of this document is preserved unedited below for historical context. Read alongside Q6.
+* The L2 catalog today carries 13–14 tools per asset (web/api violate the ≤10 cap by 3–4) and is dominated by deep-exploit OSS wrappers that belong in `anchor_prepass`, not in the LLM's choice space.
+* The right catalog is built from one principle: **tools are the LLM's hands, not its brain.** A tool exists when the LLM either **CAN'T** do the thing (real-time external data, subprocess execution) or **SHOULDN'T** do it without a system-of-record (committing a finding, advancing workflow).
+* That principle generates **4 buckets** (READ STATE / FETCH EXTERNAL / RE-DISPATCH / COMMIT) and **10 tools per asset**, where every tool is justifiable by what the LLM can't do alone.
+* `think`, `propose_chain`, and `prioritize_findings` are dropped — they're reasoning, which happens in the LLM's response text. Where they commit (chain narrative, customer priority), they ride as parameters on `create_vulnerability_report`.
+* A previously-empty bucket (FETCH EXTERNAL — real-time threat intel + compliance lookup) is the load-bearing addition; without it the lead writes CVE/threat metadata from training-data memory, months stale at best.
+* Three remaining gaps after the catalog is rebuilt: **customer-context input** (per-scan config, not a tool), **raw recon artifact access** (`get_recon_artifact`), and **domain-asset intel** (extend `query_threat_intel` to domain shape + add `terminal_execute` to domain catalog).
 
 ---
 
@@ -38,263 +27,336 @@ The rest of this document is preserved unedited below for historical context. Re
 
 > *"Ensure we optimize in a way that the LLM doesn't have to handle more than 10 tools at a time. It doesn't [do] well with more than 10 tool calls."*
 
-This matches the empirical pattern reported by every LLM-tool-use evaluation: model accuracy degrades steeply once the visible tool count exceeds ~10, regardless of total model capability. Anthropic's own published guidance for Claude tool-use recommends keeping the tool count "small" for production reliability; OpenAI's function-calling docs say the same. The cap is therefore an **architectural invariant**, not an optimization target.
+Empirical pattern across LLM tool-use evaluations: accuracy degrades steeply once visible tool count exceeds ~10, regardless of total model capability. Anthropic's own tool-use guidance and OpenAI's function-calling docs both recommend small catalogs.
 
-Define it formally:
+> **Invariant L2-CAP:** For every asset type, the number of tools visible to the L2 Lead at any point in the scan is **≤ 10**. This is a hard architectural invariant. It counts what the LLM sees in the system prompt — minimal CORE + per-asset specialist set. It does NOT count tools that fire deterministically in `anchor_prepass` (the LLM never sees them) or tools that auto-fire inside `finish_scan` (terminal artifacts).
 
-> **Invariant L2-CAP:** For every asset type, the number of tools visible to the L2 Lead at any point in the scan is ≤ 10. This includes the minimal CORE tools and the per-asset specialist set. It does NOT include tools that fire deterministically in `anchor_prepass` (those execute without the LLM ever seeing them) and does NOT include tools that fire as auto-artifacts inside `finish_scan`.
+A CI invariant test (`tests/agents/lead_agent/test_l2_cap_invariant.py`, ships in iter-Q5.2) gates any PR that raises any asset's catalog past the cap.
 
-### 1.2 Current state — does shipped reality honor the invariant?
-
-Audit of `strix/agents/lead_agent/tool_catalog.py:_MINIMAL_TOOLS_BY_TARGET_TYPE` + `_MINIMAL_CORE_TOOLS` as of 2026-05-27 (post iter-37.14):
+### 1.2 Current state audit (2026-05-27, post iter-37.14)
 
 | Asset type | CORE | Specialist | **Total L2-visible** | Honors L2-CAP? |
 |---|---|---|---|---|
 | `web_application` | 5 | 8 | **13** | ❌ +3 over cap |
 | `api` | 5 | 9 | **14** | ❌ +4 over cap |
-| `repository` / `local_code` | 5 | 5 | **10** | ✓ (at the limit) |
+| `repository` / `local_code` | 5 | 5 | **10** | ✓ at limit |
 | `container_image` | 5 | 2 | **7** | ✓ |
 | `ip_address` | 5 | 6 | **11** | ❌ +1 over cap |
 | `domain` | 5 | 6 | **11** | ❌ +1 over cap |
 
-**4 of 6 asset types violate the cap.** The two most economically important asset types (`web_application` and `api`) are the worst offenders, at +3 and +4 over.
+**4 of 6 asset types violate the cap.** The two most economically important asset types (`web_application` and `api`) are the worst offenders.
 
 ---
 
-## 2. The deeper problem — wrong tools in L2's catalog
+## 2. The principle
 
-Per CLAUDE.md §1.5, L2 is **the AI security engineer that translates L1 output into action items for non-security audiences (devs, PMs).** That's a *reasoning + prioritization + explanation* job. It is not a detection job — detection belongs to L1 (OSS scanners in the sandbox).
+> **Tools are the LLM's hands, not its brain.**
+>
+> A tool exists when the LLM either **CAN'T** do the thing (real-time external data, subprocess execution, network I/O) or **SHOULDN'T** do it without a system-of-record (committing a finding, advancing workflow, terminating the scan).
 
-But the current per-asset specialist sets are dominated by **deep-exploit detection tools**:
+**Tools belong in the catalog when at least one of these is true:**
 
-| Asset | Specialist tools that are deep-exploit detection (= really L1) | Specialist tools that are genuine L2 work |
-|---|---|---|
-| `web_application` | `scan_sqli_sqlmap`, `scan_xss_dalfox`, `probe_default_creds_hydra`, `scan_fuzz_ffuf`, `scan_smuggling_smuggler` | `scan_idor`, `scan_auth_flow`, `send_request` |
-| `api` | `scan_sqli_sqlmap`, `probe_default_creds_hydra`, `scan_fuzz_ffuf`, `scan_api_schemathesis`, `scan_smuggling_smuggler` | `scan_idor`, `scan_auth_flow`, `map_graphql_inql`, `send_request` |
-| `repository` / `local_code` | `verify_credentials_trufflehog`, `scan_mobile_mobsfscan` | `build_code_map`, `taint_analysis`, `terminal_execute` |
-| `ip_address` | `fingerprint_services_nmap`, `probe_hosts_httpx`, `scan_nuclei_templates`, `tls_audit` | `send_request`, `terminal_execute` |
-| `domain` | `enumerate_subdomains_subfinder`, `scan_nuclei_templates`, `scan_dns_hygiene_checkdmarc`, `scan_typosquats_dnstwist` | `domain_recon_pipeline`, `send_request` |
+| Condition | Why a tool is needed |
+|---|---|
+| **Real-time external data** | LLM training cutoff is stale. Threat feeds, current CVE/EPSS/KEV state, vendor advisories, current compliance-control text — all change after training. |
+| **Re-trigger a deterministic scan** | The LLM can't run subprocess / network I/O. Re-firing `nuclei` against a new endpoint with new auth, or `scan_idor` with newly captured sessions, needs the tool. |
+| **Persistent side-effect** | Committing a finding, advancing workflow phase, or terminating the scan are state changes the system-of-record must own. |
+| **Reading state outside conversation context** | `workflow_status`, `list_pending_findings` — facts that live outside the conversation window. |
 
-The "deep-exploit detection" column tools are all **thin wrappers around OSS scanners** (sqlmap, dalfox, hydra, ffuf, smuggler, nmap, httpx, nuclei, checkdmarc, dnstwist, schemathesis, mobsfscan). Per the iter-37.x policy + CLAUDE.md §11.1, these belong in `anchor_prepass` where they fire deterministically — not in the LLM's catalog.
+**Tools do NOT belong in the catalog when:**
 
-**This is the architectural error: by putting deep-exploit detectors in L2's catalog, we:**
+| Anti-condition | Why it's not a tool |
+|---|---|
+| **Reasoning over data already in context** | Prioritization, chain narrative assembly, plain-English explanation, severity decision — pure reasoning. The LLM emits these as part of its response. |
+| **Reformatting / templating** | Rendering a finding into markdown, formatting CVSS XML — the LLM is the renderer; no tool needed. |
+| **Decisions encoded inline in the response** | "I think this is high severity" is part of the LLM's argument; it becomes a tool call only when COMMITTING to the system-of-record — and even then the commit can be a *parameter* on an existing emission tool. |
 
-1. **Violate the L1/L2 audience split** (CLAUDE.md §1.5). Detection is L1. The lead burns turns deciding *whether* to fire sqlmap on a candidate, when sqlmap should fire as L1 always-on coverage.
-2. **Inflate the catalog past the 10-tool cap** and degrade model accuracy on every turn.
-3. **Make L1 detection rate dependent on the LLM remembering to call the tool** — which `bench_l2_juiceshop_full` numbers showed is unreliable, and which is the precise problem iter-32.1 / iter-37.2 / iter-37.11 have been chipping at.
+**Worked examples:**
 
-### 2.1 What L2 actually needs (the translation toolkit)
-
-Per the §1.5 audience definition, the AI security engineer translating L1 findings to a developer / PM needs to do these jobs:
-
-| L2 job | Currently a tool? | If yes, how? |
-|---|---|---|
-| **Read L1 output** | ✓ | `list_pending_findings` (CORE) |
-| **Reason / scratchpad** | ✓ | `think` (CORE) |
-| **Workflow control** | ✓ | `workflow_status` (CORE) |
-| **Emit decisions** | ✓ | `create_vulnerability_report` (CORE — upsert via `existing_report_id`) |
-| **Terminate** | ✓ | `finish_scan` (CORE) — auto-fires compliance + remediation |
-| **Prioritize for THIS customer** | ✗ | Currently implicit (the lead writes severity into `create_vulnerability_report`) — no `prioritize_findings(scoring_context=...)` tool that lets the lead see all findings ranked + then make the customer-specific call |
-| **Chain reasoning ("X + Y = account takeover")** | partial | `correlate_at_phase_boundary` fires automatically; no LLM-visible tool to *propose* a chain |
-| **Plain-English explanation for the developer** | partial | Embedded inside `create_vulnerability_report.description` — no separate tool, no dedicated quality bench surface |
-| **Remediation patch** | ✓ | `generate_remediation_plan` (auto-fires in `finish_scan`) — but mid-scan it's invisible to the lead |
-| **Compliance mapping** | ✓ | `emit_compliance_evidence` (auto-fires in `finish_scan`) — same visibility issue |
-| **Session-aware authz testing (no OSS substitute)** | ✓ | `scan_idor`, `scan_auth_flow` — genuinely L2-native because they need LLM reasoning about state |
-| **Business-logic vulnerability detection (no OSS substitute)** | ✓ | `scan_business_logic` — same reason |
-| **HTTP escape hatch** | ✓ | `send_request` — for the cases the prepass didn't cover |
-
-The right-hand column is the L2 catalog under the §1.5 framing. **It contains 0 OSS-wrapper deep-exploit detectors** — those belong in L1.
+* `think()` — **wrong tool.** No-op echo that returns char-count. The LLM can think in response text. If a reasoning audit trail is wanted, capture the `assistant_text` turns; don't synthesize a tool for it.
+* `propose_chain(finding_ids, narrative)` — **wrong tool.** Chain narrative IS the LLM's response. Commit chains via a `chain_summary` parameter on `create_vulnerability_report`, not a separate tool.
+* `prioritize_findings(customer_context)` — **wrong tool.** Customer ranking IS the LLM's response. Commit via a `customer_priority: int` parameter on `create_vulnerability_report`.
+* `query_threat_intel(cve_id)` — **right tool.** LLM training data doesn't know whether CVE-2024-X was added to CISA KEV last week or whether EPSS moved this morning.
+* `rescan(tool_name, target, captured_state)` — **right tool.** The LLM can't run subprocess. Re-firing `nuclei` against a newly authed endpoint requires the dispatcher.
+* `create_vulnerability_report(...)` — **right tool.** Persistent side-effect to `tracer.vulnerability_reports`. System-of-record commit.
 
 ---
 
-## 3. Proposed reorg — per-asset-type L2 catalog refit
+## 3. The 4-bucket taxonomy
 
-### 3.1 The L2 tool taxonomy (4 buckets, ≤10 total per asset)
+Every tool in the L2 catalog must fit one of these four buckets. Tools that don't fit either belong in `anchor_prepass` (L1 detection) or as a terminal auto-artifact in `finish_scan`.
 
 ```
-L2 catalog (≤ 10 tools)
-├── CORE (5 — same for every asset type)
-│     OBSERVE: workflow_status, list_pending_findings
-│     ORIENT:  think
-│     ACT:     create_vulnerability_report
-│     TERMINATE: finish_scan  (auto-fires compliance + remediation)
-│
-├── REASONING (1–2 per asset — translation-specific, optional per-asset)
-│     propose_chain          ← NEW (currently only auto-fires)
-│     prioritize_findings    ← NEW (currently implicit in CV-report severity)
-│
-├── L2-NATIVE DETECTION (0–3 per asset — only tools requiring LLM state-reasoning)
-│     scan_idor              ← session-aware authz (no OSS substitute)
-│     scan_auth_flow         ← auth orchestration (no OSS substitute)
-│     scan_business_logic    ← app-specific reasoning (no OSS substitute)
-│
-└── PRIMITIVES (0–2 per asset — escape hatches)
-      send_request           ← arbitrary HTTP
-      terminal_execute       ← arbitrary shell (repo / IP / container)
+L2 catalog (≤ 10 tools per asset type)
+├── READ STATE        — facts not in conversation context
+├── FETCH EXTERNAL    — real-time data the LLM's training cutoff missed
+├── RE-DISPATCH       — re-run a deterministic L1 scan or L2-native probe
+└── COMMIT + PRIMITIVES  — write to system-of-record + escape hatches
 ```
 
-Everything outside these 4 buckets either fires in `anchor_prepass` (L1 OSS detection) or auto-fires inside `finish_scan` (terminal artifacts).
+**There is no REASONING bucket.** Reasoning lives in the LLM's response text; reasoning commits (chains, customer priorities) ride as parameters on `create_vulnerability_report`. This is the deliberate change from earlier drafts of this proposal.
 
-### 3.2 Per-asset proposed L2 catalog
+---
 
-| Asset | CORE | REASONING | L2-NATIVE DETECTION | PRIMITIVES | **Total** |
-|---|---|---|---|---|---|
-| `web_application` | 5 | `propose_chain`, `prioritize_findings` | `scan_idor`, `scan_auth_flow`, `scan_business_logic` | `send_request` | **10** ✓ |
-| `api` | 5 | `propose_chain`, `prioritize_findings` | `scan_idor`, `scan_auth_flow`, `map_graphql_inql` | `send_request` | **10** ✓ |
-| `repository` / `local_code` | 5 | `propose_chain` | `build_code_map`, `taint_analysis`, `scan_business_logic` | `terminal_execute` | **10** ✓ |
-| `container_image` | 5 | — | — | `terminal_execute` | **6** ✓ |
-| `ip_address` | 5 | `prioritize_findings` | — | `send_request`, `terminal_execute` | **8** ✓ |
-| `domain` | 5 | `prioritize_findings` | — | `send_request` | **7** ✓ |
+## 4. The 10-tool catalog (each tool, what it does, status)
 
-Every asset type now ≤ 10. The remaining headroom (0–4 tools per asset) leaves room for asset-specific additions without breaking the cap.
+### READ STATE (3 — universal across every asset)
 
-### 3.3 What moves OUT of L2 (and where)
+| # | Tool | Status | What it does |
+|---|---|---|---|
+| 1 | `workflow_status` | ✓ exists | Returns scan state: current phase, endpoints discovered, login forms found, findings emitted, gate checks (auth captured? recon done?), and 1–3 templated `next_recommended_actions`. The lead's "where am I" primitive. |
+| 2 | `list_pending_findings` | ✓ exists | Up to 25 findings from tracer, **already ranked by L1.5 signals** (surface_priority × composite exploitability × severity). Filterable by `severity_floor`, `include_demoted`. Each row carries annotations (`pending-dast×3`, `bundle×2`, `EXPLOITED`). |
+| 3 | `get_finding(id)` | **NEW (Q5.6)** | Single-finding deep-read companion. Returns full report dict (description, evidence, code_locations, chain_summary, corroborated_by, …). Saves tokens vs. dumping the whole list when composing a chain narrative. ~50 LOC + 5 tests. |
+
+### FETCH EXTERNAL (2 — universal — currently EMPTY, this is the load-bearing addition)
+
+Strix has 7 registered real-time-data tools (`cve_lookup`, `nvd_lookup`, `cve_intel_search`, `kev_diff_check`, `threat_feed_ingest`, `scan_iocs_for_target_threatfox`, `legal_compliance_probe`) — **zero are in the post-Q5 minimal L2 catalog.** The lead writes CVE/threat metadata from training-data memory, months stale at best. Two unifying tools fix this:
+
+| # | Tool | Status | What it does |
+|---|---|---|---|
+| 4 | `query_threat_intel(cve_id|cwe_id|product|domain, ...)` | **NEW (Q5.7)** — collapses 4 existing wrappers | Unified real-time fetcher. Returns CVSS + KEV listing + EPSS score + vendor advisories + exploit-availability flags. **24h cache.** Replaces `cve_lookup` + `nvd_lookup` + `cve_intel_search` + `kev_diff_check`. Extended in Q5.7a to accept `domain=...` and dispatch to domain-intel sources (passive DNS, WHOIS, reputation) — closes a domain-asset gap. ~400 LOC + 20 tests. |
+| 5 | `lookup_compliance_mapping(finding_shape, frameworks)` | **NEW (Q5.8)** | Args: `finding_shape={cwe, severity, …}`, `frameworks=["SOC2", "PCI-DSS", "HIPAA", "GDPR", …]`. Returns current control IDs per framework. Backed by a **versioned corpus refreshed on cron**, so it stays current as frameworks revise (SOC2 2025 vs 2017). ~250 LOC + 15 tests. |
+
+### RE-DISPATCH (1–2 per asset)
+
+| # | Tool | Status | What it does | Per-asset |
+|---|---|---|---|---|
+| 6 | `rescan(tool_name, target, captured_state)` | **NEW (Q5.9)** | Re-fires an L1 OSS tool with new state. E.g. after `scan_auth_flow` captures a session, the lead calls `rescan("scan_sqli_sqlmap", url, {auth_cookie: ...})` to re-test SQLi as the authed user. `tool_name` validated against an allow-list of OSS-wrappers from anchor_prepass. **Capped at 5 rescans/scan** (destructive-amplification guard, iter-29.9 pattern). ~200 LOC + 15 tests. | universal |
+| 7 | `dispatch_l2_probe(kind, **kwargs)` | **NEW (Q5.10)** — collapses 3 tools | Umbrella for L2-native probes that require LLM state-reasoning. `kind ∈ {idor, auth_flow, business_logic}`. Docstring enumerates each kind's kwargs. Replaces 3 separate slots (`scan_idor` / `scan_auth_flow` / `scan_business_logic`) with 1. ~150 LOC refactor + 15 tests. | web + api only |
+| 8 | `build_code_map(repo_path, ...)` | ✓ exists | Walks repo, regex-extracts routes + models + DB queries + external HTTP + auth boundaries across 8 languages, writes `code_map.json`. | repository / local_code only |
+
+### COMMIT + PRIMITIVES (2 commit + 1 primitive per asset)
+
+| # | Tool | Status | What it does | Per-asset |
+|---|---|---|---|---|
+| 9 | `create_vulnerability_report(...)` | ✓ exists — **extended (Q5.11)** | Persists finding to tracer. **Newly carries 2 parameters that replace previously-proposed standalone tools:** `chain_summary` (multi-finding narrative — replaces `propose_chain`) and `customer_priority: int` (re-ranked for customer context — replaces `prioritize_findings`). Reasoning is in the LLM's response; commit is on this tool. Q5.11a additionally splits the 21-parameter surface: **required-to-commit (7 fields)** + **render-on-finish** (description_plain, business_impact_plain, recommended_action, fix_time_estimate — auto-generated at `finish_scan` from finding context). ~250 LOC + 25 tests. | universal |
+| 10 | `finish_scan(executive_summary, methodology, technical_analysis, recommendations)` | ✓ exists | Terminates scan. Hard-gates on workflow phase + open hypotheses + active agents. **Auto-fires `emit_compliance_evidence` + `generate_remediation_plan` as terminal artifacts** (no catalog slots). OODA-structured rejection on premature finish tells the LLM exactly what to fix. | universal |
+| 11 | `send_request(method, url, headers, body, timeout)` | ✓ exists | Arbitrary-HTTP escape hatch. Auto-populates SecurityContext side-effects: records endpoint, captures tech-stack hints, marks `auth-required` on 401/403, parses Location header for value-reflection, extracts param names from query+body, detects OpenAPI/Swagger response shape and pre-populates SecurityContext with documented endpoints. | web / api / ip / domain |
+| 12 | `terminal_execute(command, ...)` | ✓ exists — **needs docstring (Q5.12)** | Arbitrary-shell escape hatch. Passthrough to terminal_manager. Today has **no docstring** — LLM has no guidance on canonical per-asset uses (repo: `grep`/`find`/`sed`; ip: nmap follow-ups, `nc`; container: mount-and-inspect; domain: `dig`/`host`/`whois`). Adding a per-asset docstring is ~10 LOC and meaningfully improves aim. | repo / container / ip / domain |
+
+---
+
+## 5. Per-asset visibility (which tools each asset sees)
+
+Universal: 3 READ STATE + 2 FETCH EXTERNAL + 1 RE-DISPATCH (`rescan`) + 2 COMMIT = **8 universal tools.** Then per-asset:
+
+| Asset | + RE-DISPATCH slots | + PRIMITIVE slots | **Total** |
+|---|---|---|---|
+| `web_application` | `dispatch_l2_probe` | `send_request` | **10** |
+| `api` | `dispatch_l2_probe` | `send_request` | **10** |
+| `repository` / `local_code` | `build_code_map` | `terminal_execute` | **10** |
+| `container_image` | — | `terminal_execute` | **9** |
+| `ip_address` | — | `send_request`, `terminal_execute` | **10** |
+| `domain` | — | `send_request`, `terminal_execute` ¹ | **10** |
+
+¹ Domain catalog gets `terminal_execute` (was missing) — closes the "no `dig` / `whois`" gap. Pushes domain from 9 to 10, still at cap.
+
+Every deep-exploit OSS wrapper (sqlmap, dalfox, hydra, ffuf, smuggler, nuclei, nmap, httpx, subfinder, checkdmarc, dnstwist, mobsfscan, schemathesis, …) fires in `anchor_prepass`, not on LLM choice. The LLM only sees state-readers, real-time fetchers, re-dispatch primitives, and commit tools.
+
+---
+
+## 6. What moves OUT of L2 (to anchor_prepass)
+
+After the catalog refit, `anchor_prepass.py` becomes the comprehensive L1 detection layer for every asset type:
 
 | Tool | Current home | Moves to | Why |
 |---|---|---|---|
-| `scan_sqli_sqlmap` | L2 web/api specialist | `anchor_prepass` (web + api) | Deep-exploit detection. Fires when prepass `scan_sqli` flags a candidate. |
-| `scan_xss_dalfox` | L2 web specialist | `anchor_prepass` (web) | Same — fires when prepass `scan_xss` flags a candidate. |
-| `probe_default_creds_hydra` | L2 web/api specialist | `anchor_prepass` (web + api) | Already in prepass (iter-37.14). Removing the duplicate L2-visible entry. |
-| `scan_fuzz_ffuf` | L2 web/api specialist | `anchor_prepass` (web + api) | Already in prepass (iter-37.14). Removing duplicate. |
-| `scan_smuggling_smuggler` | L2 web/api specialist | `anchor_prepass` (web + api) | Deep-exploit; should fire as L1 always-on for high-throughput targets. |
-| `scan_api_schemathesis` | L2 api specialist | `anchor_prepass` (api) | Already in prepass (iter-37.14). Removing duplicate. |
-| `verify_credentials_trufflehog` | L2 repo specialist | `anchor_prepass` (repo) | Already wired alongside SAST/secrets in prepass. Removing duplicate. |
-| `scan_mobile_mobsfscan` | L2 repo specialist | `anchor_prepass` (repo) | Same — already prepass-wired in iter-37.14. |
-| `fingerprint_services_nmap` | L2 ip specialist | `anchor_prepass` (ip) | nmap is recon; belongs in prepass alongside the existing socket sweep. |
-| `probe_hosts_httpx` | L2 ip specialist | `anchor_prepass` (ip) | httpx is recon. |
-| `scan_nuclei_templates` | L2 ip + domain specialist | `anchor_prepass` (ip + domain) | nuclei is L0 signature corpus — *the* canonical L1 detection, must fire deterministically. |
-| `tls_audit` | L2 ip specialist | `anchor_prepass` (ip) | TLS audit is a single-host probe — should always fire on every IP asset. |
-| `enumerate_subdomains_subfinder` | L2 domain specialist | `anchor_prepass` (domain) | Recon. |
-| `scan_dns_hygiene_checkdmarc` | L2 domain specialist | `anchor_prepass` (domain) | Single-domain audit — should always fire. |
-| `scan_typosquats_dnstwist` | L2 domain specialist | `anchor_prepass` (domain) | Same — always-on for domain assets. |
-| `domain_recon_pipeline` | L2 domain specialist | `anchor_prepass` (domain) | Currently the only L2-visible "discovery" tool for domain; moves to deterministic prepass. |
+| `scan_sqli_sqlmap` | L2 web/api | `anchor_prepass` (web + api) | Deep-exploit detection. Fires when prepass `scan_sqli` flags a candidate. |
+| `scan_xss_dalfox` | L2 web | `anchor_prepass` (web) | Same — fires when prepass `scan_xss` flags a candidate. |
+| `probe_default_creds_hydra` | L2 web/api | `anchor_prepass` (web + api) | Already in prepass (iter-37.14). Removing duplicate L2 entry. |
+| `scan_fuzz_ffuf` | L2 web/api | `anchor_prepass` (web + api) | Already in prepass (iter-37.14). Removing duplicate. |
+| `scan_smuggling_smuggler` | L2 web/api | `anchor_prepass` (web + api) | Deep-exploit; fires as L1 always-on for high-throughput targets. |
+| `scan_api_schemathesis` | L2 api | `anchor_prepass` (api) | Already in prepass (iter-37.14). Removing duplicate. |
+| `verify_credentials_trufflehog` | L2 repo | `anchor_prepass` (repo) | Already wired alongside SAST/secrets in prepass. |
+| `scan_mobile_mobsfscan` | L2 repo | `anchor_prepass` (repo) | Already prepass-wired in iter-37.14. |
+| `fingerprint_services_nmap` | L2 ip | `anchor_prepass` (ip) | nmap is recon; belongs in prepass. |
+| `probe_hosts_httpx` | L2 ip | `anchor_prepass` (ip) | httpx is recon. |
+| `scan_nuclei_templates` | L2 ip + domain | `anchor_prepass` (ip + domain) | nuclei is L0 signature corpus — *the* canonical L1 detection. |
+| `tls_audit` | L2 ip | `anchor_prepass` (ip) | TLS audit is a single-host probe — always fire on every IP asset. |
+| `enumerate_subdomains_subfinder` | L2 domain | `anchor_prepass` (domain) | Recon. |
+| `scan_dns_hygiene_checkdmarc` | L2 domain | `anchor_prepass` (domain) | Single-domain audit — always fire. |
+| `scan_typosquats_dnstwist` | L2 domain | `anchor_prepass` (domain) | Always-on for domain assets. |
+| `domain_recon_pipeline` | L2 domain | `anchor_prepass` (domain) | Deterministic prepass coverage. |
+| `map_graphql_inql` | L2 api | `anchor_prepass` (api) | OSS wrapper, not L2-native. Per L2 tool audit. |
 
-After this reshuffle, **`anchor_prepass.py` becomes the comprehensive L1 detection layer for every asset type**, and the L2 catalog is fully focused on translation + L2-native reasoning.
+**Deprecation path (separate Q3 parity bench):**
 
-### 3.4 What moves INTO L2 (the translation toolkit)
-
-Two new LLM-visible tools that don't currently exist:
-
-#### `propose_chain` (new — REASONING bucket)
-
-```python
-@register_tool(sandbox_execution=False)  # host-side, reads tracer
-def propose_chain(
-    *,
-    finding_ids: list[str],
-    narrative: str,
-    impact: str,
-    chain_severity: str,  # "critical" / "high" / "medium" / "low"
-) -> dict:
-    """Propose that two-or-more findings form an exploit chain.
-
-    Use when you spot a multi-step exploit path (e.g. CSRF + open
-    redirect = account takeover, or SQLi + file-write = RCE). The
-    chain is upserted into run_summary.chains_emitted and feeds
-    bench_chains.
-
-    The lead provides:
-      - finding_ids: the existing CV-report IDs that compose the chain
-      - narrative: 1-2 paragraph plain-English exploit story
-        (this is what the developer/PM reads, not the security team)
-      - impact: business-impact statement
-      - chain_severity: how to rank the chain itself
-    """
-```
-
-Currently chains are only auto-detected via heuristic post-emit (iter-33.3). Making chain proposal an explicit tool lets the lead emit chains with richer narrative — which is the exact L2-audience deliverable.
-
-#### `prioritize_findings` (new — REASONING bucket)
-
-```python
-@register_tool(sandbox_execution=False)
-def prioritize_findings(
-    *,
-    customer_context: dict[str, Any],
-) -> dict:
-    """Re-rank pending findings for THIS customer's context.
-
-    customer_context can include:
-      - industry: 'fintech' / 'healthcare' / 'saas' / ...
-      - compliance_targets: ['SOC2', 'PCI-DSS', 'HIPAA', ...]
-      - critical_assets: list of endpoint patterns
-      - tech_stack_focus: 'authentication' / 'data-exfil' / ...
-
-    Returns the same list of findings re-ordered with a per-finding
-    `customer_priority` integer (1 = highest). Does NOT mutate the
-    findings themselves — only emits a ranking the lead can cite in
-    its narrative.
-    """
-```
-
-This makes the "prioritize for this customer" job explicit. Currently the lead bakes priority into `severity` and `surface_priority`, which conflates "intrinsic severity" with "this-customer's-priority." The L2 audience (developers + PMs) wants the customer-specific ranking, not the generic CVSS-style severity.
-
----
-
-## 4. Risks + mitigations
-
-| Risk | Mitigation |
+| Tool | Status |
 |---|---|
-| **Moving deep-exploit tools to prepass = more deterministic L1 runtime cost** — every scan fires sqlmap / dalfox / hydra even when no candidates exist. | Prepass dispatcher already conditions on iter-30 candidate signals (e.g. only fires sqlmap when `scan_sqli` flagged a candidate). The unconditional sweep is bounded; cost is acceptable per iter-37.12 baseline. |
-| **L2 loses ability to fire sqlmap/dalfox on demand** — what if the lead wants to deep-exploit a candidate prepass missed? | Add `send_request` as the escape hatch (already in L2 catalog). For the rare "I need sqlmap on a specific endpoint" case, the lead can request it via dispatch_specialist (orchestrator mode) or as a per-PR future addition. |
-| **`propose_chain` / `prioritize_findings` become "the LLM does the security engineer's job poorly"** — quality risk. | Both are scored by existing benches: `propose_chain` feeds `bench_chains` (iter-31.2); `prioritize_findings` feeds `bench_severity` (iter-31.3). Quality gate is the same as every other L2 PR. |
-| **The L2-CAP invariant gets quietly violated again next iter** | Add a CI test that fails when `get_lead_tool_catalog(target_types=[t])` returns > 10 names for any registered target type. Pinned in `tests/agents/lead_agent/test_l2_cap_invariant.py`. |
-| **Existing iter-37.14 added 3 OSS wrappers to MINIMAL — undoing them is a regression of that intent.** | Not undoing the iter-37.14 OSS-wrapper *additions* (the wrappers still ship, just from prepass). The intent of iter-37.14 was "broader/deeper OSS coverage." This proposal preserves that — coverage is now ALWAYS-ON via prepass instead of ON-IF-LLM-REMEMBERS via catalog. |
+| `taint_analysis` | In-house Python-only AST taint analyzer. Violates CLAUDE.md §11.1 ("no in-house detection engines"). Q3 parity bench vs. `semgrep --config p/python`; if semgrep wins (likely), retire and reclaim slot. |
+
+**Deliberately-dropped reasoning tools (do NOT add):**
+
+| Tool | Why dropped | What replaces it |
+|---|---|---|
+| `think` | Pure no-op echo. LLM can think in response text. | Capture `assistant_text` turns → `run_summary.lead_reasoning_trace[]`. No LLM-visible tool. |
+| `propose_chain` (was Q5.6) | Chain narrative IS the LLM's response. | `chain_summary` parameter on `create_vulnerability_report`. |
+| `prioritize_findings` (was Q5.7) | Customer ranking IS the LLM's response. | `customer_priority: int` parameter on `create_vulnerability_report`. |
+| `scan_auth_flow` (standalone) | Overlaps `probe_default_creds_hydra` in prepass. | Folded under `dispatch_l2_probe(kind="auth_flow")`. The bruteforce part fires in prepass; the session-setup part remains L2-native. |
+| `scan_idor` (standalone) | One of 3 collapsible L2 probes. | `dispatch_l2_probe(kind="idor")`. |
+| `scan_business_logic` (standalone) | One of 3 collapsible L2 probes. | `dispatch_l2_probe(kind="business_logic")`. |
 
 ---
 
-## 5. Iter sequence
+## 7. Gap analysis — what the catalog still doesn't cover
+
+The 10 tools above pass the principle test. Walking through what a security engineer actually does on each asset type surfaces 5 remaining gaps:
+
+### Gap 1 — customer context input (biggest gap, NOT a tool)
+
+The lead needs to know **what kind of customer this is** to make `customer_priority` decisions:
+- Industry (fintech / healthcare / SaaS / govtech / e-commerce)
+- Compliance targets (SOC2 / PCI-DSS / HIPAA / GDPR / FedRAMP)
+- Critical assets / endpoint patterns / data classifications
+- Threat model (insider vs external, sophistication)
+
+Without this, `customer_priority` is a guess. Same for the chain narrative ("this matters for *this* customer because...").
+
+**Solution: per-scan config passed via `system_prompt_context`** at scan start, rendered into the system prompt. **Not a tool** — costs 0 catalog slots. Needs implementation + documentation in CLAUDE.md §1.5. Ships as **Q5.13**.
+
+### Gap 2 — raw recon artifact access
+
+The prepass produces katana crawl output, OpenAPI specs, GraphQL schemas, SBOMs, subdomain lists, tech-stack fingerprints. These are NOT findings — they're raw recon data the lead may want to grep, re-read, or sample-inspect. Today they're embedded in tool outputs that the iter-Q2.1 stratified compactor drops to the COLD stratum after a few turns.
+
+**Solution: add `get_recon_artifact(kind, name=None)`** — reads a specific artifact persisted to `<run_dir>/recon/`. Kinds: `endpoints`, `openapi_spec`, `graphql_schema`, `sbom`, `subdomains`, `tech_stack`, `auth_endpoints`. **One new tool, READ STATE bucket.** Ships as **Q5.14**.
+
+**Cap pressure:** adding `get_recon_artifact` pushes web/api/repo to 11 tools. Three resolution options:
+
+| Option | Trade-off |
+|---|---|
+| (a) Collapse `workflow_status` + `list_pending_findings` + `get_finding` + `get_recon_artifact` under a single `read_state(kind, ...)` umbrella (4 → 1) | Loses per-tool docstring clarity; LLM has to learn the kind taxonomy. |
+| (b) Accept 11 tools on web/api/repo as the new cap. Test the 10→11 degradation curve empirically. | The ≤10 number is general guidance, not a strix-specific bench. Q4 (lead parallelism) is the right venue for this measurement. |
+| (c) Defer `get_recon_artifact` — see whether the LLM works around it well enough. | Cheapest; loses the recon-grep capability. |
+
+**Recommended: (b).** Measure 10 vs 11 in a Q4 sub-bench before committing.
+
+### Gap 3 — domain asset gaps (folded into Q5.7a + Q5.12)
+
+Two sub-gaps:
+* Domain catalog doesn't include `terminal_execute` — `dig` / `host` / `whois` queries need shell. **Fix: add `terminal_execute` to domain catalog** (pushes 9 → 10, still at cap). Done via Q5.12.
+* `query_threat_intel` is CVE/CWE-shaped. Domain-level intel (passive DNS, WHOIS history, reputation, related domains) is a separate signal type. **Fix: extend `query_threat_intel(domain=...)` to dispatch to domain-intel sources.** Done via Q5.7a.
+
+### Gap 4 — inconclusive observations (minor)
+
+Currently `create_vulnerability_report` only commits confirmed findings. A real engineer notes "saw a UUID in a response that could be a session ID — investigate later." Today the LLM has no place to put this except `think` (which is being dropped) or losing it.
+
+**Solution: extend `create_vulnerability_report` with `severity="observation"` shape** — same structured record, lower commitment level. Surfaces in `list_pending_findings` with `include_demoted=True`. No new tool needed. Done via Q5.11b (folded into the CV-report extension).
+
+### Gap 5 — repo file reading (defer)
+
+`terminal_execute("sed -n '40,60p' file.py")` works but is awkward. A dedicated `read_file_excerpt(path, start_line, end_line)` would save tokens and remove a shell-escaping footgun.
+
+**Solution: defer.** Adding it pushes repo to 11; not worth the cap pressure right now. Revisit if `bench_context.py` numbers show poor file-citation quality after the rest of Q5 ships.
+
+---
+
+## 8. Iter sequence (consolidated)
+
+Numbers run continuously; the post-Q6-merge renumbering folds Q6.x iters back into the Q5.x line.
 
 | iter | scope | size |
 |---|---|---|
-| **Q5.1** | CLAUDE.md §1.5.5 — add L2-CAP invariant. Add taxonomy section (4 buckets). Add the per-asset target table. | 1 PR, docs only |
-| **Q5.2** | `tests/agents/lead_agent/test_l2_cap_invariant.py` — CI test that fails when any asset's L2 catalog > 10. Run against current (failing) state to confirm the test catches the violation. | 1 PR, ~80 LOC + tests |
-| **Q5.3** | Wire `scan_sqli_sqlmap`, `scan_xss_dalfox`, `scan_smuggling_smuggler` into `anchor_prepass._ANCHORS_WEB` / `_ANCHORS_API`. Drop from `_MINIMAL_TOOLS_BY_TARGET_TYPE`. Re-run iter-37.12 baseline. | 1 PR, ~150 LOC |
-| **Q5.4** | Wire `fingerprint_services_nmap`, `probe_hosts_httpx`, `tls_audit`, `scan_nuclei_templates` into `_ANCHORS_IP`. Drop from `ip_address` L2 catalog. | 1 PR, ~100 LOC + IP-fixture bench |
-| **Q5.5** | Wire `enumerate_subdomains_subfinder`, `scan_dns_hygiene_checkdmarc`, `scan_typosquats_dnstwist`, `scan_nuclei_templates`, `domain_recon_pipeline` into `_ANCHORS_DOMAIN`. Drop from L2 catalog. | 1 PR, ~120 LOC |
-| **Q5.6** | New L2 tool: `propose_chain` (REASONING bucket). Wire into `_MINIMAL_TOOLS_BY_TARGET_TYPE` for web/api/repo. Surface in `bench_chains` so the bench can attribute chain emissions to "auto-heuristic" vs "lead-proposed". | 1 PR, ~200 LOC + 20 tests |
-| **Q5.7** | New L2 tool: `prioritize_findings` (REASONING bucket). Wire into web/api/ip/domain. | 1 PR, ~250 LOC + 25 tests |
-| **Q5.8** | Update `docs/tool-catalog-rationalization.md` + CLAUDE.md §12 to reflect new per-asset counts. | 1 PR, docs only |
-| **Q5.9** | Re-run L1 parity benches (Q3.2-Q3.7) to confirm the prepass migration didn't drop detection. | bench-run PR |
+| **Q5.1** | This consolidated proposal + CLAUDE.md §1.5.5–9 updates (shipped as PR #509 + PR #512) | docs only, ✓ |
+| **Q5.2** | CI invariant test `tests/agents/lead_agent/test_l2_cap_invariant.py` | ~80 LOC + tests |
+| **Q5.3** | Move `scan_sqli_sqlmap`, `scan_xss_dalfox`, `scan_smuggling_smuggler` from L2 to `anchor_prepass._ANCHORS_WEB / _ANCHORS_API`. Re-run iter-37.12 baseline. | ~150 LOC |
+| **Q5.4** | Move `fingerprint_services_nmap`, `probe_hosts_httpx`, `tls_audit`, `scan_nuclei_templates` from L2 to `_ANCHORS_IP`. | ~100 LOC + IP bench |
+| **Q5.5** | Move `enumerate_subdomains_subfinder`, `scan_dns_hygiene_checkdmarc`, `scan_typosquats_dnstwist`, `scan_nuclei_templates`, `domain_recon_pipeline` from L2 to `_ANCHORS_DOMAIN`. Move `map_graphql_inql` to `_ANCHORS_API`. | ~120 LOC |
+| **Q5.6** | New tool `get_finding(id)` | ~50 LOC + 5 tests |
+| **Q5.7** | New tool `query_threat_intel` — collapses `cve_lookup` + `nvd_lookup` + `cve_intel_search` + `kev_diff_check`. 24h cache. | ~400 LOC + 20 tests |
+| **Q5.7a** | Extend `query_threat_intel(domain=...)` for passive DNS / WHOIS / reputation | ~150 LOC + 10 tests |
+| **Q5.8** | New tool `lookup_compliance_mapping` + versioned compliance corpus + cron refresher | ~250 LOC + 15 tests |
+| **Q5.9** | New tool `rescan(tool_name, target, captured_state)` with allow-list + 5-call/scan cap | ~200 LOC + 15 tests |
+| **Q5.10** | Collapse `scan_idor` + `scan_auth_flow` + `scan_business_logic` under `dispatch_l2_probe(kind, **kwargs)` | ~150 LOC + 15 tests |
+| **Q5.11** | Extend `create_vulnerability_report` with `chain_summary` + `customer_priority` parameters. Drop the originally-planned standalone `propose_chain` + `prioritize_findings` tools from the plan. | ~100 LOC + 10 tests |
+| **Q5.11a** | Split `create_vulnerability_report` 21→7 parameters (required-to-commit vs render-on-finish) — render-on-finish fields auto-generated at `finish_scan` from finding context | ~150 LOC + 15 tests |
+| **Q5.11b** | Add `severity="observation"` shape to `create_vulnerability_report` for inconclusive partial signals | ~50 LOC + 5 tests |
+| **Q5.12** | Add per-asset docstring to `terminal_execute`. Add `terminal_execute` to domain catalog (was missing) | ~20 LOC + 5 tests |
+| **Q5.13** | Per-scan customer-context config passed via `system_prompt_context` — `industry`, `compliance_targets`, `critical_assets`, `threat_model`. Document in CLAUDE.md §1.5. | ~80 LOC + 10 tests + docs |
+| **Q5.14** | New tool `get_recon_artifact(kind, name=None)` — persists prepass artifacts to `<run_dir>/recon/` + lets lead read them | ~150 LOC + 10 tests |
+| **Q5.15** | Drop `think` from catalog. Either remove entirely OR thin-wrap to persist into `run_summary.lead_reasoning_trace[]`. | ~30 LOC + 5 tests |
+| **Q5.16** | Update `docs/tool-catalog-rationalization.md` + CLAUDE.md §1.5.8 to reflect shipped reality | docs only |
+| **Q5.17** | Re-run L1 parity benches (Q3.2–Q3.7) to confirm prepass migration didn't drop detection | bench run |
+| **Q5.18** | Re-run `bench_l2_juiceshop_full.py` to confirm L2-audience metrics (`bench_context`, `bench_explanation`, `bench_chains`, `bench_severity`) improve with the new catalog | bench run |
+| **Q5.19** *(conditional)* | Q3 parity bench `taint_analysis` vs. `semgrep --config p/python`. If semgrep wins, retire `taint_analysis`, replace in prepass. | ~150 LOC + fixture |
+| **Q5.20** *(conditional, after Q5.14)* | Empirical 10 vs. 11 catalog-size bench (resolve Gap 2 cap pressure) | bench harness |
 
-**Q5.2 ships before Q5.3-Q5.5** so the CI test is in place and the cap-violations are gated, not silently allowed.
+**Q5.2 ships before Q5.3–Q5.5** so the CI invariant is in place before catalog moves land. **Q5.17 + Q5.18 are gating benches** — no Q5.x merges if either regresses.
 
 ---
 
-## 6. Acceptance criteria
+## 9. Risks + mitigations
 
-1. `tests/agents/lead_agent/test_l2_cap_invariant.py` passes for every registered asset type.
-2. `bench_owasp_benchmark.py` Youden index does NOT regress vs. the pre-Q5 baseline (the deep-exploit tool moves shouldn't change L1 detection — they just change WHERE the tool fires).
+| Risk | Mitigation |
+|---|---|
+| Moving deep-exploit tools to prepass = more deterministic L1 runtime cost (every scan fires sqlmap / dalfox / hydra) | Prepass dispatcher already conditions on iter-30 candidate signals. Unconditional sweep is bounded; cost is acceptable per iter-37.12 baseline. |
+| L2 loses ability to fire sqlmap/dalfox on demand for an endpoint prepass missed | `rescan(tool_name=..., target=..., captured_state=...)` is the escape hatch. Allow-list keeps it safe. |
+| `query_threat_intel` rate-limits hit on NVD / EPSS APIs in CI bench runs | 24h cache + fixture mode for benches (load from local snapshot). Q3 parity bench already uses this pattern. |
+| `lookup_compliance_mapping` corpus drift — frameworks update yearly | Cron pager (like Vulhub corpus iter-Q1.3) flags when corpus is >90d stale. |
+| `rescan` lets the LLM amplify a destructive scan | Validate `tool_name` against allow-list; cap rescans/scan at 5 (iter-29.9 destructive-guard pattern). |
+| Dropping `think` confuses model trained to expect a scratchpad | Replace with system-prompt directive ("reason in your response text; tools are for external action"). Bench impact measured via `bench_explanation`. |
+| Collapsing 3 L2 probes into `dispatch_l2_probe(kind=...)` loses per-probe docstrings | Umbrella tool's docstring enumerates each `kind` with its own kwargs list — same information surface, one slot. |
+| L2-CAP invariant gets quietly violated again next iter | CI test `tests/agents/lead_agent/test_l2_cap_invariant.py` (Q5.2) blocks any PR pushing any asset's catalog over 10. |
+| `get_recon_artifact` pushes web/api/repo to 11 | Q5.20 empirical bench measures degradation. If material, fall back to option (a) — collapse all READ STATE under a `read_state(kind, ...)` umbrella. |
+| Customer-context config (Gap 1) doesn't reach the LLM reliably | Render into system prompt at every turn (same path as SecurityContext re-render in `llm.py:496`); tests pin the prompt-section presence. |
+| Per the L2 tool audit, `taint_analysis` is in-house SAST (CLAUDE.md §11.1 violation) | Q5.19 parity bench against semgrep. If semgrep wins, deprecate. |
+
+---
+
+## 10. Acceptance criteria
+
+1. `tests/agents/lead_agent/test_l2_cap_invariant.py` passes for every registered asset type (every asset ≤ 10).
+2. `bench_owasp_benchmark.py` Youden index does NOT regress vs. the pre-Q5 baseline. (Prepass migration of deep-exploit tools should not change L1 recall — they just change WHERE the tool fires.)
 3. `bench_l2_juiceshop_full.py` `completion_rate` does NOT regress vs. the iter-37.14 baseline.
-4. `bench_chains.py` `chain_detection_rate` IMPROVES once `propose_chain` ships (Q5.6).
-5. `bench_severity.py` `severity_tier_accuracy` shows the lead now writes customer-priority into a separate field than intrinsic severity (Q5.7).
+4. Q3 parity benches (Q3.2–Q3.7) stay GREEN after the prepass migration.
+5. `bench_chains.py` `chain_detection_rate` **improves** after Q5.11 ships (`chain_summary` parameter encourages explicit chain commitment).
+6. `bench_severity.py` `severity_tier_accuracy` improves after Q5.11 ships (`customer_priority` separated from intrinsic `severity`).
+7. `bench_context.py` `actionable_rate` improves after Q5.11a (21→7 parameter split — render-on-finish auto-fills fields the lead used to leave empty).
+8. Every emitted CV-report carries `query_threat_intel`-sourced KEV/EPSS metadata in its description (verified by a new `bench_threat_intel_freshness` scorer — added in Q5.7).
 
-The first three are the **non-regression gates** (the L1-audience artifact must stay constant); the last two are the **value-capture gates** (the L2-audience artifact should improve).
-
----
-
-## 7. Connection to other Q-tracks
-
-* **Q1** (`bench_owasp_benchmark.py` et al.) is the non-regression gate.
-* **Q2** (stratified compaction): Q5 reduces the tool count visible to the LLM, which directly reduces the tool-catalog section of the system prompt. Both pull in the same direction — fewer tokens, more focused decisions. Q2.3 (progressive tool disclosure) can be deprioritized after Q5 ships: when the catalog is already ≤10 there's no progressive-disclosure-driven savings to capture.
-* **Q3** (L1 parity): Q5 *increases* the surface area Q3 must measure, because the deep-exploit tools moving to prepass means they fire by default and contribute to L1 recall. Q3's parity bench for sqlmap / dalfox / hydra / ffuf becomes load-bearing for Q5's non-regression gate.
-* **Q4** (lead-loop parallelism): Q5 trims the lead's surface to 5–10 tools per turn, which makes parallel dispatch decisions simpler. Q4 should land after Q5.
+Criteria 2–4 are **non-regression gates** (L1-audience artifact must stay constant). Criteria 5–8 are **value-capture gates** (L2-audience artifact should improve).
 
 ---
 
-## 8. Open questions for review
+## 11. Connection to other Q-tracks
 
-1. **`scan_business_logic` is currently L2-native** but a recent iter-37 review may demote it. Is it staying in the L2 catalog? (This proposal assumes yes.)
-2. **`prioritize_findings` overlaps with the existing `surface_priority` L1.5 hook.** The hook computes a generic priority; the tool computes a customer-specific one. Are we ok with both surfacing, or should we collapse?
-3. **`propose_chain` is currently a finding-shape, not a separate concept** — chains live as `chain_summary` blocks inside vulnerability_reports. Should this proposal add a separate `chains` array in `run_summary` (cleaner) or keep the embedded shape (smaller change)?
-4. **The orchestrator mode (`STRIX_ORCHESTRATOR_MODE`) already hides probing specialists from the lead and dispatches them in fresh-context sub-agents.** Should orchestrator mode become the default instead of building a parallel "trimmed minimal" path? The decision affects whether Q5 is a catalog refactor or a default-mode flip.
+* **Q1** (`bench_owasp_benchmark.py` et al.) — non-regression gate.
+* **Q2** (stratified compaction) — Q5 directly trims the tool-catalog section of the system prompt. Q2.3 (progressive tool disclosure) can be deprioritized once Q5 ships: with ≤10 tools, the progressive-disclosure savings are marginal.
+* **Q3** (L1 parity) — Q5's deep-exploit moves to prepass *increase* the surface Q3 must measure. Q3 parity benches for sqlmap / dalfox / hydra / ffuf / smuggler / nmap / httpx / nuclei become load-bearing for Q5's non-regression gate.
+* **Q4** (lead-loop parallelism) — should land AFTER Q5. With ≤10 tools per turn, parallel-dispatch decisions are simpler. Q5.20 is the natural home for the 10-vs-11 empirical bench Q4 needs.
 
 ---
 
-## 9. Success criterion
+## 12. Success criterion
 
-> By the end of Q5.9, every L2 asset-type catalog is ≤ 10 tools, every deep-exploit OSS wrapper fires deterministically in `anchor_prepass` (not on LLM choice), the L2 catalog contains only translation + L2-native-detection + primitive tools, and a CI invariant blocks any future PR that pushes any asset's catalog over the cap.
+> By the end of Q5.18, every L2 asset-type catalog is ≤ 10 tools and composed entirely of READ STATE + FETCH EXTERNAL + RE-DISPATCH + COMMIT/PRIMITIVE tools — no tool exists for "the LLM to do reasoning it could do in response text." Every CV-report carries threat-intel and compliance fields populated by scan-time fetches (not by training-data recall). Customer-context input lets the lead make customer-priority decisions on real signal, not a guess. A CI invariant blocks any future PR that pushes any asset's catalog over the cap or re-introduces a reasoning-shaped tool.
 
-The L1 audience (security team) keeps its full L1 detection coverage via the prepass migration. The L2 audience (developers, PMs) gets a focused AI-security-engineer that has the right tools (chain proposal, customer prioritization) and doesn't burn turns deciding whether to run sqlmap.
+This is the L2 catalog you'd build if you started today, knowing what L1 and L1.5 already do, and treating tools as the LLM's hands rather than its brain. The L1 audience (security team) keeps full L1 detection coverage via the prepass migration. The L2 audience (developers, PMs) gets an AI security engineer with current threat-intel, current compliance mappings, customer-aware priorities, and chain narratives written for the audience that has to act on them.
 
-This is the architectural commitment of CLAUDE.md §1.5 made concrete in the catalog.
+---
+
+## Appendix A — what we deliberately don't ship
+
+For future Claude turns reading this doc, these tools were considered and rejected:
+
+| Tool | Why not |
+|---|---|
+| `think()` | No-op echo. LLM thinks in response text. |
+| `propose_chain(finding_ids, narrative)` | Chain narrative IS the response. Commit via `create_vulnerability_report.chain_summary`. |
+| `prioritize_findings(customer_context)` | Customer ranking IS the response. Commit via `create_vulnerability_report.customer_priority`. |
+| `explain_finding_for_developer(id)` | Plain-English explanation IS the response. Commit via `create_vulnerability_report.description_plain` (auto-generated post-Q5.11a). |
+| `map_to_compliance_control(id)` | Use `lookup_compliance_mapping` to fetch current control IDs; the mapping decision IS the response. |
+| `assemble_chain_narrative(ids)` | Narrative IS the response. Commit via `create_vulnerability_report.chain_summary`. |
+| `generate_remediation_diff(id)` | Diff IS the response. Commit via `create_vulnerability_report.recommended_action` (render-on-finish, post-Q5.11a). |
+| Per-asset variants of the L2-native probes (`scan_idor_web`, `scan_idor_api`, …) | Folded under `dispatch_l2_probe(kind=...)`. |
+| Per-CVE-source wrappers (`cve_lookup`, `nvd_lookup`, `cve_intel_search`, `kev_diff_check` as separate L2 tools) | Folded under `query_threat_intel`. |
+
+Every entry above failed one of two tests: (a) it's reasoning the LLM can do in its response, or (b) it duplicates a slot that's better filled by an umbrella tool with a `kind`/`source` parameter.
+
+---
+
+## Appendix B — historical companion docs
+
+* `docs/proposals/2026-05-27-l2-from-first-principles.md` — the first-principles framing, now folded in here. Kept for historical context.
+* `docs/proposals/2026-05-27-l2-tool-audit.md` — per-tool audit (read each tool's implementation, judge fit). Informs §4 and §7.
+* `docs/proposals/2026-05-27-benchmark-suite-strategy.md` (Q1) — non-regression bench framework.
+* `docs/proposals/2026-05-27-l1-parity-measurement.md` (Q3) — load-bearing measurement for the prepass-migration claim.
