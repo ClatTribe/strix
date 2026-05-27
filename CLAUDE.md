@@ -82,53 +82,106 @@ The cap counts **what the LLM sees in the system prompt** — the minimal CORE t
 
 A CI invariant test (`tests/agents/lead_agent/test_l2_cap_invariant.py`, ships in iter-Q5.2) gates any PR that raises any asset's catalog past the cap.
 
-### 1.5.6 L2 tool taxonomy — 4 buckets
+### 1.5.6 The tool-existence principle
 
-Every tool in the L2 catalog must fit one of these four buckets. Tools that don't fit either belong in `anchor_prepass` (L1 detection) or as a terminal auto-artifact:
+> **Tools are the LLM's hands, not its brain.**
+>
+> A tool exists when the LLM either **CAN'T** do the thing (real-time external data, subprocess execution, network I/O) or **SHOULDN'T** do it without a system-of-record (committing a finding, advancing workflow, terminating the scan).
+
+**Tools belong in the catalog when at least one of these is true:**
+
+| Condition | Why a tool is needed |
+|---|---|
+| **Real-time external data** | LLM training cutoff is stale. Threat feeds, current CVE/EPSS/KEV state, vendor advisories, current compliance-control text — all change after training. |
+| **Re-trigger a deterministic scan** | The LLM can't run subprocess / network I/O. Re-firing `nuclei` against a new endpoint with new auth, or `scan_idor` with newly captured sessions, needs the tool. |
+| **Persistent side-effect** | Committing a finding, advancing workflow phase, or terminating the scan are state changes the system-of-record must own. |
+| **Reading state outside conversation context** | `workflow_status`, `list_pending_findings` — facts that live outside the conversation window. |
+
+**Tools do NOT belong in the catalog when:**
+
+| Anti-condition | Why it's not a tool |
+|---|---|
+| **Reasoning over data already in context** | Prioritization, chain narrative assembly, plain-English explanation, severity decision — pure reasoning. The LLM emits these as part of its response. |
+| **Reformatting / templating** | Rendering a finding into markdown, formatting CVSS XML — the LLM is the renderer; no tool needed. |
+| **Decisions encoded inline in the response** | "I think this is high severity" is part of the LLM's argument; it becomes a tool call only when COMMITTING to the system-of-record — and even then the commit can be a *parameter* on an existing emission tool. |
+
+**Concrete examples of the principle, applied:**
+
+* `think()` — **wrong tool.** It's a no-op echo that returns char-count. The LLM can think in response text. If a reasoning audit trail is wanted, capture the `assistant_text` turns; don't synthesize a tool for it.
+* `propose_chain(finding_ids, narrative)` — **wrong tool.** The chain narrative *is* the LLM's response. Commit chains via a `chain_summary` parameter on `create_vulnerability_report`, not a separate tool.
+* `prioritize_findings(customer_context)` — **wrong tool.** The customer-context ranking *is* the LLM's response. Commit via a `customer_priority: int` parameter on `create_vulnerability_report`.
+* `query_threat_intel(cve_id)` — **right tool.** LLM training data doesn't know whether CVE-2024-X was added to CISA KEV last week or whether EPSS moved this morning.
+* `rescan(tool_name, target, captured_state)` — **right tool.** The LLM can't run subprocess. Re-firing `nuclei` against a newly authed endpoint requires the dispatcher.
+* `create_vulnerability_report(...)` — **right tool.** Persistent side-effect to `tracer.vulnerability_reports`. System-of-record commit.
+
+### 1.5.7 L2 tool taxonomy — 4 buckets (first-principles)
+
+Every tool in the L2 catalog must fit one of these four buckets:
 
 ```
 L2 catalog (≤ 10 tools per asset type)
-├── CORE (5 — identical for every asset type)
-│     OBSERVE:   workflow_status, list_pending_findings
-│     ORIENT:    think
-│     ACT:       create_vulnerability_report  (upsert via existing_report_id)
-│     TERMINATE: finish_scan                  (auto-fires compliance + remediation)
+├── READ STATE        (3 — universal across asset types)
+│     workflow_status         — phase + endpoints + gates + next_actions
+│     list_pending_findings   — L1.5-ranked findings ledger
+│     get_finding(id)         — single-finding deep read companion
 │
-├── REASONING (translation-specific, 0–2 per asset)
-│     propose_chain          — assembles multi-finding exploit narrative
-│     prioritize_findings    — re-ranks for THIS customer's context
+├── FETCH EXTERNAL    (2 — universal — currently EMPTY in the shipped catalog, ←  THE GAP)
+│     query_threat_intel      — collapses cve_lookup + nvd_lookup + cve_intel_search
+│                              + kev_diff_check. Returns CVSS + KEV + EPSS +
+│                              advisories + exploit availability. 24h cache.
+│     lookup_compliance_mapping — current SOC2/PCI/HIPAA control IDs from a
+│                              versioned corpus refreshed on cron.
 │
-├── L2-NATIVE DETECTION (only tools requiring LLM state-reasoning, 0–3 per asset)
-│     scan_idor              — session-aware authz (no OSS substitute)
-│     scan_auth_flow         — auth orchestration (no OSS substitute)
-│     scan_business_logic    — app-specific reasoning (no OSS substitute)
-│     build_code_map         — repo-only — LLM-driven code understanding
-│     taint_analysis         — repo-only — LLM-led taint chains
-│     map_graphql_inql       — api-only  — InQL deep work
+├── RE-DISPATCH       (1–2 per asset)
+│     rescan(tool, target, state)         — re-fire an L1 OSS tool with new state
+│     dispatch_l2_probe(kind, **kwargs)   — collapses scan_idor / scan_auth_flow /
+│                              scan_business_logic under one umbrella
+│                              (kind ∈ {idor, auth_flow, business_logic})
+│     build_code_map (repo)               — file-system walk
 │
-└── PRIMITIVES (escape hatches, 0–2 per asset)
-      send_request           — arbitrary HTTP
-      terminal_execute       — arbitrary shell (repo / IP / container)
+└── COMMIT + PRIMITIVES  (2 commit + 1 primitive per asset)
+      create_vulnerability_report — emits finding; carries chain_summary +
+                                    customer_priority parameters (the REASONING
+                                    work commits HERE, no separate tool needed)
+      finish_scan                 — terminate; auto-fires compliance + remediation
+      send_request                — escape hatch: arbitrary HTTP
+      terminal_execute            — escape hatch: arbitrary shell (repo / IP / container)
 ```
 
-**The rule for adding a new L2 tool:** name the bucket. If you can't, the tool belongs in `anchor_prepass` (it's L1 detection) or in `finish_scan` (it's a terminal artifact).
+**There is NO "REASONING" bucket.** Reasoning lives in the LLM's response text; reasoning *commits* (chains, customer priorities) ride as parameters on `create_vulnerability_report`.
 
-### 1.5.7 Per-asset L2 catalog (post-Q5)
+**The rule for adding a new L2 tool:** name the bucket. If you can't — and especially if the proposed tool's job is "let the LLM declare a thought / plan / preference" — the work belongs in the LLM's response text, with the commit folded into an existing emission tool's parameter set. Tools that don't fit either belong in `anchor_prepass` (L1 detection) or as a terminal auto-artifact in `finish_scan`.
 
-The target state after iter-Q5.x ships (see `docs/proposals/2026-05-27-l2-tool-cap-and-translation-toolkit.md`):
+### 1.5.8 Per-asset L2 catalog (first-principles target)
 
-| Asset | CORE | REASONING | L2-NATIVE DETECTION | PRIMITIVES | **Total** |
+Target state after iter-Q6.x ships (see `docs/proposals/2026-05-27-l2-from-first-principles.md`):
+
+| Asset | READ STATE | FETCH EXTERNAL | RE-DISPATCH | COMMIT + PRIMITIVES | **Total** |
 |---|---|---|---|---|---|
-| `web_application` | 5 | propose_chain, prioritize_findings | scan_idor, scan_auth_flow, scan_business_logic | send_request | **10** |
-| `api` | 5 | propose_chain, prioritize_findings | scan_idor, scan_auth_flow, map_graphql_inql | send_request | **10** |
-| `repository` / `local_code` | 5 | propose_chain | build_code_map, taint_analysis, scan_business_logic | terminal_execute | **10** |
-| `container_image` | 5 | — | — | terminal_execute | **6** |
-| `ip_address` | 5 | prioritize_findings | — | send_request, terminal_execute | **8** |
-| `domain` | 5 | prioritize_findings | — | send_request | **7** |
+| `web_application` | workflow_status, list_pending_findings, get_finding | query_threat_intel, lookup_compliance_mapping | rescan, dispatch_l2_probe | create_vulnerability_report, finish_scan, send_request | **10** |
+| `api` | same | same | rescan, dispatch_l2_probe | create_vulnerability_report, finish_scan, send_request | **10** |
+| `repository` / `local_code` | same | same | rescan, build_code_map | create_vulnerability_report, finish_scan, terminal_execute | **10** |
+| `container_image` | same | same | rescan | create_vulnerability_report, finish_scan, terminal_execute | **9** |
+| `ip_address` | same | same | rescan | create_vulnerability_report, finish_scan, send_request, terminal_execute | **10** |
+| `domain` | same | same | rescan | create_vulnerability_report, finish_scan, send_request | **9** |
 
-Every deep-exploit OSS wrapper (sqlmap, dalfox, hydra, ffuf, smuggler, nuclei, nmap, httpx, subfinder, checkdmarc, dnstwist, mobsfscan, schemathesis, …) fires in `anchor_prepass`, not on LLM choice. The LLM only sees translation + L2-native-detection + primitives.
+Universal: 3 READ STATE + 2 FETCH EXTERNAL + 1 RE-DISPATCH (rescan) + 2 COMMIT = **8 universal tools.** Per-asset add 1–2 from `{dispatch_l2_probe, build_code_map}` + 1–2 primitives = **9–10 total.**
 
-**Current state (pre-Q5, as of 2026-05-27):** web=13, api=14, repo=10, container=7, ip=11, domain=11 — 4 of 6 asset types violate the cap. iter-Q5.x is the remediation.
+Every deep-exploit OSS wrapper (sqlmap, dalfox, hydra, ffuf, smuggler, nuclei, nmap, httpx, subfinder, checkdmarc, dnstwist, mobsfscan, schemathesis, …) fires in `anchor_prepass`, not on LLM choice. The LLM only sees state-readers, real-time fetchers, re-dispatch primitives, and commit tools.
+
+### 1.5.9 What this catalog deliberately drops
+
+The post-Q5 plan included `think`, `propose_chain`, and `prioritize_findings`. None survive the first-principles filter:
+
+| Tool | Bucket attempted | Why it's wrong | What replaces it |
+|---|---|---|---|
+| `think` | REASONING | Pure no-op echo. LLM can think in response text. | Capture `assistant_text` turns into `run_summary.lead_reasoning_trace[]` — no LLM-visible tool. |
+| `propose_chain` | REASONING | Chain narrative IS the LLM's response. | `chain_summary` parameter on `create_vulnerability_report`. |
+| `prioritize_findings` | REASONING | Customer ranking IS the LLM's response. | `customer_priority: int` parameter on `create_vulnerability_report`. |
+
+The REASONING bucket from the original Q5 taxonomy is **deliberately empty** under first principles. Every tool the LLM sees does something the LLM can't do alone.
+
+**Historical state (pre-Q5, as of 2026-05-27):** web=13, api=14, repo=10, container=7, ip=11, domain=11 — 4 of 6 asset types violated the cap, AND the FETCH EXTERNAL bucket was empty so every CV-report carried training-data-stale threat metadata. iter-Q6.x is the remediation (replaces the originally-planned Q5.6 + Q5.7).
 
 ---
 

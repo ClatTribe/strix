@@ -1,10 +1,34 @@
 # L2 ≤10-tool cap + L2 translation toolkit
 
-**Status:** proposal — pending review
+**Status:** **SUPERSEDED in part by Q6** — the ≤10 cap (§1.1) and the per-asset reorg framing (§3.3 — moving deep-exploit OSS wrappers to `anchor_prepass`) remain canonical. The REASONING-bucket additions (§3.4 `propose_chain` / `prioritize_findings` as standalone tools) are **REPLACED** by `create_vulnerability_report` parameters per `docs/proposals/2026-05-27-l2-from-first-principles.md` (Q6). The 4-bucket taxonomy in §3.1 is **REPLACED** by the first-principles 4-bucket taxonomy (READ STATE / FETCH EXTERNAL / RE-DISPATCH / COMMIT) in CLAUDE.md §1.5.7.
 **Owner:** ClatTribe/strix
 **Created:** 2026-05-27
+**Superseded:** 2026-05-27 (same-day, by Q6 after applying the first-principles filter to this doc's catalog)
 **Depends on:** CLAUDE.md §1.5 (product-goal framing, L1 / L2 audience split)
-**Related:** iter-37 series (`docs/tool-catalog-rationalization.md`), Q3 (`docs/proposals/2026-05-27-l1-parity-measurement.md`)
+**Related:** iter-37 series (`docs/tool-catalog-rationalization.md`), Q3 (`docs/proposals/2026-05-27-l1-parity-measurement.md`), Q6 (`docs/proposals/2026-05-27-l2-from-first-principles.md`)
+
+---
+
+## 0. What survives and what doesn't (read this first)
+
+This doc captured the right *constraint* (≤10 tools per asset) and the right *direction* (move deep-exploit OSS wrappers out of L2's catalog) but proposed the *wrong type of additions* to fill the freed slots. Specifically, it added `propose_chain` and `prioritize_findings` as standalone REASONING tools. Per the principle now codified in **CLAUDE.md §1.5.6 — "Tools are the LLM's hands, not its brain"** — those aren't tools at all. The chain narrative and customer-priority ranking are reasoning outputs that *commit* via parameters on `create_vulnerability_report`, not via separate tool calls.
+
+**Canonical parts of this doc (still valid):**
+- §1.1 — the ≤10-tool constraint
+- §1.2 — the current-state audit (4/6 asset types violate)
+- §2 — the "wrong tools in L2's catalog" critique (deep-exploit OSS wrappers belong in anchor_prepass)
+- §3.3 — the move-OUT list (sqlmap / dalfox / hydra / ffuf / smuggler / nuclei / nmap / httpx / subfinder / checkdmarc / dnstwist / mobsfscan / schemathesis / domain_recon_pipeline → anchor_prepass)
+- §4 — risks + mitigations (unchanged)
+- §6 — acceptance criteria (unchanged)
+
+**Superseded parts (replaced by Q6):**
+- §3.1 (4-bucket taxonomy CORE/REASONING/L2-NATIVE/PRIMITIVES) — replaced by Q6's READ STATE / FETCH EXTERNAL / RE-DISPATCH / COMMIT in CLAUDE.md §1.5.7
+- §3.2 (per-asset target table with `propose_chain`/`prioritize_findings` rows) — replaced by CLAUDE.md §1.5.8 (first-principles per-asset table)
+- §3.4 (`propose_chain` + `prioritize_findings` as standalone tools) — replaced by `chain_summary` + `customer_priority` parameters on `create_vulnerability_report` per Q6.7
+- §5 iter sequence Q5.6 + Q5.7 — replaced by Q6.2, Q6.3, Q6.7 iters
+- §7 connection-to-other-Qs — partially superseded; Q6 is now the controlling proposal for the L2 catalog shape
+
+The rest of this document is preserved unedited below for historical context. Read alongside Q6.
 
 ---
 
