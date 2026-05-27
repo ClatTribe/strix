@@ -48,13 +48,16 @@ def _clean_env():
 # ---------------------------------------------------------------------------
 
 
-def test_minimal_core_has_exactly_5_tools():
-    """iter-37.10 trims the core from 13 → 5. If this asserts off,
-    the trim either over- or under-shot."""
-    assert len(_MINIMAL_CORE_TOOLS) == 5, (
-        f"iter-37.10 minimal core should be exactly 5 tools "
-        f"(one per OODA phase + terminate); got {len(_MINIMAL_CORE_TOOLS)}: "
-        f"{sorted(_MINIMAL_CORE_TOOLS)}"
+def test_minimal_core_has_exactly_6_tools():
+    """iter-37.10 trimmed CORE from 13 → 5. iter-Q5.6 added
+    get_finding (single-finding deep read companion to
+    list_pending_findings) → 6. All 6 belong in READ STATE / ORIENT /
+    ACT / TERMINATE buckets per CLAUDE.md §1.5.7."""
+    assert len(_MINIMAL_CORE_TOOLS) == 6, (
+        f"Minimal core should be exactly 6 tools post iter-Q5.6 "
+        f"(workflow_status + list_pending_findings + get_finding + "
+        f"think + create_vulnerability_report + finish_scan); "
+        f"got {len(_MINIMAL_CORE_TOOLS)}: {sorted(_MINIMAL_CORE_TOOLS)}"
     )
 
 

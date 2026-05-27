@@ -59,6 +59,12 @@ _CORE_TOOLS: frozenset[str] = frozenset({
     # by default. The Lead calls this between specialist dispatches to
     # pick the highest-leverage next target.
     "list_pending_findings",
+    # iter-Q5.6 — single-finding deep-read companion to
+    # list_pending_findings. The list returns ~8 fields per row;
+    # get_finding returns the FULL report dict for one ID. Used when
+    # composing chain narratives or writing developer-facing prose
+    # against a specific finding's full evidence + L1.5 enrichment.
+    "get_finding",
     # iter-26.5 + 26.6 — dequeue & fire L1.5 auto-confirmations
     # (SAST→DAST) and finding-triggered probe bundles. Idempotent;
     # safe to call repeatedly between dispatches.
@@ -557,18 +563,24 @@ _MINIMAL_TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "send_request",
     }),
     "repository": frozenset({
+        # iter-Q5.6 cap-pressure cleanup: scan_mobile_mobsfscan moved
+        # to anchor_prepass per iter-37.14 — removing the L2-catalog
+        # duplicate so adding get_finding to CORE doesn't push repo
+        # past the ≤10 cap. The lead doesn't pick whether to run
+        # MobSF; it fires deterministically as L1 detection.
+        #
         # === ACT only — SAST + secrets + SCA + IaC fire in prepass ===
         # Code reasoning primitives (LLM-orchestrated, no OSS substitute)
         "build_code_map",
         "taint_analysis",
-        # Verify gitleaks/SAST credentials are LIVE
+        # Verify gitleaks/SAST credentials are LIVE. Distinct from
+        # secrets_scan (which DETECTS in prepass) — this VERIFIES a
+        # surfaced secret is still credentialed. Keeps catalog slot
+        # because the LLM decides which surfaced secrets are worth
+        # the verification call.
         "verify_credentials_trufflehog",
         # Terminal for opening files etc.
         "terminal_execute",
-        # iter-37.14 — mobile-app SAST (MobSF). Auto-unpacks .apk/.aab
-        # via apktool, runs semgrep-style rules on Java/Kotlin/Swift
-        # source + AndroidManifest.xml audits.
-        "scan_mobile_mobsfscan",
     }),
     "local_code": frozenset({
         # Same shape as repository.
@@ -576,7 +588,6 @@ _MINIMAL_TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
         "taint_analysis",
         "verify_credentials_trufflehog",
         "terminal_execute",
-        "scan_mobile_mobsfscan",        # iter-37.14
     }),
     "ip_address": frozenset({
         # iter-Q5.4: fingerprint_services_nmap + probe_hosts_httpx +
@@ -725,6 +736,15 @@ _MINIMAL_CORE_TOOLS: frozenset[str] = frozenset({
 
     # === OBSERVE: what did L1 surface? ===
     "list_pending_findings",
+
+    # === OBSERVE: deep-read a single finding ===
+    # iter-Q5.6 — companion to list_pending_findings. The list view
+    # returns ~8 fields per finding; get_finding returns the FULL
+    # report (description / evidence / code_locations / chain_summary
+    # / corroborated_by / kill_chain / etc.) for ONE finding. Used
+    # when composing a chain narrative or writing the developer-
+    # facing description.
+    "get_finding",
 
     # === ORIENT: scratchpad ===
     # No-op tool that gives the LLM a place to record reasoning.

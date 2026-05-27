@@ -179,14 +179,17 @@ def test_api_specialist_drops_prepass_duplicates():
 # ---------------------------------------------------------------------------
 
 
-def test_code_specialist_set_has_5_tools():
-    """iter-37.14: + scan_mobile_mobsfscan (MobSF mobile SAST) →
-    5 specialists per code asset."""
+def test_code_specialist_set_has_4_tools():
+    """iter-37.14 had 5 specialists. iter-Q5.6 dropped
+    scan_mobile_mobsfscan (already in anchor_prepass — was a duplicate
+    in catalog) to make room for get_finding being added to CORE
+    without breaking the ≤10 cap → 4 specialists (build_code_map,
+    taint_analysis, verify_credentials_trufflehog, terminal_execute)."""
     for asset in ("repository", "local_code"):
         tools = _MINIMAL_TOOLS_BY_TARGET_TYPE[asset]
-        assert len(tools) == 5, (
-            f"{asset} should have 5 ACT-only specialists post "
-            f"iter-37.14; got {len(tools)}: {sorted(tools)}"
+        assert len(tools) == 4, (
+            f"{asset} should have 4 ACT-only specialists post "
+            f"iter-Q5.6; got {len(tools)}: {sorted(tools)}"
         )
 
 
@@ -323,10 +326,12 @@ def test_code_total_catalog_at_or_under_10_tools():
         assert len(tools) <= 10, f"{asset} has {len(tools)} tools"
 
 
-def test_container_total_catalog_at_or_under_7_tools():
-    """5 core + 2 specialist = 7."""
+def test_container_total_catalog_at_or_under_8_tools():
+    """iter-Q5.6: CORE grew from 5 → 6 (get_finding). Container
+    container is 6 core + 2 specialist = 8 — still well under the
+    ≤10 L2-CAP invariant."""
     tools = get_lead_tool_catalog(target_types=["container_image"])
-    assert len(tools) <= 7
+    assert len(tools) <= 8
 
 
 # ---------------------------------------------------------------------------
