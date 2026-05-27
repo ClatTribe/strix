@@ -72,12 +72,12 @@ REGISTERED_ASSET_TYPES: tuple[str, ...] = (
 #   web=10, api=10, repo=10, local_code=10, container=9, ip=10, domain=10
 _BASELINE_CATALOG_COUNTS: dict[str, int] = {
     "web_application": 8,    # iter-Q5.3: dropped sqlmap/dalfox/smuggler/hydra/ffuf (13 → 8)
-    "api": 9,                # iter-Q5.3: dropped sqlmap/smuggler/hydra/ffuf/schemathesis (14 → 9)
+    "api": 8,                # iter-Q5.3 + Q5.5: also dropped map_graphql_inql (9 → 8)
     "repository": 10,
     "local_code": 10,
     "container_image": 7,
-    "ip_address": 11,
-    "domain": 11,
+    "ip_address": 7,         # iter-Q5.4: dropped nmap/httpx/nuclei/tls_audit (11 → 7)
+    "domain": 7,             # iter-Q5.5: dropped 5 recon tools + added terminal_execute (11 → 7)
 }
 
 
@@ -106,38 +106,15 @@ def _clean_env(monkeypatch):
 # params XPASS — strict=True turns that into a build failure that
 # forces the next PR to strip the marker. That's the intended flow.
 @pytest.mark.parametrize("asset_type", [
-    # iter-Q5.3 closed web (13 → 8) and api (14 → 9). xfail markers
-    # stripped — both now pass under the cap. The history is in
-    # _BASELINE_CATALOG_COUNTS comments + the PR that lands this.
+    # iter-Q5.3-Q5.5: all 6 asset types now under the cap. xfail
+    # markers stripped — every asset's catalog ≤ 10.
     "web_application",
     "api",
     "repository",
     "local_code",
     "container_image",
-    pytest.param(
-        "ip_address",
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason=(
-                "iter-Q5.4 closes ip_address: 11 → 10 by moving "
-                "fingerprint_services_nmap, probe_hosts_httpx, "
-                "scan_nuclei_templates, tls_audit to anchor_prepass."
-            ),
-        ),
-    ),
-    pytest.param(
-        "domain",
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason=(
-                "iter-Q5.5 closes domain: 11 → 10 by moving "
-                "enumerate_subdomains_subfinder, scan_dns_hygiene_checkdmarc, "
-                "scan_typosquats_dnstwist, scan_nuclei_templates, "
-                "domain_recon_pipeline to anchor_prepass + adding "
-                "terminal_execute per gap-fix Q5.12."
-            ),
-        ),
-    ),
+    "ip_address",
+    "domain",
 ])
 def test_l2_catalog_within_cap(asset_type: str) -> None:
     """For every registered asset type, the L2-visible catalog must be

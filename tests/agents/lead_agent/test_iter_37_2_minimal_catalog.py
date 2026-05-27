@@ -141,12 +141,17 @@ def test_api_minimal_catalog_anchors_on_openapi():
     assert "openapi_spec_ingest" in anchors
 
 
-def test_api_minimal_catalog_includes_graphql_inql():
-    """GraphQL endpoints are common on API targets. InQL stays in
-    catalog — no comparable OSS substitute for fine-grained schema
-    mutation testing."""
+def test_api_anchor_prepass_includes_map_graphql_inql():
+    """iter-Q5.5: map_graphql_inql moved from L2 catalog to
+    anchor_prepass — it's an OSS wrapper (inql), not L2-native, per
+    the L2 audit + CLAUDE.md §1.5."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
+    anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["api"]}
+    assert "map_graphql_inql" in anchors
     tools = get_lead_tool_catalog(target_types=["api"])
-    assert "map_graphql_inql" in tools
+    assert "map_graphql_inql" not in tools
 
 
 def test_code_minimal_catalog_anchors_on_semgrep_trivy():
@@ -178,15 +183,34 @@ def test_container_minimal_catalog_anchors_on_trivy():
     assert "scan_image_dockle" in tools  # dockle — still in catalog
 
 
-def test_ip_minimal_catalog_anchors_on_nmap_nuclei():
+def test_ip_anchor_prepass_includes_nmap_and_nuclei():
+    """iter-Q5.4: nmap + nuclei + httpx + tls_audit moved from
+    ip_address L2 catalog to _ANCHORS_IP. Per CLAUDE.md §1.5 — recon
+    fires deterministically; L2 lead reads via list_pending_findings."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
+    anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["ip_address"]}
+    assert "fingerprint_services_nmap" in anchors
+    assert "scan_nuclei_templates" in anchors
     tools = get_lead_tool_catalog(target_types=["ip_address"])
-    assert "fingerprint_services_nmap" in tools  # nmap
-    assert "scan_nuclei_templates" in tools  # nuclei templates
+    assert "fingerprint_services_nmap" not in tools
+    assert "scan_nuclei_templates" not in tools
 
 
-def test_domain_minimal_catalog_anchors_on_subfinder_bbot():
+def test_domain_anchor_prepass_includes_subfinder_and_pipeline():
+    """iter-Q5.5: subfinder / checkdmarc / dnstwist / nuclei /
+    domain_recon_pipeline moved from domain L2 catalog to
+    _ANCHORS_DOMAIN."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
+    anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["domain"]}
+    assert "domain_recon_pipeline" in anchors
+    assert "enumerate_subdomains_subfinder" in anchors
     tools = get_lead_tool_catalog(target_types=["domain"])
-    assert "domain_recon_pipeline" in tools or "enumerate_subdomains_subfinder" in tools
+    assert "domain_recon_pipeline" not in tools
+    assert "enumerate_subdomains_subfinder" not in tools
 
 
 # ---------------------------------------------------------------------------

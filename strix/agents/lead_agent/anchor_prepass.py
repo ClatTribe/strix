@@ -185,6 +185,60 @@ def _container_kwargs(target_value: str, workspace_path: str, tool_name: str) ->
     return {"image_ref": target_value}
 
 
+# ---------------------------------------------------------------------------
+# iter-Q5.4 / Q5.5 — ip_address + domain kwarg builders
+# ---------------------------------------------------------------------------
+
+
+def _ip_target_kwargs(
+    target_value: str, workspace_path: str, tool_name: str,
+) -> dict[str, Any]:
+    """Kwargs for ip-asset OSS tools that take `target=` (IP literal
+    or CIDR). Used by: `fingerprint_services_nmap`, `tls_audit`."""
+    return {"target": target_value}
+
+
+def _ip_hosts_list_kwargs(
+    target_value: str, workspace_path: str, tool_name: str,
+) -> dict[str, Any]:
+    """Kwargs for `probe_hosts_httpx` — accepts `hosts=` as a list.
+    For ip_address asset, the single target becomes a 1-element list."""
+    return {"hosts": [target_value]}
+
+
+def _ip_url_synthesis_kwargs(
+    target_value: str, workspace_path: str, tool_name: str,
+) -> dict[str, Any]:
+    """Kwargs for tools that take `url=` but the asset is an IP. Synthesize
+    `http://<ip>` (the prepass nuclei tag set probes both HTTP and HTTPS
+    via templates anyway; the URL scheme just seeds the first hit)."""
+    base = target_value.strip()
+    url = base if "://" in base else f"http://{base}"
+    # Reuse the broad-signature kwargs (tags + severity + max_templates)
+    # from _api_url_with_severity_kwargs for nuclei specifically.
+    kwargs = _api_url_with_severity_kwargs(url, workspace_path, tool_name)
+    return kwargs
+
+
+def _domain_kwargs(
+    target_value: str, workspace_path: str, tool_name: str,
+) -> dict[str, Any]:
+    """Kwargs for domain-asset OSS tools that take `domain=` (apex).
+    Used by: `enumerate_subdomains_subfinder`, `scan_dns_hygiene_checkdmarc`,
+    `scan_typosquats_dnstwist`, `domain_recon_pipeline`."""
+    return {"domain": target_value}
+
+
+def _domain_url_synthesis_kwargs(
+    target_value: str, workspace_path: str, tool_name: str,
+) -> dict[str, Any]:
+    """Kwargs for nuclei on a domain asset. Synthesize
+    `http://<domain>` (nuclei templates probe both HTTP and HTTPS)."""
+    base = target_value.strip()
+    url = base if "://" in base else f"http://{base}"
+    return _api_url_with_severity_kwargs(url, workspace_path, tool_name)
+
+
 # iter-21.5 followup: `_mobile_app_kwargs` was added with the
 # `_ANCHORS_MOBILE` list + `mobile_app` asset-type entry below.
 # That trio is intentionally NOT wired here yet — the upstream
@@ -350,6 +404,15 @@ _ANCHORS_API: list[tuple[str, Any]] = [
     #     AppSync / Postgraphile / Strapi. Returns partial when
     #     target has no GraphQL endpoint (no penalty on REST-only).
     ("discover_graphql_endpoints", _api_target_url_kwargs),
+    # 2c-bis. iter-Q5.5 — InQL deep schema mapping. Companion to the
+    #     light `discover_graphql_endpoints` above: when a GraphQL
+    #     endpoint is present, inql introspects + dumps every Query /
+    #     Mutation with its argument types. Per the L2 audit
+    #     (`docs/proposals/2026-05-27-l2-tool-audit.md` §11) this is
+    #     an OSS wrapper, not L2-native — moved here from the L2
+    #     catalog. Takes `target_url=`. Returns partial when
+    #     introspection is disabled (a hardening posture, not a bug).
+    ("map_graphql_inql", _api_target_url_kwargs),
     # 2d. iter-28.4 — auth seed: discover registration endpoint by
     #     shape, register a randomized test account, export captured
     #     JWT/cookie via STRIX_AUTH_BEARER / STRIX_AUTH_COOKIE for
@@ -506,6 +569,53 @@ _ANCHORS_CONTAINER: list[tuple[str, Any]] = [
     ("scan_container_image", _container_kwargs),
 ]
 
+
+# ---------------------------------------------------------------------------
+# iter-Q5.4 — _ANCHORS_IP (was empty; ip_address had no prepass coverage)
+# ---------------------------------------------------------------------------
+
+_ANCHORS_IP: list[tuple[str, Any]] = [
+    # Service / port fingerprinting — first because every other IP
+    # tool benefits from knowing which ports are alive + what's on
+    # them. Takes `target=` (IP literal or CIDR).
+    ("fingerprint_services_nmap", _ip_target_kwargs),
+    # HTTP probe — populates SecurityContext.tech_stack for any IP
+    # that serves HTTP/HTTPS. Takes `hosts=` (list, even for single
+    # target).
+    ("probe_hosts_httpx", _ip_hosts_list_kwargs),
+    # nuclei signature corpus on HTTP services. URL synthesized as
+    # http://<ip>; templates also probe HTTPS via internal logic.
+    ("scan_nuclei_templates", _ip_url_synthesis_kwargs),
+    # TLS hygiene + cert audit. tls_audit takes `target=`.
+    ("tls_audit", _ip_target_kwargs),
+]
+
+
+# ---------------------------------------------------------------------------
+# iter-Q5.5 — _ANCHORS_DOMAIN (was empty; domain had no prepass coverage)
+# ---------------------------------------------------------------------------
+
+_ANCHORS_DOMAIN: list[tuple[str, Any]] = [
+    # Comprehensive domain pipeline orchestrator (subfinder + bbot +
+    # passive DNS + cloud-asset discovery + subdomain takeover).
+    # Wraps several other tools so we fire the pipeline once instead
+    # of each component. Takes `domain=`.
+    ("domain_recon_pipeline", _domain_kwargs),
+    # Passive subdomain enumeration (subfinder). Kept alongside the
+    # pipeline so isolated subfinder findings still surface when the
+    # pipeline returns partial.
+    ("enumerate_subdomains_subfinder", _domain_kwargs),
+    # DNS hygiene posture (checkdmarc): SPF / DKIM / DMARC / MX / CAA
+    # / MTA-STS. Always-on for every domain asset.
+    ("scan_dns_hygiene_checkdmarc", _domain_kwargs),
+    # Typosquat candidates (dnstwist). Generates similar-looking
+    # domains + probes which exist.
+    ("scan_typosquats_dnstwist", _domain_kwargs),
+    # Nuclei against http://<domain> — catches CVE templates that
+    # apply to the domain's web frontend.
+    ("scan_nuclei_templates", _domain_url_synthesis_kwargs),
+]
+
 # iter-21.5 followup: the `_ANCHORS_MOBILE` list + `mobile_app`
 # entry below were removed after the user pointed out that the
 # upstream pipeline doesn't recognize the asset type — the
@@ -523,8 +633,12 @@ _ANCHORS_BY_TARGET_TYPE: dict[str, list[tuple[str, Any]]] = {
     "api": _ANCHORS_API,
     "web_application": _ANCHORS_WEB,
     "container_image": _ANCHORS_CONTAINER,
-    "domain": [],
-    "ip_address": [],
+    # iter-Q5.4 / Q5.5 — domain + ip_address gained full prepass
+    # coverage, replacing what was previously LLM-driven recon via the
+    # L2 catalog. Per CLAUDE.md §1.5 — tools are LLM's hands, not its
+    # brain; recon fires deterministically.
+    "domain": _ANCHORS_DOMAIN,
+    "ip_address": _ANCHORS_IP,
 }
 
 
