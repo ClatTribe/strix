@@ -328,19 +328,17 @@ def test_api_total_catalog_at_or_under_14_tools():
     assert len(tools) <= 14
 
 
-def test_code_total_catalog_at_or_under_11_tools():
-    """Post-Q5.9: 9 CORE + 2 specialist = 11. Cap bumped via Q5.8/Q5.9
-    to accommodate FETCH EXTERNAL + RE-DISPATCH buckets per
-    CLAUDE.md §1.5.7."""
+def test_code_total_catalog_at_or_under_12_tools():
+    """Post-Q5.14: 10 CORE + 2 specialist = 12."""
     for asset in ("repository", "local_code"):
         tools = get_lead_tool_catalog(target_types=[asset])
-        assert len(tools) <= 11, f"{asset} has {len(tools)} tools"
+        assert len(tools) <= 12, f"{asset} has {len(tools)} tools"
 
 
-def test_container_total_catalog_at_or_under_11_tools():
-    """Post-Q5.9: 9 CORE + 2 specialist = 11."""
+def test_container_total_catalog_at_or_under_12_tools():
+    """Post-Q5.14: 10 CORE + 2 specialist = 12."""
     tools = get_lead_tool_catalog(target_types=["container_image"])
-    assert len(tools) <= 11
+    assert len(tools) <= 12
 
 
 # ---------------------------------------------------------------------------

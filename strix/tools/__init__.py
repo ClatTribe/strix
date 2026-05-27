@@ -204,6 +204,10 @@ from strix.tools.rescan import *  # noqa: F403, E402
 # scan_idor / scan_auth_flow / scan_business_logic.
 from strix.tools.specialist.dispatch_l2_probe import *  # noqa: F403, E402
 
+# iter-Q5.14 — get_recon_artifact(kind, name) — read prepass-
+# persisted recon artifacts. Closes Gap 2 from consolidated Q5 §7.
+from strix.tools.recon_artifact import *  # noqa: F403, E402
+
 
 __all__ = [
     "ImplementedInClientSideOnlyError",
