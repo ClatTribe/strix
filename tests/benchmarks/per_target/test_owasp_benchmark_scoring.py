@@ -296,6 +296,95 @@ def test_findings_to_flags_handles_target_field_fallback():
 
 
 # ---------------------------------------------------------------------------
+# iter-Q5.27 — SAST findings carry BenchmarkTestNNNNN in file/location, not
+# the endpoint. The flag extractor must search the path-shaped fields too.
+# ---------------------------------------------------------------------------
+
+
+def test_findings_to_flags_matches_file_field_for_sast():
+    """semgrep / bandit / trivy-fs emit `file=` with the source path.
+    The bench must score those against BenchmarkJava expectations."""
+    findings = [
+        {
+            "file": "src/main/java/org/owasp/benchmark/testcode/BenchmarkTest00042.java",
+            "cwe": "CWE-89",
+            "title": "Tainted SQL query",
+        },
+    ]
+    flags = findings_to_flags(findings)
+    assert len(flags) == 1
+    assert flags[0].test_name == "BenchmarkTest00042"
+    assert flags[0].category == "sqli"
+
+
+def test_findings_to_flags_matches_nested_location_file():
+    """Many strix tools emit a nested `location: {file, line}` block
+    rather than a top-level `file=`."""
+    findings = [
+        {
+            "location": {
+                "file": "/workspace/BenchmarkJava-src/src/main/java/.../BenchmarkTest00100.java",
+                "line": 47,
+            },
+            "cwe": 79,
+            "title": "Reflected XSS",
+        },
+    ]
+    flags = findings_to_flags(findings)
+    assert len(flags) == 1
+    assert flags[0].test_name == "BenchmarkTest00100"
+    assert flags[0].category == "xss"
+
+
+def test_findings_to_flags_matches_path_field():
+    """Some tools emit a top-level `path=` instead of `file=` /
+    `location.file`."""
+    findings = [
+        {
+            "path": "BenchmarkTest02500.java",
+            "cwe": "CWE-78",
+            "title": "Command injection",
+        },
+    ]
+    flags = findings_to_flags(findings)
+    assert len(flags) == 1
+    assert flags[0].test_name == "BenchmarkTest02500"
+    assert flags[0].category == "cmdi"
+
+
+def test_findings_to_flags_falls_back_to_title_description():
+    """Last-resort: some tools embed the test name in the
+    title / description text. Search those too, but only after the
+    structured fields fail."""
+    findings = [
+        {
+            "title": "Insecure random in BenchmarkTest00007 (line 42)",
+            "cwe": "CWE-330",
+        },
+    ]
+    flags = findings_to_flags(findings)
+    assert len(flags) == 1
+    assert flags[0].test_name == "BenchmarkTest00007"
+    assert flags[0].category == "weakrand"
+
+
+def test_findings_to_flags_endpoint_takes_precedence_over_file():
+    """When both `endpoint` and `file` carry test names (rare cross-
+    tool finding), the endpoint wins — preserves the existing
+    DAST-mode semantics."""
+    findings = [
+        {
+            "endpoint": "http://x/benchmark/BenchmarkTest00050/sqli",
+            "file": "BenchmarkTest99999.java",  # different number
+            "cwe": "CWE-89",
+        },
+    ]
+    flags = findings_to_flags(findings)
+    assert len(flags) == 1
+    assert flags[0].test_name == "BenchmarkTest00050"
+
+
+# ---------------------------------------------------------------------------
 # CSV loader
 # ---------------------------------------------------------------------------
 

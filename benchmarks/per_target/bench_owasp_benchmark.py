@@ -124,9 +124,54 @@ def _compose_down() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _extract_benchmarkjava_source(
+    *, dest_dir: Path, container_name: str = "bench-owasp-benchmark",
+) -> Path | None:
+    """iter-Q5.27 — pull the BenchmarkJava source tree out of the
+    running fixture container so strix can scan it as `local_code`.
+
+    The fixture container already has the cloned source at `/src`.
+    Rather than re-cloning host-side (~700 MB git fetch), we
+    `docker cp` only what semgrep + bandit actually need: the
+    `src/main/java/.../testcode/` tree where the BenchmarkTest*.java
+    files live, plus the surrounding helpers/util packages so taint
+    sinks resolve.
+
+    Returns the host-side path strix should scan, or None if the
+    container isn't running.
+    """
+    # Verify the container is up.
+    inspect = subprocess.run(  # noqa: S603
+        ["docker", "inspect", container_name],
+        capture_output=True, text=True, check=False,
+    )
+    if inspect.returncode != 0:
+        return None
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    # iter-Q5.27: pull the entire src/ tree (smaller than the full
+    # repo; ~10 MB) — semgrep needs cross-file references for taint
+    # analysis, so we don't sub-select to just testcode/.
+    target = dest_dir / "BenchmarkJava-src"
+    if target.exists():
+        # Cached from a previous run — reuse to keep bench fast.
+        return target
+    cp = subprocess.run(  # noqa: S603
+        ["docker", "cp", f"{container_name}:/src/.", str(target)],
+        capture_output=True, text=True, check=False,
+    )
+    if cp.returncode != 0:
+        print(
+            f"[bench] WARN: docker cp BenchmarkJava source failed: "
+            f"{cp.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return None
+    return target
+
+
 def _run_strix(
     *, target_url: str, scan_mode: str, run_dir: Path,
-    extra_args: list[str],
+    extra_args: list[str], target_type: str = "web_application",
 ) -> tuple[int, float]:
     """Spawn the strix CLI against the deployed fixture.
 
@@ -145,13 +190,21 @@ def _run_strix(
     `host.docker.internal` (per the L2 bench's own comment block).
     `STRIX_RUN_DIR` instructs strix to write `vulnerabilities.json`
     + `run_summary.json` under the bench's run_dir.
+
+    iter-Q5.27: `target_type` selects DAST (`web_application`,
+    historic default) vs SAST (`local_code`, the L1-SAST headline
+    against the OWASP Benchmark leaderboard's SAST cohort). With
+    `local_code`, the bench extracts the BenchmarkJava source tree
+    out of the running fixture container and passes it as the
+    target — semgrep + bandit + trivy fs + trufflehog + checkov
+    + gitleaks then fire in the strix sandbox.
     """
     run_dir.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "STRIX_RUN_DIR": str(run_dir)}
-    # Strix expects target form `<asset_type>:<url>` (the iter-19
-    # `4c23c19` runner change). For OWASP Benchmark, the asset is a
-    # web_application — the deployed Tomcat webapp.
-    target_arg = f"web_application:{target_url}"
+    # Strix expects target form `<asset_type>:<value>` (the iter-19
+    # `4c23c19` runner change). value is a URL for web/api targets, a
+    # filesystem path for local_code/repository.
+    target_arg = f"{target_type}:{target_url}"
     cmd = [
         "strix", "-n",
         "-t", target_arg,
@@ -226,7 +279,31 @@ def main() -> int:
         "--target-url", default=_DEFAULT_TARGET_URL,
         help=(
             f"BenchmarkJava base URL (default: {_DEFAULT_TARGET_URL}). "
-            f"Sandbox sees host.docker.internal; host sees localhost."
+            f"Sandbox sees host.docker.internal; host sees localhost. "
+            f"Ignored when --target-type=local_code."
+        ),
+    )
+    parser.add_argument(
+        "--target-type", default="local_code",
+        choices=["local_code", "web_application"],
+        help=(
+            "iter-Q5.27: which sub-layer to benchmark. `local_code` "
+            "(default, the L1-SAST headline) extracts the BenchmarkJava "
+            "source tree from the running fixture container and runs "
+            "semgrep/bandit/trivy-fs/etc against the .java files — "
+            "comparable to Veracode/Checkmarx/Fortify/SonarQube on the "
+            "published leaderboard. `web_application` runs DAST against "
+            "the deployed Tomcat (L1-DAST sub-layer) — comparable to "
+            "ZAP at ~13%%. See CLAUDE.md §6.1.1."
+        ),
+    )
+    parser.add_argument(
+        "--source-cache-dir", default=None,
+        help=(
+            "Where to cache the BenchmarkJava source tree extracted "
+            "from the running fixture container "
+            "(default: <baseline-dir>/_benchmarkjava-src-cache). Only "
+            "used when --target-type=local_code."
         ),
     )
     parser.add_argument(
@@ -326,9 +403,33 @@ def main() -> int:
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         run_dir = _BASELINE_DIR / f"owasp_bench_run_{timestamp}"
+        # iter-Q5.27: branch on target type. For local_code (SAST),
+        # extract the source tree from the running fixture container
+        # and hand strix a host filesystem path.
+        if args.target_type == "local_code":
+            cache_dir = (
+                Path(args.source_cache_dir) if args.source_cache_dir
+                else _BASELINE_DIR / "_benchmarkjava-src-cache"
+            )
+            src_path = _extract_benchmarkjava_source(dest_dir=cache_dir)
+            if src_path is None:
+                print(
+                    "[bench] FAIL: could not extract BenchmarkJava source "
+                    "from the running fixture container. Bring it up with "
+                    "`docker compose -f benchmarks/per_target/fixtures/"
+                    "web/owasp-benchmark/docker-compose.yml up -d` first, "
+                    "OR pass --target-type web_application to scan the "
+                    "deployed Tomcat instead.",
+                    file=sys.stderr,
+                )
+                return 1
+            scan_target = str(src_path)
+        else:
+            scan_target = args.target_url
         try:
             exit_code, wall = _run_strix(
-                target_url=args.target_url,
+                target_url=scan_target,
+                target_type=args.target_type,
                 scan_mode=args.scan_mode,
                 run_dir=run_dir,
                 extra_args=args.strix_arg,
@@ -346,6 +447,7 @@ def main() -> int:
     metadata = {
         "strix_exit_code": exit_code,
         "scan_mode": args.scan_mode,
+        "target_type": args.target_type,
         "target_url": args.target_url,
         "expectations_total": len(expectations),
         "strix_findings_total": len(findings),
