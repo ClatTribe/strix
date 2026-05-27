@@ -1,0 +1,25 @@
+# test name, category, real vulnerability, cwe, source
+# iter-Q1.1 — 20-row subset of the canonical expectedresults-1.2.csv
+# from https://github.com/OWASP-Benchmark/BenchmarkJava
+# for CI smoke tests. For real bench runs, download the full ~3000-row
+# file and set OWASP_BENCH_EXPECTED_CSV to point at it.
+BenchmarkTest00001,cmdi,true,78,test
+BenchmarkTest00002,xss,false,79,test
+BenchmarkTest00003,securecookie,true,614,test
+BenchmarkTest00004,trustbound,true,501,test
+BenchmarkTest00005,xss,true,79,test
+BenchmarkTest00006,hash,false,328,test
+BenchmarkTest00007,crypto,true,327,test
+BenchmarkTest00008,xss,true,79,test
+BenchmarkTest00009,pathtraver,true,22,test
+BenchmarkTest00010,sqli,true,89,test
+BenchmarkTest00011,xss,false,79,test
+BenchmarkTest00012,sqli,true,89,test
+BenchmarkTest00013,sqli,false,89,test
+BenchmarkTest00014,weakrand,true,330,test
+BenchmarkTest00015,xss,true,79,test
+BenchmarkTest00016,xss,false,79,test
+BenchmarkTest00017,ldapi,true,90,test
+BenchmarkTest00018,xpathi,true,643,test
+BenchmarkTest00019,sqli,true,89,test
+BenchmarkTest00020,cmdi,false,78,test
