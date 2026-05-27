@@ -387,7 +387,15 @@ except Exception as e:  # noqa: BLE001
     llm=True,
     system_prompt_path="tools/specialist/prompts/idor.md",
     default_budget={"cost_usd": 0.05, "max_wall_seconds": 150},
-    sandbox_execution=False,
+    # iter-35.5 — sandbox-routed. scan_idor reads
+    # SecurityContext.AuthState[label] via get_auth_state(); when
+    # scan_auth_flow has already run in the sandbox (the typical
+    # pre-condition for IDOR testing), it wrote to the SAME sandbox
+    # SecurityContext singleton, so the labels resolve correctly.
+    # Findings emitted via tracer.add_vulnerability_report flow back
+    # to the host via the iter-35.4 _sandbox_emitted_findings sidecar
+    # (L1.5 hooks fire on the host re-emission).
+    sandbox_execution=True,
     provenance="framework",
     mitre_techniques=["T1078", "T1531"],
 )

@@ -262,7 +262,14 @@ def _is_login_success(status: int | None, body: str) -> bool:
     category="auth-flow-specialist",
     llm=False,
     default_budget={"cost_usd": 0.0, "max_wall_seconds": 60},
-    sandbox_execution=False,  # host execution; proxy_manager handles host.docker.internal → 127.0.0.1 fallback
+    # iter-35.5 — sandbox-routed. The proxy_manager's Caido client
+    # lives at 127.0.0.1:48080 INSIDE the sandbox, so running here is
+    # actually cleaner than the prior host-side execution. Captured
+    # auth states travel back to the host via tool_metadata.
+    # auth_states_captured (see _propagate_auth_states_to_host in
+    # strix/tools/executor.py); findings travel via the iter-35.4
+    # _sandbox_emitted_findings sidecar.
+    sandbox_execution=True,
     provenance="framework",
     mitre_techniques=["T1110.001"],  # Brute-Force: Password Guessing
 )
@@ -320,6 +327,16 @@ def scan_auth_flow(
     if not isinstance(login_url, str) or not login_url.strip():
         return SpecialistResult(status="error", error="login_url required")
     login_url = login_url.strip()
+
+    # iter-35.5 — accumulate every auth state we record so the
+    # success-path returns can ship them to the host via
+    # tool_metadata.auth_states_captured. The sandbox-side
+    # record_auth_state writes to the SANDBOX SecurityContext (the
+    # tool runs in sandbox post iter-35.5); the host SecurityContext
+    # has its own copy that the L2 lead's per-turn renderer reads,
+    # so the executor's propagation hook must replay these on the
+    # host. See strix/tools/executor.py:_propagate_auth_states_to_host.
+    _captured_auth_states: list[dict[str, Any]] = []
 
     try:
         from strix.tools.proxy.proxy_manager import get_proxy_manager
@@ -388,13 +405,21 @@ def scan_auth_flow(
             jwt = _extract_jwt(body, resp_headers)
             cookies = _extract_cookies(resp_headers)
 
-            # Write captured session to SecurityContext.
+            # Write captured session to SecurityContext (sandbox-side
+            # post iter-35.5) AND accumulate for host propagation.
+            _auth_notes = f"Captured via default-creds: {email}/{password}"
             record_auth_state(
                 label=label,
                 cookies=cookies or None,
                 bearer=jwt,
-                notes=f"Captured via default-creds: {email}/{password}",
+                notes=_auth_notes,
             )
+            _captured_auth_states.append({
+                "label": label,
+                "cookies": cookies or None,
+                "bearer": jwt,
+                "notes": _auth_notes,
+            })
 
             # Surface JWT as partial signal so lead routes to jwt_audit.
             if jwt:
@@ -578,6 +603,14 @@ def scan_auth_flow(
                     "jwt_captured": bool(jwt),
                     "creds_used": email,
                     "findings_emitted_to_tracer": emitted_count,
+                    # iter-35.5 — propagated to host SecurityContext
+                    # by _propagate_auth_states_to_host in
+                    # strix/tools/executor.py. Required because under
+                    # sandbox_execution=True this function's
+                    # record_auth_state call writes to the SANDBOX'S
+                    # SecurityContext singleton — invisible to the
+                    # host lead's per-turn system-prompt renderer.
+                    "auth_states_captured": list(_captured_auth_states),
                 },
             )
 
@@ -634,12 +667,19 @@ def scan_auth_flow(
                 if _is_login_success(resp.get("status_code"), resp.get("body","")):
                     jwt = _extract_jwt(resp.get("body",""), resp.get("headers",{}))
                     cookies = _extract_cookies(resp.get("headers",{}))
+                    _reg_notes = f"Self-registered: {rand_email}"
                     record_auth_state(
                         label="registered-user",
                         cookies=cookies or None,
                         bearer=jwt,
-                        notes=f"Self-registered: {rand_email}",
+                        notes=_reg_notes,
                     )
+                    _captured_auth_states.append({
+                        "label": "registered-user",
+                        "cookies": cookies or None,
+                        "bearer": jwt,
+                        "notes": _reg_notes,
+                    })
                     if jwt:
                         record_partial_signal(
                             surface="login captured JWT (label=registered-user)",
@@ -679,5 +719,7 @@ def scan_auth_flow(
             "probes_sent": probe_count,
             "default_creds_tried": len(_DEFAULT_CREDS),
             "findings_emitted_to_tracer": emitted_count,
+            # iter-35.5 — see comment on the earlier return path.
+            "auth_states_captured": list(_captured_auth_states),
         },
     )

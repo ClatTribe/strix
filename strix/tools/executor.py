@@ -249,7 +249,64 @@ def _propagate_sandbox_findings_to_host(
                 f"{tool_name}: {type(e).__name__}: {e}",
             )
 
+    # iter-35.5 — propagate captured auth states from sandbox tools
+    # (e.g. scan_auth_flow) into the host's SecurityContext so the
+    # L2 lead's per-turn system-prompt rendering picks them up.
+    _propagate_auth_states_to_host(tool_name, result)
+
     return result
+
+
+def _propagate_auth_states_to_host(tool_name: str, result: Any) -> None:
+    """iter-35.5 — extract captured auth states from a sandbox tool's
+    ``tool_metadata.auth_states_captured`` (when present) and replay
+    each through the host's ``record_auth_state``.
+
+    The lead's per-turn prompt-renderer reads HOST
+    ``SecurityContext.AuthState``; without this, sandbox-side auth
+    captures (scan_auth_flow logging in as user-a) would be invisible
+    to the lead, blocking IDOR / BOLA follow-up flows.
+
+    Best-effort: any propagation failure is logged + swallowed.
+    """
+    if not isinstance(result, dict):
+        return
+    # Tool may return tool_metadata as a dict OR as a sub-key inside
+    # a SpecialistResult-like envelope. Try both.
+    tool_metadata: dict[str, Any] | None = None
+    if isinstance(result.get("tool_metadata"), dict):
+        tool_metadata = result["tool_metadata"]
+    captured = (
+        (tool_metadata or {}).get("auth_states_captured")
+        or result.get("auth_states_captured")
+    )
+    if not captured or not isinstance(captured, list):
+        return
+
+    try:
+        from strix.agents.security_context import record_auth_state
+    except Exception:  # noqa: BLE001
+        return
+
+    for entry in captured:
+        if not isinstance(entry, dict):
+            continue
+        label = entry.get("label")
+        if not isinstance(label, str) or not label.strip():
+            continue
+        try:
+            record_auth_state(
+                label=label,
+                cookies=entry.get("cookies"),
+                bearer=entry.get("bearer"),
+                csrf_token=entry.get("csrf_token"),
+                notes=entry.get("notes") or "",
+            )
+        except Exception as e:  # noqa: BLE001
+            posthog.error(
+                "sandbox_auth_state_propagation_error",
+                f"{tool_name}: {type(e).__name__}: {e}",
+            )
 
 
 async def _execute_tool_locally(tool_name: str, agent_state: Any | None, **kwargs: Any) -> Any:

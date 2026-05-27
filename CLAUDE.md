@@ -137,11 +137,11 @@ the source of the "iter-32.1 hooks don't fire" diagnostic gaps.
 | `probe_ftp_anonymous` | ✓ sandbox-routed (iter-35.2) | ftplib I/O now in sandbox. |
 | `_http_get`, `_http_request` | host-only (private) | Internal helpers for the probe function bodies (which themselves run in sandbox via the wrappers). Not call-sites — pure utilities inside the probe implementations. |
 
-**Remaining host-side exceptions** (iter-37+ candidate):
-* `scan_idor` (`sandbox_execution=False`) — uses host's proxy_manager for session capture.
-* `scan_auth_flow` (`sandbox_execution=False`) — same reason.
+**All previously host-side specialists are now sandbox-routed** (iter-35.5, PR #494):
+* `scan_idor` (`sandbox_execution=True`) — runs inside the sandbox; reads session state from sandbox-side `SecurityContext.AuthState` (which `scan_auth_flow` populated earlier in the same sandbox process).
+* `scan_auth_flow` (`sandbox_execution=True`) — captured auth states travel back to the host via `tool_metadata.auth_states_captured` + the iter-35.5 propagation hook in `strix/tools/executor.py:_propagate_auth_states_to_host`. The host's `SecurityContext.AuthState` is kept in sync so the L2 lead's per-turn system-prompt renderer sees the captured sessions.
 
-Both are documented in the catalog as the two specialist tools that still run on host for proxy-manager session-state reasons. Moving these requires migrating proxy_manager into the sandbox tool_server.
+**The CLAUDE.md §3 sandbox-only invariant is now fully enforced.** No L1 / L1.5 detection tools execute on the host process. The 5-tool minimal CORE is the only set that still runs host-side, and those are framework state-management tools with no network I/O by design (`workflow_status`, `list_pending_findings`, `think`, `create_vulnerability_report`, `finish_scan`).
 
 ---
 
