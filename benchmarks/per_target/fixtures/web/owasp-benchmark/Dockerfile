@@ -7,22 +7,50 @@
 # Pinned to BenchmarkJava commit hash for reproducibility. The
 # upstream repo is in maintenance mode; pinning avoids drift.
 
-FROM maven:3.9-eclipse-temurin-11 AS build
+# iter-Q5.25 — bumped from `maven:3.9-eclipse-temurin-11` to the
+# Java 17 builder. Upstream spotless-maven-plugin 3.5.1 mojo classes
+# are compiled for Java 17 (class file v61); Java 11's class loader
+# (v55 cap) rejects them BEFORE checking skip flags. The Tomcat 9
+# stage stays on Java 11 (`9.0-jre11`); we force compile target via
+# `-Dmaven.compiler.release=11` so the produced .class files
+# still run on the 11-jre at runtime.
+FROM maven:3.9-eclipse-temurin-17 AS build
 
-# Pin to a known-good commit. Update via `iter-Q1.1.N` if upstream
-# fixes a relevant detection-affecting bug.
-ARG BENCHMARK_REF=master
+# iter-Q5.25 — pin to a known-good commit hash rather than `master`.
+# The README has always called for pinning ("avoids drift"); we
+# weren't doing it. f9b87c9638 is upstream master as of 2026-05-27.
+# Override via `--build-arg BENCHMARK_REF=<sha>` if upstream lands a
+# detection-affecting fix worth picking up.
+ARG BENCHMARK_REF=f9b87c9638213ec3d7a1ee8b1465471aed8f3ce0
 
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
     && rm -rf /var/lib/apt/lists/* \
-    && git clone --depth 1 --branch "${BENCHMARK_REF}" \
-        https://github.com/OWASP-Benchmark/BenchmarkJava.git .
+    && git init . \
+    && git remote add origin https://github.com/OWASP-Benchmark/BenchmarkJava.git \
+    && git fetch --depth 1 origin "${BENCHMARK_REF}" \
+    && git checkout FETCH_HEAD
 
-# Build the WAR. Skip tests — we're measuring strix against the
-# deployed webapp, not running BenchmarkJava's own unit tests.
-RUN mvn -q -DskipTests package
+# Build the WAR. Skip tests + skip spotless.
+#
+# iter-Q5.25: upstream BenchmarkJava bumped spotless-maven-plugin to
+# 3.5.1, whose mojo classes are compiled for a JDK newer than the
+# Java 11 we run maven on. The plugin fails to load with
+# `UnsupportedClassVersionError`, killing the whole build. Spotless
+# is a code-formatter — it's NOT load-bearing for the WAR artifact —
+# so skipping it bypasses the version mismatch with no impact on
+# detection.
+#
+# `-DskipTests` skips JUnit runs; `-Dspotless.apply.skip=true` +
+# `-Dspotless.check.skip=true` skip both spotless goals (one or the
+# other depending on phase binding). All three needed.
+RUN mvn -q \
+        -DskipTests \
+        -Dspotless.apply.skip=true \
+        -Dspotless.check.skip=true \
+        -Dmaven.compiler.release=11 \
+        package
 
 
 FROM tomcat:9.0-jre11
