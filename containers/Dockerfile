@@ -182,7 +182,14 @@ RUN pipx install semgrep \
  # Commercial-feed-equivalent (Cyble / ZeroFOX brand protection
  # tier) but free + zero-auth.
  && pipx install dnstwist \
- && pipx install inql
+ && pipx install inql \
+ # iter-Q5.22 — schemathesis (Python-based OpenAPI conformance fuzzer).
+ # Wrapped by `scan_api_schemathesis`. Fuzzes APIs against their declared
+ # spec for status_code / content_type / schema / auth conformance —
+ # complements nuclei (signature-driven) with property-based testing of
+ # the spec's own contract. The wrapper falls back to the `st` shorter
+ # alias if `schemathesis` isn't found.
+ && pipx install schemathesis
 # Note: dirsearch / wafw00f / wapiti3 dropped in Section B (image-slim):
 #   * dirsearch is superseded by feroxbuster (Rust-fast, larger default
 #     wordlists; shipped in iter-23.3 / #415).
@@ -218,6 +225,16 @@ RUN apt-get update \
 RUN mkdir -p /opt/clones \
  && git clone --depth 1 https://github.com/ticarpi/jwt_tool.git /opt/clones/jwt_tool \
  && chmod +x /opt/clones/jwt_tool/jwt_tool.py \
+ # iter-Q5.22 — smuggler (HTTP request-smuggling fuzzer). Pure-Python,
+ # no build step; ship as a clone. Wrapped by
+ # `scan_smuggling_smuggler`, which probes `shutil.which("smuggler")`
+ # first and falls back to `/opt/smuggler/smuggler.py` — we satisfy
+ # BOTH paths: the clone goes to /opt/clones/smuggler (so the runtime
+ # COPY lands it at the wrapper's fallback location), and the runtime
+ # adds a `/usr/local/bin/smuggler` launcher that `python3`-invokes
+ # the cloned script.
+ && git clone --depth 1 https://github.com/defparam/smuggler.git /opt/clones/smuggler \
+ && chmod +x /opt/clones/smuggler/smuggler.py \
  && find /opt/clones -name '.git' -type d -exec rm -rf {} + 2>/dev/null || true
 # Note: JS-Snooper + jsniper.sh dropped in Section B (image-slim). JS
 # secret/endpoint extraction is now handled by trufflehog (more accurate
@@ -380,12 +397,15 @@ EOF
 #   - gcc + libc6-dev for tree-sitter's lazy parser.c compile path
 #     (~80 MB, vs ~600 MB if we kept full build-essential)
 #   - net / dns / shell utilities used by both the agent and tools
-#   - debian-main security tools (nmap, sqlmap). ZAP+JRE dropped in
-#     Section B (image-slim): nuclei + per-endpoint scan_sqli /
-#     scan_xss / scan_xxe / scan_ssrf / scan_path_traversal /
-#     scan_cmd_injection (all hydrated by openapi_spec_ingest) already
-#     cover ZAP's automated-scan ground with better signal:noise.
-#     Bench fixtures don't measure any ZAP catches.
+#   - debian-main security tools (nmap, sqlmap, hydra). ZAP+JRE
+#     dropped in Section B (image-slim): nuclei + per-endpoint
+#     scan_sqli / scan_xss / scan_xxe / scan_ssrf /
+#     scan_path_traversal / scan_cmd_injection (all hydrated by
+#     openapi_spec_ingest) already cover ZAP's automated-scan
+#     ground with better signal:noise. Bench fixtures don't measure
+#     any ZAP catches. iter-Q5.22 added hydra here so
+#     `probe_default_creds_hydra` (iter-37.4 wrapper) finds its
+#     engine on PATH.
 #   - libcap2-bin for setcap; libnss3-tools for certutil
 #   - chromium runtime .so deps (for playwright-installed chrome)
 #   - fonts (chrome rendering + screenshot tooling)
@@ -400,6 +420,7 @@ RUN apt-get update \
         net-tools dnsutils whois iproute2 iputils-ping netcat-traditional \
         jq parallel ripgrep procps htop tmux gdb \
         nmap ncat ndiff sqlmap \
+        hydra \
         libcap2-bin libnss3-tools \
         libnss3 libnspr4 libdbus-1-3 \
         libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libatspi2.0-0 \
@@ -470,6 +491,18 @@ ENV PATH="/opt/pipx/bin:${PATH}"
 # to skip the follow-up `RUN chown` layer-duplication trap.
 COPY --from=clone-builder --chown=pentester:pentester /opt/clones /home/pentester/tools
 COPY --from=clone-builder --chown=pentester:pentester /opt/tree-sitter /home/pentester/.tree-sitter
+
+# iter-Q5.22 — smuggler launcher. The `scan_smuggling_smuggler` wrapper
+# probes `shutil.which("smuggler")` first, so expose the python script
+# as a PATH command. The clone-builder COPY already put the script at
+# /home/pentester/tools/smuggler/smuggler.py; this shim PATH-exposes
+# it. `printf` over heredoc to keep the `&&`-chain syntax-clean inside
+# a single RUN.
+RUN printf '%s\n' \
+        '#!/bin/sh' \
+        'exec python3 /home/pentester/tools/smuggler/smuggler.py "$@"' \
+        > /usr/local/bin/smuggler \
+ && chmod 0755 /usr/local/bin/smuggler
 
 # tree-sitter parser-directory config (matches the prior Kali-era setup so
 # `tree-sitter parse foo.py` finds the cloned grammars on first invocation).
