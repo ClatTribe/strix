@@ -71,8 +71,8 @@ REGISTERED_ASSET_TYPES: tuple[str, ...] = (
 # Target end-state (post-Q5.5, per CLAUDE.md §1.5.8):
 #   web=10, api=10, repo=10, local_code=10, container=9, ip=10, domain=10
 _BASELINE_CATALOG_COUNTS: dict[str, int] = {
-    "web_application": 13,
-    "api": 14,
+    "web_application": 8,    # iter-Q5.3: dropped sqlmap/dalfox/smuggler/hydra/ffuf (13 → 8)
+    "api": 9,                # iter-Q5.3: dropped sqlmap/smuggler/hydra/ffuf/schemathesis (14 → 9)
     "repository": 10,
     "local_code": 10,
     "container_image": 7,
@@ -106,31 +106,11 @@ def _clean_env(monkeypatch):
 # params XPASS — strict=True turns that into a build failure that
 # forces the next PR to strip the marker. That's the intended flow.
 @pytest.mark.parametrize("asset_type", [
-    pytest.param(
-        "web_application",
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason=(
-                "iter-Q5.3 closes web: 13 → 10 by moving deep-exploit "
-                "tools (scan_sqli_sqlmap, scan_xss_dalfox, "
-                "scan_smuggling_smuggler) to anchor_prepass + the iter-Q5.10 "
-                "collapse of 3 L2-native probes under dispatch_l2_probe."
-            ),
-        ),
-    ),
-    pytest.param(
-        "api",
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason=(
-                "iter-Q5.3 + Q5.5 close api: 14 → 10 by moving deep-exploit "
-                "tools (scan_sqli_sqlmap, scan_smuggling_smuggler, "
-                "scan_api_schemathesis, probe_default_creds_hydra, "
-                "scan_fuzz_ffuf) + map_graphql_inql to anchor_prepass, "
-                "plus the iter-Q5.10 probe collapse."
-            ),
-        ),
-    ),
+    # iter-Q5.3 closed web (13 → 8) and api (14 → 9). xfail markers
+    # stripped — both now pass under the cap. The history is in
+    # _BASELINE_CATALOG_COUNTS comments + the PR that lands this.
+    "web_application",
+    "api",
     "repository",
     "local_code",
     "container_image",

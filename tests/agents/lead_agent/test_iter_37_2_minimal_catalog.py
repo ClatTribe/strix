@@ -106,10 +106,21 @@ def test_web_minimal_catalog_includes_oss_generic_detection():
     assert "scan_nuclei_templates" in anchors
 
 
-def test_web_minimal_catalog_includes_oss_sqli_xss():
+def test_web_minimal_catalog_oss_sqli_xss_now_in_prepass():
+    """iter-37.11 had sqlmap + dalfox in the L2 catalog so the LLM could
+    fire them on candidates. iter-Q5.3 moved them to anchor_prepass per
+    CLAUDE.md §1.5 (tools are LLM's hands, not its brain). The L2 lead
+    re-fires them on new state via the future `rescan(...)` (Q5.9)."""
+    from strix.agents.lead_agent.anchor_prepass import (
+        _ANCHORS_BY_TARGET_TYPE,
+    )
+    anchors = {t for t, _ in _ANCHORS_BY_TARGET_TYPE["web_application"]}
+    assert "scan_sqli_sqlmap" in anchors
+    assert "scan_xss_dalfox" in anchors
+
     tools = get_lead_tool_catalog(target_types=["web_application"])
-    assert "scan_sqli_sqlmap" in tools
-    assert "scan_xss_dalfox" in tools
+    assert "scan_sqli_sqlmap" not in tools
+    assert "scan_xss_dalfox" not in tools
 
 
 def test_web_minimal_catalog_includes_oss_tls():

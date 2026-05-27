@@ -520,46 +520,47 @@ _BLOCKED_TOOLS: frozenset[str] = frozenset({
 
 _MINIMAL_TOOLS_BY_TARGET_TYPE: dict[str, frozenset[str]] = {
     "web_application": frozenset({
-        # === ACT only — recon/orient handled by anchor_prepass ===
-        # Deep exploit when prepass nuclei flags candidates
-        "scan_sqli_sqlmap",             # sqlmap — deep SQLi
-        "scan_xss_dalfox",              # dalfox — deep XSS
-        # LLM-orchestrated authz (no good OSS — session-aware)
-        "scan_idor",                    # session-aware IDOR/BOLA/BFLA
-        # Auth flow orchestration (LLM-led; subsumes seed_auth,
-        # which prepass also fires). Re-callable for new auth surfaces
-        # found mid-scan.
+        # iter-Q5.3 — deep-exploit OSS wrappers moved to anchor_prepass
+        # per CLAUDE.md §1.5 (tools are the LLM's hands, not its brain).
+        # The previously-listed sqlmap / dalfox / smuggler / hydra / ffuf
+        # all fire deterministically in `anchor_prepass.py` now — the lead
+        # doesn't pick whether to deep-exploit; L1 always does it.
+        #
+        # The lead can still re-fire any of them on a candidate via
+        # the future `rescan(tool_name, target, captured_state)`
+        # (iter-Q5.9) — that's the escape hatch for "new auth state,
+        # re-test SQLi as the authed user."
+        #
+        # === L2-NATIVE DETECTION (no OSS substitute — needs LLM
+        # state-reasoning that anchor_prepass can't do) ===
+        # session-aware authz (IDOR / BOLA / BFLA), needs LLM to pair
+        # captured user-a + user-b sessions against ID-shaped URLs.
+        "scan_idor",
+        # auth flow orchestration: LLM picks form fields, drives
+        # register-then-login flow, captures session for downstream.
+        # Q5.10 collapses scan_idor + scan_auth_flow + scan_business_logic
+        # under dispatch_l2_probe(kind=...).
         "scan_auth_flow",
-        # HTTP primitive — generic LLM-driven HTTP for the cases the
-        # prepass's nuclei/dispatcher didn't cover (custom auth
-        # headers, multi-step chain steps, post-auth recon spot-check).
+        # === PRIMITIVE escape hatch ===
         "send_request",
-        # iter-37.14 — OSS-anchored wrappers promoted from legacy.
-        # Per the iter-37 policy ("popular OSS tools per asset for
-        # broader/deeper coverage"), these get LLM visibility so the
-        # lead can fire them on candidates surfaced by the prepass.
-        "probe_default_creds_hydra",    # hydra — creds brute (replaces in-house probe_default_creds)
-        "scan_fuzz_ffuf",               # ffuf — content/param/vhost fuzzing
-        "scan_smuggling_smuggler",      # smuggler.py — HTTP request smuggling (replaces in-house scan_request_smuggling_active)
     }),
     "api": frozenset({
-        # === ACT only — recon/orient handled by anchor_prepass ===
-        # Deep exploit
-        "scan_sqli_sqlmap",
-        # LLM-orchestrated authz (API1/API5 — BOLA + BFLA)
+        # iter-Q5.3 — same migration as web_application. sqlmap /
+        # smuggler / hydra / ffuf / schemathesis now fire in
+        # anchor_prepass. The lead re-fires on candidates via
+        # rescan(...) (Q5.9).
+        #
+        # === L2-NATIVE DETECTION ===
         "scan_idor",
-        # Auth flow orchestration (subsumes seed_auth)
         "scan_auth_flow",
-        # GraphQL-specific deep work (InQL — no OSS substitute for
-        # fine-grained schema mutation testing)
+        # GraphQL-specific deep work. Per the L2 audit
+        # (docs/proposals/2026-05-27-l2-tool-audit.md §11), this is
+        # actually an OSS wrapper and should move to prepass in Q5.5.
+        # Kept here for Q5.3 to avoid bundling unrelated work; the
+        # L2-CAP test xfail for `api` lifts when Q5.5 finishes the move.
         "map_graphql_inql",
-        # HTTP primitive
+        # === PRIMITIVE escape hatch ===
         "send_request",
-        # iter-37.14 — OSS-anchored wrappers promoted from legacy.
-        "probe_default_creds_hydra",    # hydra — replaces in-house probe_default_creds
-        "scan_fuzz_ffuf",               # ffuf — param/path discovery
-        "scan_api_schemathesis",        # schemathesis — OpenAPI property-based fuzzing
-        "scan_smuggling_smuggler",      # smuggler.py — replaces in-house scan_request_smuggling_active
     }),
     "repository": frozenset({
         # === ACT only — SAST + secrets + SCA + IaC fire in prepass ===

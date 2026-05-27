@@ -39,24 +39,40 @@ def _clean_env():
 # ---------------------------------------------------------------------------
 
 
-def test_web_specialist_set_has_8_tools():
-    """iter-37.11: trim from 10 → 5 ACT-only specialists.
-    iter-37.14: promoted 3 OSS wrappers (hydra, ffuf, smuggler) →
-    8 specialists. Still well under the 50-tool decision-paralysis
-    threshold."""
+def test_web_specialist_set_has_3_tools():
+    """iter-37.11 trimmed to 5 ACT-only. iter-37.14 promoted 3 OSS
+    wrappers to 8. iter-Q5.3 dropped the deep-exploit OSS wrappers
+    (sqlmap, dalfox, smuggler, hydra, ffuf) to `anchor_prepass` per
+    CLAUDE.md §1.5 (tools are LLM's hands, not its brain) → 3
+    specialists (scan_idor, scan_auth_flow, send_request).
+
+    Maintenance note for future iter-Q5.10: scan_idor + scan_auth_flow
+    collapse under `dispatch_l2_probe(kind, **kwargs)` → 2 specialists
+    after that lands. Update this assertion when Q5.10 ships."""
     web = _MINIMAL_TOOLS_BY_TARGET_TYPE["web_application"]
-    assert len(web) == 8, (
-        f"web_application should have 8 ACT-only specialists post "
-        f"iter-37.14; got {len(web)}: {sorted(web)}"
+    assert len(web) == 3, (
+        f"web_application should have 3 ACT-only specialists post "
+        f"iter-Q5.3; got {len(web)}: {sorted(web)}"
     )
 
 
-def test_web_specialist_set_keeps_deep_exploit_tools():
-    """sqlmap + dalfox are the 'deep exploit when nuclei flags
-    candidates' tools — non-negotiable in catalog."""
+def test_web_specialist_set_drops_deep_exploit_tools_to_prepass():
+    """iter-Q5.3: sqlmap, dalfox, smuggler are now in anchor_prepass,
+    not in the L2 catalog. The lead re-fires on candidates via the
+    future `rescan(tool_name, target, captured_state)` (iter-Q5.9)."""
     web = _MINIMAL_TOOLS_BY_TARGET_TYPE["web_application"]
-    assert "scan_sqli_sqlmap" in web
-    assert "scan_xss_dalfox" in web
+    for prepass_tool in (
+        "scan_sqli_sqlmap",
+        "scan_xss_dalfox",
+        "scan_smuggling_smuggler",
+        "probe_default_creds_hydra",
+        "scan_fuzz_ffuf",
+    ):
+        assert prepass_tool not in web, (
+            f"{prepass_tool} was moved to anchor_prepass by iter-Q5.3; "
+            f"must not appear in the L2 catalog. The lead re-fires it "
+            f"via rescan(...) (Q5.9) when new state is captured."
+        )
 
 
 def test_web_specialist_set_keeps_llm_orchestrated():
@@ -97,14 +113,37 @@ def test_web_specialist_set_drops_prepass_duplicates():
 # ---------------------------------------------------------------------------
 
 
-def test_api_specialist_set_has_9_tools():
-    """iter-37.14: 5 + 4 new OSS wrappers (hydra, ffuf, schemathesis,
-    smuggler) = 9 specialists."""
+def test_api_specialist_set_has_4_tools():
+    """iter-37.14 had 9 specialists. iter-Q5.3 dropped 5 OSS wrappers
+    (sqlmap, smuggler, hydra, ffuf, schemathesis) to anchor_prepass
+    per CLAUDE.md §1.5 → 4 specialists (scan_idor, scan_auth_flow,
+    map_graphql_inql, send_request).
+
+    Maintenance note for future Q5.5: map_graphql_inql is an OSS
+    wrapper too and moves to prepass in Q5.5 → 3 specialists. And
+    Q5.10 collapses scan_idor + scan_auth_flow → 2 specialists."""
     api = _MINIMAL_TOOLS_BY_TARGET_TYPE["api"]
-    assert len(api) == 9, (
-        f"api should have 9 ACT-only specialists post iter-37.14; "
+    assert len(api) == 4, (
+        f"api should have 4 ACT-only specialists post iter-Q5.3; "
         f"got {len(api)}: {sorted(api)}"
     )
+
+
+def test_api_specialist_drops_deep_exploit_tools_to_prepass():
+    """iter-Q5.3: same migration as web — sqlmap / smuggler / hydra /
+    ffuf / schemathesis fire in anchor_prepass, not in the L2 catalog."""
+    api = _MINIMAL_TOOLS_BY_TARGET_TYPE["api"]
+    for prepass_tool in (
+        "scan_sqli_sqlmap",
+        "scan_smuggling_smuggler",
+        "probe_default_creds_hydra",
+        "scan_fuzz_ffuf",
+        "scan_api_schemathesis",
+    ):
+        assert prepass_tool not in api, (
+            f"{prepass_tool} was moved to anchor_prepass by iter-Q5.3; "
+            f"must not appear in the L2 catalog."
+        )
 
 
 def test_api_specialist_keeps_graphql_specific():

@@ -141,13 +141,22 @@ def test_lead_agent_carries_tool_catalog_allowlist(base_config) -> None:
     # broad-orient (nuclei) dropped because the prepass fires them.
     # Assertions now reference the survivor set: the 5-tool core +
     # web's ACT-only specialists.
+    # iter-Q5.3 — sqlmap / dalfox / smuggler / hydra / ffuf moved
+    # from L2 catalog to anchor_prepass per CLAUDE.md §1.5 (tools are
+    # LLM's hands, not its brain). The survivor set is just the 5-tool
+    # core + 3 L2-native web specialists (idor, auth_flow, send_request).
     assert "workflow_status" in allowlist        # core — observe
     assert "list_pending_findings" in allowlist  # core — observe L1 queue
     assert "create_vulnerability_report" in allowlist  # core — emit
     assert "think" in allowlist                  # core — scratchpad
     assert "finish_scan" in allowlist            # core — terminate
-    assert "scan_sqli_sqlmap" in allowlist       # web — deep SQLi (sqlmap)
-    assert "scan_idor" in allowlist              # web — session-aware authz
+    assert "scan_idor" in allowlist              # web — session-aware authz (no OSS substitute)
+    assert "scan_auth_flow" in allowlist         # web — auth orchestration
+    # Deep-exploit OSS wrappers MUST NOT be visible to the LLM —
+    # they fire as L1 always-on coverage in anchor_prepass.
+    assert "scan_sqli_sqlmap" not in allowlist
+    assert "scan_xss_dalfox" not in allowlist
+    assert "scan_smuggling_smuggler" not in allowlist
 
 
 def test_lead_agent_carries_tool_catalog_blocklist(base_config) -> None:

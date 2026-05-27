@@ -444,6 +444,24 @@ _ANCHORS_API: list[tuple[str, Any]] = [
     # bare IP. Replaces the in-house bucket probe from PR #400
     # (reverted via PR #401).
     ("scan_buckets_via_bbot", _api_target_url_kwargs),
+    # iter-Q5.3 — deep-exploit OSS wrappers moved from the L2 minimal
+    # catalog to prepass. Per CLAUDE.md §1.5 these are L1 detection
+    # (the security-team-facing dashboard), not L2 translation work.
+    # They were on the LLM-visible catalog only so the lead could
+    # choose to fire them; under the L2-CAP invariant + the
+    # "tools are the LLM's hands, not its brain" principle they fire
+    # deterministically here instead. The L2 lead can still re-fire
+    # them on candidates via the future `rescan(tool_name, ...)` (Q5.9).
+    #
+    # sqlmap: deep SQLi exploit on top of the light scan_sqli signal
+    #   above. Takes `target_url=`. Q5.3 lands as opt-in via
+    #   STRIX_PREPASS_DEEP_EXPLOITS=0 to skip when bench timing matters.
+    ("scan_sqli_sqlmap", _api_target_url_kwargs),
+    # smuggler.py: HTTP request-smuggling probes (TE/CL disagreements,
+    #   transfer-encoding parsing differentials). Applies to any HTTP
+    #   target — kept in _ANCHORS_API since _ANCHORS_WEB = _ANCHORS_API
+    #   + [..] so it inherits.
+    ("scan_smuggling_smuggler", _api_target_url_kwargs),
     # Tools wired via phase-2 (require runtime-captured state, not
     # just target_value), invoked in `_run_dependent_api_tools`:
     #   * jwt_audit — needs a JWT token. iter-17 auth-flow captures
@@ -470,6 +488,10 @@ _ANCHORS_WEB: list[tuple[str, Any]] = _ANCHORS_API + [
     ("scan_cache_deception", _api_url_kwargs),
     ("scan_websocket_auth", _api_url_kwargs),
     ("scan_prototype_pollution", _api_url_kwargs),
+    # iter-Q5.3 — dalfox moved from L2 minimal to prepass. Web-only
+    # (DOM-focused — JSON API endpoints don't generally render into
+    # the DOM, so dalfox is wasted there). Takes `target_url=`.
+    ("scan_xss_dalfox", _api_target_url_kwargs),
 ]
 
 _ANCHORS_CONTAINER: list[tuple[str, Any]] = [
