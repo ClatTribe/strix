@@ -1,0 +1,26 @@
+services:
+  # iter-Q1.1 — OWASP Benchmark Project v1.2 (BenchmarkJava).
+  # Built from the upstream repo via the bundled Dockerfile. First
+  # build is ~10 min (maven dependency download + compile); subsequent
+  # runs reuse the cached image.
+  #
+  # The container exposes the BenchmarkJava webapp on port 8080
+  # (HTTP). HTTPS is intentionally disabled for bench convenience —
+  # this fixture is for measurement, not for testing TLS detection.
+  #
+  # Upstream: https://github.com/OWASP-Benchmark/BenchmarkJava
+  benchmarkjava:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: strix-bench/owasp-benchmark:v1.2
+    container_name: bench-owasp-benchmark
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
