@@ -19,6 +19,60 @@ wrapper that calls strix, persists findings, renders the dashboard.
 
 ---
 
+## 1.5 Product goal — the L1 / L2 audience split
+
+**This is the mental model. Read this before proposing architectural changes
+that touch detection, enrichment, prioritization, or the user-facing output.**
+
+strix produces **two distinct artifacts for two distinct audiences**, and
+every iter PR should be locatable in this 2×2:
+
+| Layer | Audience | Artifact | "Best-in-class" means |
+|---|---|---|---|
+| **L0+L1** (sandbox OSS scanners) | **Security team** (knows how to read raw scanner output) | Per-tool dashboard: every finding emitted by nuclei / sqlmap / dalfox / semgrep / trufflehog / ffuf / etc. — surfaced verbatim with severity, CWE, endpoint, rule_id. Maps to MITRE ATT&CK techniques per `@register_tool(mitre_techniques=[...])`. | strix's per-wrapper recall **equals the standalone OSS tool**. Q3 measures this. If we drop findings the OSS tool would have found, we have failed at L1, regardless of what L2 does next. |
+| **L1.5+L2** (enrichment + LLM lead) | **Non-security team** (developers, PMs) — cannot triage raw scanner output | AI-security-engineer translation: prioritized list of *what to fix first*, *why it matters*, *which findings chain together*, *the remediation patch*, *the compliance evidence*. | The developer / PM reading this output knows what action to take, in what order, without consulting a human security engineer. L2 is the translator, not the detector. |
+
+### 1.5.1 What each audience needs
+
+**Security team (L1 audience):**
+* Raw, complete, comparable scanner output.
+* Per-tool MITRE technique attribution.
+* Reproducibility (can re-run any scanner against the same target and verify).
+* No silent demotions — if nuclei flagged it, they see it.
+
+**Non-security team (L2 audience):**
+* Prioritization (which 5 of the 50 findings actually matter for this app, today).
+* Chain reasoning (this CSRF + this open redirect = account takeover).
+* Plain-English remediation steps tied to the codebase.
+* Compliance mapping (this finding affects SOC-2 / PCI-DSS / HIPAA control X).
+* False-positive suppression at L1.5 — they do not need to filter info-severity noise.
+
+### 1.5.2 What this means for every iter PR
+
+* **L1 / L1.5 iter PRs** are scored on detection recall vs. the standalone OSS tool (Q3 parity bench) and FP/FN tradeoffs from the L1.5 hooks. Token economy is *not* the gate.
+* **L2 iter PRs** are scored on the developer-facing output quality:
+  * `bench_context.py` — finding has file/line/author/fix-hint/exploit-vector
+  * `bench_explanation.py` — plain-English description a non-security reader can act on
+  * `bench_patcher_correctness.py` — proposed remediation actually fixes the vuln
+  * `bench_chains.py` — chain assembly the way a human pentester would tell the story
+  * `bench_severity.py` — severity tier matches a security engineer's read
+
+* **L2 PRs that improve developer-facing metrics but regress L1 recall are rejected.** L2 cannot translate findings L1 didn't surface.
+* **L2 PRs that reduce token usage but regress L1 recall are rejected.** Same reason — Q2's `<1pp regression gate` against the Q3 parity baseline is the load-bearing check.
+
+### 1.5.3 Why this matters for the codebase shape
+
+* No new in-house detection scanners — CLAUDE.md §11.1 already codifies this; the L1 layer **only** wraps OSS tools, because that's the only way to be "best-in-class" at detection.
+* The L1.5 hook chain (FP filter, surface_priority, exploitability, corroborator, post_emit_verifier) exists to **add information for L2's translation job**, not to mutate the L1 dashboard the security team sees. The L1 dashboard renders pre-L1.5 findings; L2's developer-facing output renders post-L1.5 findings.
+* Severity demotions, dismissals, and merges from L1.5 must be **logged + recoverable** so the L1 audience can audit them. `run_summary.l15_dismissals[]` (iter-31.1) is this audit log.
+
+### 1.5.4 strix vs. webappsec, in this framing
+
+* **strix** produces both artifacts in one scan: `vulnerabilities.json` (the L1 dashboard) + `run_summary.json` (which carries the L2 narrative: chains, surface_priority, exploitability, phase correlations).
+* **webappsec** is the SaaS wrapper that splits the audiences in the UI: a "Security Dashboard" view for the L1 audience and a "Developer Action List" view for the L2 audience, both backed by the same scan run.
+
+---
+
 ## 2. The detection layer model (L0 → L3)
 
 Mental model for every iter. When proposing a change, name the layer

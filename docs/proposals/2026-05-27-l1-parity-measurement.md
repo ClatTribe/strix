@@ -1,6 +1,6 @@
 # Q3 — Measuring L1 / L1.5 parity vs. standalone OSS tools
 
-**Status:** proposal — pending review
+**Status:** proposal — pending review (revised post product-goal framing in CLAUDE.md §1.5)
 **Owner:** ClatTribe/strix
 **Created:** 2026-05-27
 **Related:** Q1 (`docs/proposals/2026-05-27-benchmark-suite-strategy.md`), Q2 (`docs/proposals/2026-05-27-token-reduction-v2-stratified-compaction.md`)
@@ -18,6 +18,26 @@ Translated into a measurable claim:
 If the claim holds, strix's L1 layer is **as good as the leading OSS tool of record** — anything better would require a new OSS scanner or our own in-house engine (the latter is forbidden per CLAUDE.md §11.1). If the claim *does not* hold, the gap is a wrapper bug, not a model-class limitation, and is fixable in days.
 
 Q1 measures strix-vs-competitors externally (OWASP Benchmark, WebGoat, Vulhub). Q3 measures **strix-wrapper-vs-the-tool-it-wraps**, which is the upstream causal layer Q1's numbers depend on. Without Q3, a regression in strix's OWASP Benchmark Youden index could be a nuclei-flag bug, a result-parsing bug, an L1.5 over-suppression bug, or a model regression — and we have no way to tell which.
+
+### 1.1 Why this is THE load-bearing measurement (per CLAUDE.md §1.5)
+
+Per the product framing codified in CLAUDE.md §1.5, strix produces two artifacts:
+
+| Artifact | Audience | Source data |
+|---|---|---|
+| **Security dashboard** | Security team — knows how to read raw scanner output | L1 (pre-L1.5) findings, verbatim from the OSS tool |
+| **Developer Action List** | Non-security team (devs, PMs) | L2 narrative — prioritized + chained + remediation-mapped + compliance-tagged |
+
+The security-team-facing artifact **is the OSS tool's output, surfaced through strix**. If strix drops findings that the OSS tool would have surfaced, the security team has a strictly worse dashboard than running the tool directly — and the value proposition collapses. **L1 parity is therefore not a nice-to-have benchmark; it is the precondition for the entire product.**
+
+The L2 audience (devs, PMs) is downstream: L2 cannot translate, prioritize, or chain findings that L1 didn't surface. So Q3's parity bench is also the prerequisite for L2's value. Both audiences depend on it.
+
+This is why Q3 is the **causal-attribution layer** for every other Q-track:
+* Q1 regressions get attributed to specific Q3-named wrappers.
+* Q2's `<1pp regression gate` is implemented by re-running Q3 with stratified compaction on/off.
+* Q4's parallelism gate is the same.
+
+Without Q3, every PR that touches L1 / L1.5 / Q2 / Q4 is shipping on a guess.
 
 ---
 
@@ -175,45 +195,104 @@ Three classes of fixture per wrapper:
 
 Fixtures live under `benchmarks/per_target/fixtures/parity/<tool>/` and are versioned with the bench (so a bench-fixture refresh is an explicit PR).
 
-### 5.4 The parity report
+### 5.4 The parity report — three views
 
-Each bench emits:
+Each bench emits ONE report with three sections, one per consumer:
 
 ```
 # nuclei parity report — fixture: juice-shop-snapshot-2026-05
+# tool version: nuclei v3.4.1 (pinned in strix-sandbox image)
 
-| Metric | Standalone | Via strix | Δ |
-|---|---|---|---|
-| Total findings emitted | 23 | 19 | -4 (-17.4%) |
-| High-severity findings | 8 | 8 | 0 |
-| Critical-severity findings | 2 | 2 | 0 |
-| L1.5-pre-emission count | n/a | 21 | (2 dropped by hook chain) |
-| L1.5-post-emission count | n/a | 19 | |
+================================================================
+Section A — L1 dashboard view (security-team audience, CLAUDE.md §1.5)
+================================================================
+Δ between strix's pre-L1.5 emissions and standalone nuclei:
 
-## Loss attribution
+| Severity | Standalone | Via strix (pre-L1.5) | Δ | Verdict |
+|---|---|---|---|---|
+| critical | 2 | 2 | 0 | GREEN |
+| high | 8 | 8 | 0 | GREEN |
+| medium | 7 | 5 | -2 | YELLOW |
+| low | 4 | 2 | -2 | YELLOW |
+| info | 2 | 2 | 0 | GREEN |
+| **TOTAL** | **23** | **19** | **-4 (-17.4%)** | **YELLOW** |
 
-* 2 lost in wrapper parsing (template_id="exposed-config", "exposed-git")
+Loss attribution (wrapper layer):
+* 2 lost: template_id={exposed-config, exposed-git}
   → wrapper's -tags filter excludes "exposures" category
-* 2 lost in L1.5 FP filter (pre_emission_fp_filter — surface=info,
-  hook reason="info-severity-not-actionable")
+* 2 lost: template_id={security-headers, cache-control}
+  → wrapper's -severity filter defaults to high+critical only
 
-## Verdict
+This is the L1-dashboard regression. The security team would see
+4 fewer findings via strix vs. running nuclei standalone.
 
-P0 BUG: wrapper -tags filter is over-restrictive.
-Δ=17.4% exceeds 5pp threshold.
+================================================================
+Section B — L1.5 hook chain attribution
+================================================================
+Δ between strix pre-L1.5 and strix post-L1.5 emissions:
+
+| Hook | Findings dropped | Reason | Audit log |
+|---|---|---|---|
+| pre_emission_fp_filter | 1 | "planted-decoy-shape" | run_summary.l15_dismissals[0] |
+| corroborator_ledger | 0 | (no demotions) | — |
+| post_emit_verifier | 0 | (all verified) | — |
+| _maybe_merge_into_existing_finding | 2 | duplicate of #4 (CWE-200) | merged into #4.corroborated_by[] |
+
+Net: 19 pre-L1.5 → 16 post-L1.5.
+* The 2 merges are not losses (count drops, but information preserved
+  via corroborated_by[]).
+* The 1 FP drop is a real loss IF the planted-decoy shape false-positives
+  on a real finding. Manual review of run_summary.l15_dismissals[0]
+  required.
+
+================================================================
+Section C — L2 developer-facing view (non-security audience, CLAUDE.md §1.5)
+================================================================
+
+Of the 16 post-L1.5 findings:
+* 8 surfaced into the prioritized chain narrative (chain_summary != null)
+* 4 have file/line/author/fix_hint (bench_context complete)
+* 2 have plain-English remediation (bench_explanation pass)
+* 1 has compliance mapping (bench_patcher_correctness or compliance hook)
+
+The L2-audience metrics are tracked in their own benches (per CLAUDE.md
+§6) — Q3 only surfaces the per-wrapper L1 -> L1.5 -> L2 pipeline shape
+so we can see whether L2's developer-facing output is bottlenecked by
+L1 misses, L1.5 over-suppression, or L2 narrative gaps.
+
+================================================================
+Verdict — P0/P1/P2 (drives release-gate decision)
+================================================================
+
+P0: wrapper -tags filter is over-restrictive → blocks security-team
+    dashboard. Fix path: expose `tags=None` invocation mode (4 lines).
+P1: wrapper -severity default trims low/medium → consider opt-in
+    `full_severity=True` flag for the standalone-equivalent mode.
+P2: post_emit_verifier hook chain — 1 dismissal — manual audit needed.
 ```
 
-### 5.5 Decision rule (codified)
+### 5.5 Decision rule (codified — audience-aware)
 
-> * **Δ ≤ 5pp** on high+critical severity findings: GREEN. Wrapper is at parity.
-> * **5pp < Δ ≤ 15pp**: YELLOW. Open issue; bench again next iter.
-> * **Δ > 15pp**: RED / P0. Block strix release on wrapper fix.
-> * **Δ < 0** (strix finds more than standalone): investigate.
->   Most likely L2-orchestrated retry / multi-pass; could also be the L1.5
->   chain's `_maybe_merge_into_existing_finding` reducing dedup loss.
->   Document the source; do not assume bug.
+The decision rule splits by audience per CLAUDE.md §1.5:
 
-The threshold applies to **high + critical** findings — info / low findings have too much noise for the threshold to be meaningful. Lower-severity findings are surfaced in the report but don't block the gate.
+#### Security-team view (L1 dashboard, Section A above)
+
+> * **Δ ≤ 0pp** on high+critical (every finding nuclei would surface, strix also surfaces): **GREEN**. The L1 dashboard is at parity.
+> * **0pp < Δ ≤ 5pp** on high+critical: **YELLOW**. Open issue, document missing finding, schedule fix. The security team loses information but no critical signal.
+> * **Δ > 5pp on high+critical** OR **any miss of a critical-severity finding**: **RED / P0**. Block strix release. The L1 dashboard is strictly worse than running the tool standalone, and the product value collapses (CLAUDE.md §1.5).
+> * **Δ > 15pp on low/medium**: **YELLOW**. Lower priority but track.
+
+#### Developer audience (L2 narrative, Section C above)
+
+> * The L2-audience metrics live in their own benches (`bench_context`, `bench_explanation`, `bench_chains`, `bench_patcher_correctness`, `bench_severity`). Q3 does NOT gate on those numbers — that's Q1's job.
+> * What Q3 does gate: **L2 cannot translate findings L1 didn't surface**. If Section A is RED, Section C metrics are moot until Section A is GREEN.
+
+#### Surprise outcomes
+
+> * **Δ < 0** (strix finds MORE than standalone): investigate but do not block. Most likely L2-orchestrated retry / multi-pass; could also be the L1.5 chain's `_maybe_merge_into_existing_finding` reducing dedup loss. Document the source.
+> * **L1.5 drops a finding the standalone tool emitted as high/critical**: P0. The L1.5 chain exists to add context for L2, NOT to filter what the L1 audience sees. Severity demotions are allowed; outright drops on high/critical are not.
+
+The threshold applies primarily to **high + critical** because info / low findings have too much noise for the threshold to be meaningful, and the L1 audience can tolerate noise at those tiers. Critical findings have zero tolerance — every miss blocks release.
 
 ### 5.6 Anti-overfit guards
 
@@ -271,13 +350,24 @@ These priors are deliberately documented so the bench results either confirm the
 
 ---
 
-## 8. Connection to Q1, Q2, Q4
+## 8. Connection to Q1, Q2, Q4 — audience-aware
 
-* **Q1** measures strix vs. competitors externally. Q3 explains *why* strix is at/below the Q1 numbers by attributing loss to specific wrappers.
-* **Q2** reduces tokens but **must not reduce findings**. Q3's per-wrapper baseline is the regression gate that lets us verify the no-loss invariant after each Q2 iter ships. The `<1pp regression gate` Q2.6 mentions is implemented by re-running the Q3.2-Q3.7 parity benches with the Q2-stratified compactor on vs. off.
-* **Q4** parallelizes the lead's tool dispatch. Q3's per-wrapper baseline shows whether parallelism changes the per-tool recall (race conditions in the wrapper, port-reuse in nmap, etc.) — same regression gate as Q2.
+The Q3 parity bench is the **load-bearing measurement for the security-team-facing artifact** (CLAUDE.md §1.5). Every other Q-track depends on it:
 
-Q3 is the **causal-attribution layer** that makes Q1/Q2/Q4 iter PRs auditable: every regression's root cause is one of a small set of named wrappers.
+* **Q1** measures strix vs. competitors externally on the developer-facing artifact (Youden index, lesson completion, KEV hit rate). Q3 explains *why* strix is at/below the Q1 numbers by attributing loss to specific wrappers. Q1 is the L2-audience scorecard; Q3 is the L1-audience scorecard. Both ship together.
+* **Q2** reduces tokens but **must not reduce findings the L1 audience sees**. Q3's per-wrapper baseline is the regression gate. The `<1pp regression gate` Q2.6 mentions is implemented by re-running Q3.2-Q3.7 parity benches with the Q2-stratified compactor on vs. off. If Section A (the L1 dashboard) regresses by >0pp on high+critical, the Q2 PR is rejected even if it improves Q1's L2-facing numbers.
+* **Q4** parallelizes the lead's tool dispatch. Same regression gate as Q2 — parallelism changes the per-tool recall via race conditions / port-reuse / shared state, all of which only Q3 catches.
+
+Q3 is the **causal-attribution layer** that makes Q1/Q2/Q4 iter PRs auditable: every regression's root cause is one of a small set of named wrappers. Without Q3, every PR that ships into the L1-audience path is shipping on a guess.
+
+### 8.1 The two-scorecard release gate
+
+Going forward, **every L1 / L1.5 / L2 / Q2 / Q4 iter PR carries two scorecards** in its body:
+
+1. **Q3 parity scorecard** (Sections A+B of the parity report) — does this PR change the L1-dashboard / L1.5-attribution numbers? Gates the security-team-facing artifact.
+2. **Q1 per-layer-recall scorecard** (Youden / detection_rate / KEV hit-rate, per CLAUDE.md §6) — does this PR change the developer-facing artifact?
+
+A PR that regresses (1) but improves (2) is rejected without explicit justification. A PR that improves (1) but regresses (2) is allowed but flagged for L2-iter follow-up.
 
 ---
 
@@ -292,6 +382,8 @@ Q3 is the **causal-attribution layer** that makes Q1/Q2/Q4 iter PRs auditable: e
 
 ## 10. Success criterion
 
-> By the end of Q3.7, the strix repo has a per-wrapper parity baseline committed for all 6 P0 OSS detection wrappers. Every subsequent PR that touches L1 / L1.5 / Q2-compaction-related code re-runs the parity benches in CI and any wrapper with Δ > 5pp on high+critical findings vs. its committed baseline blocks the PR.
+> By the end of Q3.7, the strix repo has a per-wrapper parity baseline committed for all 6 P0 OSS detection wrappers. Every subsequent PR that touches L1 / L1.5 / Q2-compaction-related / Q4-parallelism code re-runs the parity benches in CI and **any wrapper showing Δ > 0pp on critical or Δ > 5pp on high vs. its committed baseline blocks the PR**, regardless of L2-audience metric improvements.
 
-Without this, every PR is a guess about whether we just lost detection recall. With it, every PR is a measurable claim about whether we did.
+This codifies the CLAUDE.md §1.5 product gate: the security-team-facing artifact is non-negotiable. Without Q3, every PR is a guess about whether we just lost detection recall on the L1-dashboard. With it, every PR is a measurable claim about whether we did, and the security-team audience gets a strictly-monotonic dashboard quality (it never silently regresses).
+
+The L2-facing developer-action-list metrics (`bench_context`, `bench_explanation`, `bench_patcher_correctness`, etc.) are tracked separately under Q1's per-layer recall matrix and have their own iter sequences. Q3 is the load-bearing gate for the L1 audience; Q1 is the load-bearing gate for the L2 audience. Both must be green for a release.
