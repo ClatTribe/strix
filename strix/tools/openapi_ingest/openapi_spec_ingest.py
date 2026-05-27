@@ -48,6 +48,7 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 from strix.tools.registry import register_tool
+from strix.utils.host_url_rewrite import to_host_loopback
 
 
 logger = logging.getLogger(__name__)
@@ -98,9 +99,19 @@ def _http_fetch(
     """Fetch a URL. Returns (status_code, body). Defensive — any
     error returns (0, ""). The `fetcher` injection point lets
     tests stub HTTP without monkeypatching httpx.
+
+    iter-Q5.23: this tool is `sandbox_execution=False` (host-side).
+    The bench / wrapper may hand us URLs containing
+    `host.docker.internal` — the docker host-gateway alias that's
+    only resolvable from inside a container. Rewrite to `127.0.0.1`
+    before the HTTP call so the host-side ingest can actually fetch
+    the spec.
     """
     if fetcher is not None:
+        # Tests stub fetcher — they own URL normalization, so honor
+        # the URL they passed in verbatim.
         return fetcher(url, timeout=timeout)
+    url = to_host_loopback(url)
     try:
         import httpx
     except ImportError:

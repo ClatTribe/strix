@@ -30,6 +30,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from strix.tools.registry import register_tool
+from strix.utils.host_url_rewrite import to_host_loopback
 
 
 logger = logging.getLogger(__name__)
@@ -84,7 +85,16 @@ _DEFAULT_WEB_VULN_SKILLS: tuple[str, ...] = (
 
 def _probe_http(url: str) -> tuple[int, dict[str, str], str]:
     """One HEAD + (if useful) one GET. Returns (status, headers, body).
-    Headers are normalised to lower-case keys. Body is empty on HEAD-only."""
+    Headers are normalised to lower-case keys. Body is empty on HEAD-only.
+
+    iter-Q5.23: this tool is host-side (sandbox_execution=False). When
+    the caller hands us a `host.docker.internal` URL — the docker
+    host-gateway alias the bench / wrapper uses for sandbox-side
+    consumers — translate it to `127.0.0.1` before issuing the HTTP
+    request. Outside a container, `host.docker.internal` is not
+    resolvable; the loopback IP is the host-side equivalent.
+    """
+    url = to_host_loopback(url)
     try:
         import httpx
     except ImportError:
@@ -102,12 +112,30 @@ def _probe_http(url: str) -> tuple[int, dict[str, str], str]:
             body = get.text[:_BODY_PROBE_BYTES] if get.text else ""
             return get.status_code, headers, body
     except Exception:  # noqa: BLE001
-        logger.warning("httpx probe failed for %s", url, exc_info=True)
+        # iter-Q5.23: demote from warning (with stack trace) to debug.
+        # The connect failure is recoverable — fingerprint returns an
+        # empty detection set and the rest of the prepass continues.
+        # The stack-trace at WARNING level was pure noise in bench logs.
+        logger.debug("httpx probe failed for %s: %r", url, _safe_exc())
         return 0, {}, ""
 
 
+def _safe_exc() -> str:
+    """Return a short exception summary safe for log lines (no stack)."""
+    import sys
+    exc_type, exc_value, _ = sys.exc_info()
+    if exc_type is None:
+        return ""
+    return f"{exc_type.__name__}: {exc_value}"
+
+
 def _probe_http_stdlib(url: str) -> tuple[int, dict[str, str], str]:
-    """Fallback when httpx isn't available."""
+    """Fallback when httpx isn't available.
+
+    iter-Q5.23: applies the same host-loopback rewrite as `_probe_http`
+    so the stdlib path doesn't bypass the cure when httpx is absent.
+    """
+    url = to_host_loopback(url)
     import urllib.request
 
     try:
@@ -736,6 +764,8 @@ def _probe_graphql(target_url: str) -> Detection | None:
         import httpx
     except ImportError:
         return None
+    # iter-Q5.23: host-side tool, rewrite docker host-gateway alias.
+    target_url = to_host_loopback(target_url)
     parsed = urlparse(target_url)
     base = f"{parsed.scheme}://{parsed.netloc}"
     payload = '{"query":"{__typename}"}'
@@ -799,6 +829,8 @@ def _probe_openapi(target_url: str) -> Detection | None:
         import httpx
     except ImportError:
         return None
+    # iter-Q5.23: host-side tool, rewrite docker host-gateway alias.
+    target_url = to_host_loopback(target_url)
     parsed = urlparse(target_url)
     base = f"{parsed.scheme}://{parsed.netloc}"
     spec_url: str | None = None
