@@ -904,6 +904,14 @@ class Tracer:
             # iter-31.11 — patcher_correctness rollup (metric #20).
             # Reads patcher registry status counts.
             **self._build_patcher_summary(),
+            # iter-Q5.15 — lead reasoning trace persisted by think().
+            # Audit log for the L2 audience: "why the AI security
+            # engineer thought this was the highest-priority finding."
+            # Empty list when think wasn't called or persistence was
+            # disabled via STRIX_THINK_PERSIST_DISABLED=1.
+            "lead_reasoning_trace": list(
+                getattr(self, "lead_reasoning_trace", None) or []
+            ),
         }
 
     def _build_patcher_summary(self) -> dict[str, Any]:
