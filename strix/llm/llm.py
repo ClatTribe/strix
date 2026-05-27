@@ -15,6 +15,10 @@ from litellm.utils import supports_prompt_caching, supports_vision
 from strix.config import Config
 from strix.llm.config import LLMConfig
 from strix.llm.memory_compressor import MemoryCompressor
+from strix.llm.compaction_transcript import (
+    is_transcript_disabled,
+    render_transcript_from_singletons,
+)
 from strix.llm.stratified_compactor import (
     is_stratified_compaction_disabled,
     stratify_and_compact,
@@ -520,15 +524,45 @@ class LLM:
         # fallback when the stratified output is still over the 90%
         # threshold (rare in practice). Opt-out:
         # STRIX_STRATIFIED_COMPACTION_DISABLED=1.
+        cold_stratum_count = 0
         if not is_stratified_compaction_disabled():
             stratified, _stats = stratify_and_compact(conversation_history)
             # Best-effort telemetry — surface compaction stats so bench
             # reports can show the per-stratum compression.
             try:
                 self._last_compaction_stats = _stats.to_dict()
+                cold_stratum_count = int(
+                    (_stats.by_stratum or {}).get("cold", 0) or 0
+                )
             except Exception:  # noqa: BLE001
                 pass
             conversation_history[:] = stratified
+
+        # iter-Q2.2 — compaction transcript artifact. When the
+        # stratified compactor dropped/compressed COLD-stratum content,
+        # render a deterministic markdown summary of the L1.5-enriched
+        # state and inject it as a context block so the LLM still sees
+        # "what happened back there" — findings, tools tried, partial
+        # signals, open questions. Pure-function render, no LLM call.
+        # Opt-out: STRIX_COMPACTION_TRANSCRIPT_DISABLED=1.
+        if cold_stratum_count > 0 and not is_transcript_disabled():
+            try:
+                transcript = render_transcript_from_singletons()
+                if transcript and transcript.markdown:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "<compaction_transcript>\n"
+                                f"{transcript.markdown}\n"
+                                "</compaction_transcript>\n"
+                            ),
+                        }
+                    )
+            except Exception:  # noqa: BLE001
+                # Best-effort — never block the LLM call on transcript
+                # render failure.
+                logger.debug("compaction_transcript render failed", exc_info=True)
 
         compressed = list(self.memory_compressor.compress_history(conversation_history))
         conversation_history.clear()
