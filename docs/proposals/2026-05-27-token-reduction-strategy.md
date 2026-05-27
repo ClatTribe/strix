@@ -1,6 +1,16 @@
 # Token reduction strategy — without losing finding recall
 
-**Status:** proposal (this PR opens the design conversation).
+**Status:** SUPERSEDED by
+`2026-05-27-token-reduction-v2-stratified-compaction.md`.
+This v1 had 6 static per-block compression rules. The v2 reframes
+the same problem using Claude Code's stratified-by-recency
+compaction model — recent turns verbatim, mid-range summarized,
+old aggressively compacted; decisions preserved, deliberations
+summarized. Strictly subsumes this v1.
+
+Kept in-tree because the v1 → v2 evolution shows why the
+naive per-block approach misses signal/noise stratification.
+
 **Date:** 2026-05-27.
 **Author:** Q2 thread, iter-Q1 follow-on.
 
