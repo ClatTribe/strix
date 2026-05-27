@@ -15,6 +15,10 @@ from litellm.utils import supports_prompt_caching, supports_vision
 from strix.config import Config
 from strix.llm.config import LLMConfig
 from strix.llm.memory_compressor import MemoryCompressor
+from strix.llm.stratified_compactor import (
+    is_stratified_compaction_disabled,
+    stratify_and_compact,
+)
 from strix.llm.utils import (
     _truncate_to_first_function,
     fix_incomplete_tool_call,
@@ -510,6 +514,21 @@ class LLM:
                     ),
                 }
             )
+
+        # iter-Q2.1 — stratified compaction runs FIRST (deterministic,
+        # no LLM call). The existing MemoryCompressor still fires as a
+        # fallback when the stratified output is still over the 90%
+        # threshold (rare in practice). Opt-out:
+        # STRIX_STRATIFIED_COMPACTION_DISABLED=1.
+        if not is_stratified_compaction_disabled():
+            stratified, _stats = stratify_and_compact(conversation_history)
+            # Best-effort telemetry — surface compaction stats so bench
+            # reports can show the per-stratum compression.
+            try:
+                self._last_compaction_stats = _stats.to_dict()
+            except Exception:  # noqa: BLE001
+                pass
+            conversation_history[:] = stratified
 
         compressed = list(self.memory_compressor.compress_history(conversation_history))
         conversation_history.clear()
