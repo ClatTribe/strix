@@ -1904,6 +1904,28 @@ class Tracer:
         # Each hook is recall-safe: any internal exception falls back
         # to passthrough semantics so a buggy L1.5 step never makes L2
         # worse off than no-L1.5. See docs/L2-optimization.md §7.
+        #
+        # iter-Q1.4 — `STRIX_L15_DISABLED=1` ablation flag. When set,
+        # skip the entire hook chain (FP filter, surface_priority,
+        # exploitability, corroborator, hygiene, threat_intel.enrich,
+        # post_emit_verifier). The finding lands in
+        # `vulnerability_reports` without any enrichment. Used by the
+        # multi-trial ablation harness to measure L1.5's net
+        # contribution (`value_l15 = score_with_l15 − score_without_l15`).
+        try:
+            from benchmarks.per_target.bench_ablation_flags import (
+                is_l15_disabled,
+            )
+        except Exception:  # noqa: BLE001
+            def is_l15_disabled() -> bool:
+                return False
+
+        if is_l15_disabled():
+            # Skip the full hook chain — go straight to the append + persist.
+            self.vulnerability_reports.append(report)
+            self.save_run_data()
+            return report_id
+
         try:
             from strix.l15 import (
                 classify_surface,
