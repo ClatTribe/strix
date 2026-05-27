@@ -380,7 +380,7 @@ Strix is **an LLM orchestrator over community-maintained OSS security tools**, n
 | 37.11 | Per-asset trim to ACT-only (drop prepass dupes — katana, nuclei, openapi_ingest, …) | #490 | ✓ shipped |
 | 37.13 | Sync `docs/tool-catalog-rationalization.md` to shipped reality (10/10/9/11/7 per-asset, layered enforcement model) | — | ✓ shipped (this PR) |
 | 37.12 | Bench L2 Juice Shop with iter-37.10 + 37.11 trimmed catalog | — | in flight |
-| 37.4 | Add 6 NEW OSS wrappers: smuggler.py, SAML Raider, hydra, mobsfscan, ffuf, schemathesis | — | gated on 37.12 |
+| 37.4 | Add 5 NEW OSS wrappers: smuggler.py, hydra, mobsfscan, ffuf, schemathesis (SAML Raider dropped — Burp extension with no usable standalone CLI; existing in-house scan_saml_xsw already covers the 8 XSW variants) | — | ✓ shipped (this PR) |
 | 37.5 | DELETE the deprecated tools after grace period (≥ 2026-06-15) | — | gated on time |
 | 37.6 | Re-bench L2 Juice Shop with minimal catalog active (superseded by 37.12) | — | superseded |
 

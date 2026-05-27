@@ -115,6 +115,18 @@ from .katana_runner import *           # noqa: F403  # crawl_with_katana
 from .testssl_runner import *          # noqa: F403  # tls_audit_testssl
 from .dalfox_runner import *           # noqa: F403  # scan_xss_dalfox
 from .anchor_probes import *           # noqa: F403  # iter-35.2 — sandbox wrappers for the 11 anchor-prepass probes
+# iter-37.4 — six new OSS-anchored wrappers closing the coverage gaps
+# documented in docs/tool-catalog-rationalization.md §C.
+from .hydra_runner import *            # noqa: F403  # probe_default_creds_hydra
+from .ffuf_runner import *             # noqa: F403  # scan_fuzz_ffuf
+from .schemathesis_runner import *     # noqa: F403  # scan_api_schemathesis
+from .smuggler_runner import *         # noqa: F403  # scan_smuggling_smuggler
+from .mobsf_runner import *            # noqa: F403  # scan_mobile_mobsfscan
+# Note: iter-37.4's planned `scan_saml_xsw` wrapper was dropped —
+# SAML Raider is a Burp Suite extension without a usable standalone
+# CLI, and the existing in-house `strix/tools/specialist/scan_saml_xsw.py`
+# already implements the canonical 8 XSW variants. See iter-37.4 PR
+# discussion + docs/tool-catalog-rationalization.md §C update.
 from .hibp_runner import *             # noqa: F403  # scan_credential_leaks_hibp
 # iter-23.1 — recon bedrock: passive subdomain harvest (subfinder),
 # concurrent HTTP probing (httpx), service/version fingerprinting (nmap).

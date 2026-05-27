@@ -148,16 +148,18 @@ These 19 wrappers stay. They're the foundation.
 
 A few categories have OSS but strix hasn't wrapped them yet:
 
-| add | OSS engine | purpose |
-|---|---|---|
-| `scan_smuggling_smuggler` | **smuggler.py** (defparam) | HTTP request smuggling (TE.CL / CL.TE / TE.TE) — most accurate OSS detector |
-| `scan_saml_raider` | **SAML Raider** (Burp plugin → standalone) | SAML XSW / signature-wrapping attacks |
-| `probe_default_creds_hydra` | **hydra** (already in image) | Replace probe_default_creds with hydra wrapper |
-| `scan_mobile_mobsfscan` | **mobsfscan** | APK static analysis |
-| `scan_fuzz_ffuf` | **ffuf** | Generic web fuzzing (param discovery, vhost) |
-| `scan_api_schemathesis` | **schemathesis** | OpenAPI-driven API fuzzer |
+| add | OSS engine | purpose | iter-37.4 status |
+|---|---|---|---|
+| `scan_smuggling_smuggler` | **smuggler.py** (defparam) | HTTP request smuggling (TE.CL / CL.TE / TE.TE) — most accurate OSS detector | ✓ shipped |
+| `probe_default_creds_hydra` | **hydra** (already in image) | Replace probe_default_creds with hydra wrapper | ✓ shipped |
+| `scan_mobile_mobsfscan` | **mobsfscan** | APK static analysis | ✓ shipped |
+| `scan_fuzz_ffuf` | **ffuf** | Generic web fuzzing (param discovery, vhost) | ✓ shipped |
+| `scan_api_schemathesis` | **schemathesis** | OpenAPI-driven API fuzzer | ✓ shipped |
+| ~~`scan_saml_raider`~~ | ~~SAML Raider (Burp)~~ | SAML XSW / signature-wrapping attacks | **dropped** — Burp Suite extension without a usable standalone CLI; the existing in-house `strix/tools/specialist/scan_saml_xsw.py` already implements the canonical 8 XSW variants from Mainka et al. |
 
-**6 new wrappers** to fill the gaps. Each is ~150 LOC following the existing `*_runner` pattern.
+**5 new wrappers** shipped in iter-37.4 (the original plan was 6 — `scan_saml_raider` dropped, see note above). Each follows the existing `*_runner` pattern: `subprocess.run` the OSS binary, parse stdout/JSON into the canonical finding shape, return `{success, status, target, total_findings, findings}`, graceful-degrade to `status="partial"` with an install hint when the binary isn't on PATH.
+
+All 5 wrappers register with `@register_tool(sandbox_execution=True)` and route through the sandbox tool_server. They live in the LEGACY per-asset catalogs only; the minimal catalogs (iter-37.11) stay ACT-only until the iter-37.12 re-bench shows positive recall delta. Promotion path: add to `_MINIMAL_TOOLS_BY_TARGET_TYPE` after observing the wrapper meaningfully moves bench scores.
 
 ## Final per-asset-type catalog — **as shipped** (post iter-37.11)
 
@@ -258,7 +260,7 @@ The trim went deeper for assets whose prepass is comprehensive (web/api/code/con
 | **37.11** | Per-asset trim to ACT-only. Drop prepass duplicates (`crawl_with_katana`, `scan_nuclei_templates`, `seed_auth`, `tls_audit`, `openapi_spec_ingest`, `scan_sast`, `secrets_scan`, `scan_sca_lockfiles`, `scan_iac`, `scan_container_image`) from the LLM catalog — they fire deterministically in the prepass. | #490 | ✓ shipped |
 | **37.13** | This sync — bring the doc up to date with the shipped reality. | — | ✓ shipped (this PR) |
 | **37.12** | Re-bench L2 Juice Shop with the 99 → 10 catalog trim. Validation gate for iter-37.4. | — | in flight |
-| **37.4** | Add 6 NEW OSS wrappers: smuggler.py, SAML Raider, hydra, mobsfscan, ffuf, schemathesis. | — | gated on 37.12 |
+| **37.4** | Add 5 NEW OSS wrappers: smuggler.py, hydra, mobsfscan, ffuf, schemathesis. (SAML Raider dropped — see §C.) | — | ✓ shipped |
 | **37.5** | DELETE the ~50 deprecated tools entirely (after ≥1 release cycle of deprecation warnings — earliest 2026-06-15). | — | gated on time |
 | **37.6** | (Original re-bench plan — superseded by 37.12, which covers the broader trim.) | — | superseded |
 
