@@ -1303,6 +1303,13 @@ class Tracer:
         # evidence's `tool` field for audit.
         discovery_method: str | None = None,
         discovery_source_tool: str | None = None,
+        # iter-Q5.11 — L2-audience parameters. Per CLAUDE.md §1.5.6
+        # (tools are LLM's hands, not its brain), reasoning lives in
+        # the LLM response; the commit (these two fields) rides on
+        # this tool instead of having separate propose_chain /
+        # prioritize_findings tools.
+        chain_summary: str | None = None,
+        customer_priority: int | None = None,
     ) -> str:
         # iter-25-fix: use a monotonic per-call counter instead of
         # len(vulnerability_reports)+1. The latter would generate the
@@ -1366,6 +1373,16 @@ class Tracer:
             report["cwe"] = cwe.strip()
         if isinstance(rule_id, str) and rule_id.strip():
             report["rule_id"] = rule_id.strip()
+
+        # iter-Q5.11 — L2-audience surface. chain_summary is the
+        # multi-finding exploit narrative (replaces standalone
+        # propose_chain); customer_priority is the customer-context
+        # ranking (replaces standalone prioritize_findings).
+        # Both feed bench_chains + bench_severity.
+        if isinstance(chain_summary, str) and chain_summary.strip():
+            report["chain_summary"] = chain_summary.strip()
+        if isinstance(customer_priority, int) and customer_priority > 0:
+            report["customer_priority"] = customer_priority
 
         # MA-S2 P0-CVS-A — EPSS enrichment on every emitted
         # finding. The block is ALWAYS present (per the MA-S2
