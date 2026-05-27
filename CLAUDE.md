@@ -242,10 +242,27 @@ returned result so callers don't see implementation detail.
 
 ---
 
-## 6. The bench framework (iter-31 series)
+## 6. The bench framework
 
-11 bench scorers in `benchmarks/per_target/bench_*.py`. Each reads the
-canonical run output + computes one metric:
+### 6.1 Per-layer recall matrix (iter-Q1 series, primary)
+
+Per `docs/proposals/2026-05-27-benchmark-suite-strategy.md`, the canonical measurement is **per-layer recall** with neutral, competitor-cited benchmarks. Every iter PR must cite the relevant bench delta.
+
+| Layer | Bench harness | Headline metric | External comparison |
+|---|---|---|---|
+| **L0** (CVE corpus freshness) | `bench_vulhub_cve_corpus.py` | KEV hit rate (cron pages at <90%) | n/a — cron pager |
+| **L1** (detection) | `bench_owasp_benchmark.py` | Per-CWE Youden index | Veracode 51%, Checkmarx 47%, Fortify 35%, SonarQube 6%, ZAP 13% |
+| **L1.5** (enrichment) | Same as L1 with `STRIX_L15_DISABLED=1` | Δ-Youden = L1.5's contribution | Internal — measures own value |
+| **L2** (chain exploitation) | `bench_webgoat_dual.py` + `bench_l2_juiceshop_full.py` | (detection_rate, completion_rate). Gap = L2 chain value | n/a — internal attribution |
+| Multi-trial wrapper | `bench_multi_trial.py` | median + p10/p90 over N=5 trials | Single-trial bench is noise |
+
+**Decision rule (Q1 proposal, codified):**
+
+> Every L1/L1.5 iter PR must run `bench_owasp_benchmark.py` and report the per-CWE Youden delta on affected categories. Every L2 iter PR must report both `detection_rate` and `completion_rate` from `bench_webgoat_dual.py`. PRs that improve L2 numbers but regress L1 numbers are **rejected** without explicit justification.
+
+### 6.2 Per-metric scorers (iter-31 series, secondary)
+
+11 narrow scorers in `benchmarks/per_target/bench_*.py`. Each reads the canonical run output + computes one metric. They feed the per-layer headline benches but are not themselves headline numbers:
 
 | Bench | Metric | Reads |
 |---|---|---|
@@ -261,9 +278,19 @@ canonical run output + computes one metric:
 | bench_explanation | explanation_clarity | per-finding description (heuristic or LLM-as-judge) |
 | bench_patcher_correctness | patch_correctness | `run_summary.patches_by_status` |
 
-**Anti-overfit guard**: every bench has a source-grep test forbidding
-SUT-specific identifiers (juice-shop, bkimminich, vampi, erev0s, etc.)
-in its source. If you add a new bench, include this guard.
+### 6.3 Ablation flags (iter-Q1.4)
+
+Both flags wired into the strix runtime (`tracer.add_vulnerability_report` + `StrixAgent.execute_scan`):
+
+- `STRIX_L15_DISABLED=1` — skip the L1.5 hook chain (FP filter, surface_priority, exploitability, corroborator, post_emit_verifier, threat_intel.enrich). Findings land in `vulnerability_reports` raw. Use to isolate L1's contribution.
+- `STRIX_L2_DISABLED=1` — `execute_scan` returns after `anchor_prepass` completes without spawning `agent_loop`. Use to measure pure L1 detection (no LLM).
+
+### 6.4 Anti-overfit guards (mandatory on every new bench)
+
+1. **Source-grep test** forbidding SUT-specific identifiers (`juice-shop`, `bkimminich`, `vampi`, `crapi`, `erev0s`, etc.) in the scoring module — catches the case where a heuristic tunes to one fixture's response shape.
+2. **Mandatory competitor citation** in every bench report (enforced by render_report tests for L1; reported alongside L2 numbers).
+3. **Multi-trial median + p10/p90** via `bench_multi_trial.py` — single-trial bench numbers are noise.
+4. **Per-layer ablation** in any headline number — Δ with `STRIX_L15_DISABLED=1` reveals L1.5's contribution; Δ with `STRIX_L2_DISABLED=1` reveals L2's contribution.
 
 ---
 
