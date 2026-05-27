@@ -1,8 +1,83 @@
-# Strix benchmark suite — per asset type
+# Strix benchmark suite — per-layer recall matrix
 
-**Per-fixture mapping of what strix is measured against, what must_find vulns each fixture contains, and what the top public/competitor tools achieve on the same shape of fixture.**
+**Status as of 2026-05-27** (post iter-Q1.5). This doc is the canonical answer to "how is strix measured, and how does each measurement compare to industry?"
 
-Status quo as of 2026-05-20. Strix recall numbers will be filled in as the new L1-first architecture (PR #364) finishes validation runs.
+## Two layers of measurement
+
+### Layer 1: per-layer recall matrix (primary, iter-Q1 series)
+
+The Q1 proposal (`docs/proposals/2026-05-27-benchmark-suite-strategy.md`) replaced the previous single-fixture headline ("Juice Shop recall") with a per-layer matrix. Every iter PR cites the relevant layer's headline number alongside the closest neutral competitor's published score.
+
+| Layer | Bench harness | Headline metric | Neutral comparison |
+|---|---|---|---|
+| **L0** — signature corpus freshness | [`bench_vulhub_cve_corpus.py`](../benchmarks/per_target/bench_vulhub_cve_corpus.py) | KEV hit rate (cron pages at <90%) | n/a — cron pager threshold |
+| **L1** — OSS-tool detection | [`bench_owasp_benchmark.py`](../benchmarks/per_target/bench_owasp_benchmark.py) | Per-CWE Youden index | Veracode 51%, Checkmarx 47%, Fortify 35%, SonarQube 6%, ZAP 13% |
+| **L1.5** — enrichment value | Same as L1 with `STRIX_L15_DISABLED=1` (ablation) | Δ-Youden = L1.5's contribution | Internal |
+| **L2** — LLM chain exploitation | [`bench_webgoat_dual.py`](../benchmarks/per_target/bench_webgoat_dual.py) + [`bench_l2_juiceshop_full.py`](../benchmarks/per_target/bench_l2_juiceshop_full.py) | (detection_rate, completion_rate). chain_gap = L2 chain value | WebGoat published lesson-completion rates |
+| Multi-trial wrapper | [`bench_multi_trial.py`](../benchmarks/per_target/bench_multi_trial.py) | median + p10/p90 over N=5 trials | Single-trial bench is noise |
+
+**Decision rule** (CLAUDE.md §6): every L1/L1.5 PR cites OWASP Benchmark per-CWE Youden delta; every L2 PR reports both `detection_rate` AND `completion_rate`. PRs improving L2 but regressing L1 are rejected without explicit justification.
+
+### Layer 2: per-fixture must_find recall (secondary, iter-28 series)
+
+Below this header — the original per-fixture must_find tables. These are still useful as regression smoke tests but they're no longer the headline. They're consumed by `bench_l1_only.py` for quick sanity checks during dev.
+
+## Anti-overfit guards (mandatory on every bench)
+
+1. **Source-grep test** in `tests/benchmarks/per_target/` forbidding SUT-specific identifiers (`juice-shop`, `bkimminich`, `vampi`, `crapi`, `erev0s`, etc.) in the scoring module. Catches heuristics tuned to one fixture's response shape.
+2. **Mandatory competitor citation** in every bench report's markdown output. The `render_report()` test in each scoring module enforces this.
+3. **Multi-trial median + p10/p90** via `bench_multi_trial.py`. Single-trial recall claims are rejected.
+4. **Per-layer ablation** in any L1.5/L2 claim. Δ with `STRIX_L15_DISABLED=1` reveals L1.5's contribution; Δ with `STRIX_L2_DISABLED=1` reveals L2's contribution.
+
+## How to run each bench
+
+```bash
+# L1 — OWASP Benchmark v1.2 (Java SAST, ~3000 test cases)
+docker compose -f benchmarks/per_target/fixtures/web/owasp-benchmark/docker-compose.yml build
+python -m benchmarks.per_target.bench_owasp_benchmark --scan-mode standard
+
+# L2 — WebGoat dual mode (detection ∧ completion)
+python -m benchmarks.per_target.bench_webgoat_dual --scan-mode standard
+
+# L2 — Juice Shop full (109 challenges)
+python -m benchmarks.per_target.bench_l2_juiceshop_full --scan-mode standard
+
+# L0 — Vulhub CVE corpus (25 curated CVEs, weekly cron)
+python -m benchmarks.per_target.bench_vulhub_cve_corpus
+
+# Multi-trial wrapper around any of the above
+python -m benchmarks.per_target.bench_multi_trial --bench owasp_benchmark --trials 5
+
+# L1.5 ablation — measure L1.5 hooks' contribution
+STRIX_L15_DISABLED=1 python -m benchmarks.per_target.bench_multi_trial \
+    --bench owasp_benchmark --trials 5 --output no_l15.json
+python -m benchmarks.per_target.bench_multi_trial \
+    --bench owasp_benchmark --trials 5 --output with_l15.json
+# Compare median Youden between the two outputs
+
+# L2 ablation — measure pure L1 (no LLM)
+STRIX_L2_DISABLED=1 python -m benchmarks.per_target.bench_multi_trial \
+    --bench l2_juiceshop_full --trials 3
+```
+
+## Tests (every bench harness)
+
+`tests/benchmarks/per_target/test_*.py`:
+
+| Test file | Coverage |
+|---|---|
+| `test_owasp_benchmark_scoring.py` | 42 tests — per-CWE TP/FP/TN/FN math, Youden index, competitor citation enforcement |
+| `test_webgoat_dual_scoring.py` | 21 tests — finding-to-lesson coverage, completion rate parsing, chain_gap math |
+| `test_vulhub_cve_scoring.py` | 17 tests — KEV hit rate threshold, EPSS weighting, by-category/by-vintage breakdown |
+| `test_ablation_and_multi_trial.py` | 43 tests — env flag canonical truthy/falsy values, percentile math, summary stats, metric extraction, bench registry |
+
+Total: 123 unit tests across the 4 new bench harnesses.
+
+---
+
+# Per-fixture must_find recall (legacy / smoke-test layer)
+
+The tables below are the original per-fixture mapping. Useful for fast feedback during development; the per-layer matrix above is what's cited in PR reviews.
 
 ## Notation
 
