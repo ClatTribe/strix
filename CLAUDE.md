@@ -380,7 +380,8 @@ Strix is **an LLM orchestrator over community-maintained OSS security tools**, n
 | 37.11 | Per-asset trim to ACT-only (drop prepass dupes — katana, nuclei, openapi_ingest, …) | #490 | ✓ shipped |
 | 37.13 | Sync `docs/tool-catalog-rationalization.md` to shipped reality (10/10/9/11/7 per-asset, layered enforcement model) | — | ✓ shipped (this PR) |
 | 37.12 | Bench L2 Juice Shop with iter-37.10 + 37.11 trimmed catalog | — | in flight |
-| 37.4 | Add 5 NEW OSS wrappers: smuggler.py, hydra, mobsfscan, ffuf, schemathesis (SAML Raider dropped — Burp extension with no usable standalone CLI; existing in-house scan_saml_xsw already covers the 8 XSW variants) | — | ✓ shipped (this PR) |
+| 37.4 | Add 5 NEW OSS wrappers: smuggler.py, hydra, mobsfscan, ffuf, schemathesis (SAML Raider dropped — Burp extension with no usable standalone CLI; existing in-house scan_saml_xsw already covers the 8 XSW variants) | #495 | ✓ shipped |
+| 37.14 | Promote iter-37.4 wrappers to MINIMAL catalog + wire recon/orient ones into anchor_prepass so they fire by default (not just under STRIX_LEGACY_CATALOG=1) | — | ✓ shipped (this PR) |
 | 37.5 | DELETE the deprecated tools after grace period (≥ 2026-06-15) | — | gated on time |
 | 37.6 | Re-bench L2 Juice Shop with minimal catalog active (superseded by 37.12) | — | superseded |
 
@@ -390,12 +391,14 @@ Strix is **an LLM orchestrator over community-maintained OSS security tools**, n
 
 | Asset | Specialist tools | Total catalog |
 |---|---|---|
-| `web_application` | scan_sqli_sqlmap, scan_xss_dalfox, scan_idor, scan_auth_flow, send_request | 10 |
-| `api` | scan_sqli_sqlmap, scan_idor, scan_auth_flow, map_graphql_inql, send_request | 10 |
-| `repository` / `local_code` | build_code_map, taint_analysis, verify_credentials_trufflehog, terminal_execute | 9 |
+| `web_application` | scan_sqli_sqlmap, scan_xss_dalfox, scan_idor, scan_auth_flow, send_request, **probe_default_creds_hydra, scan_fuzz_ffuf, scan_smuggling_smuggler** | 13 |
+| `api` | scan_sqli_sqlmap, scan_idor, scan_auth_flow, map_graphql_inql, send_request, **probe_default_creds_hydra, scan_fuzz_ffuf, scan_api_schemathesis, scan_smuggling_smuggler** | 14 |
+| `repository` / `local_code` | build_code_map, taint_analysis, verify_credentials_trufflehog, terminal_execute, **scan_mobile_mobsfscan** | 10 |
 | `container_image` | scan_image_dockle, terminal_execute | 7 |
 | `ip_address` | fingerprint_services_nmap, probe_hosts_httpx, scan_nuclei_templates, tls_audit, send_request, terminal_execute | 11 |
 | `domain` | domain_recon_pipeline, enumerate_subdomains_subfinder, scan_nuclei_templates, scan_dns_hygiene_checkdmarc, scan_typosquats_dnstwist, send_request | 11 |
+
+**Bold tools are iter-37.14 additions** (promoted from iter-37.4 legacy-only). Hydra, ffuf, schemathesis, and mobsfscan also fire in `anchor_prepass.py` as deterministic recon/orient steps so the LLM doesn't have to choose; smuggler stays catalog-only because it's an expensive deep-exploit (LLM should target it at candidates).
 
 `ip_address` and `domain` keep recon tools in catalog because their prepass coverage is thin (IP) or absent (domain).
 

@@ -49,11 +49,15 @@ def _isolated_env(monkeypatch) -> None:
 def test_local_code_anchors_lead_with_sca_then_sast() -> None:
     """For code targets, scan_sca_lockfiles MUST run first
     (highest-EPSS finding class, drives chain construction), then
-    scan_sast, then scan_iac, then secrets_scan."""
+    scan_sast, then scan_iac, then secrets_scan.
+
+    iter-37.14 appended scan_mobile_mobsfscan as a no-op-on-non-
+    mobile-repos final step (broad mobile SAST coverage)."""
     anchors = _ANCHORS_BY_TARGET_TYPE["local_code"]
     names = [t[0] for t in anchors]
     assert names == [
-        "scan_sca_lockfiles", "scan_sast", "scan_iac", "secrets_scan",
+        "scan_sca_lockfiles", "scan_sast", "scan_iac",
+        "secrets_scan", "scan_mobile_mobsfscan",
     ]
 
 
@@ -221,13 +225,15 @@ def test_local_code_prepass_invokes_all_anchors_in_order() -> None:
         ))
 
     assert called == [
-        "scan_sca_lockfiles", "scan_sast", "scan_iac", "secrets_scan",
+        "scan_sca_lockfiles", "scan_sast", "scan_iac",
+        "secrets_scan", "scan_mobile_mobsfscan",
     ]
     assert summary.tools_succeeded == [
-        "scan_sca_lockfiles", "scan_sast", "scan_iac", "secrets_scan",
+        "scan_sca_lockfiles", "scan_sast", "scan_iac",
+        "secrets_scan", "scan_mobile_mobsfscan",
     ]
     assert summary.tools_failed == []
-    assert summary.total_findings == 4  # 1 per tool
+    assert summary.total_findings == 5  # 1 per tool (iter-37.14: + mobsfscan)
 
 
 def test_per_tool_failures_are_isolated() -> None:
@@ -252,13 +258,16 @@ def test_per_tool_failures_are_isolated() -> None:
             agent_state=mock.Mock(),
         ))
 
-    # All 4 anchor tools attempted, scan_sast failed, others succeeded.
+    # iter-37.14 — anchor sequence is sca/sast/iac/secrets_scan +
+    # scan_mobile_mobsfscan. scan_sast failed; the rest succeed.
     assert summary.tools_run == [
-        "scan_sca_lockfiles", "scan_sast", "scan_iac", "secrets_scan",
+        "scan_sca_lockfiles", "scan_sast", "scan_iac",
+        "secrets_scan", "scan_mobile_mobsfscan",
     ]
     assert summary.tools_failed == ["scan_sast"]
     assert sorted(summary.tools_succeeded) == sorted([
-        "scan_sca_lockfiles", "scan_iac", "secrets_scan",
+        "scan_sca_lockfiles", "scan_iac",
+        "secrets_scan", "scan_mobile_mobsfscan",
     ])
     # The failed tool's reason carries the exception info.
     failed_result = next(
@@ -454,8 +463,10 @@ def test_findings_count_uses_findings_or_vulnerabilities_key() -> None:
             workspace_path="/workspace/repo",
             agent_state=mock.Mock(),
         ))
-    # 3 (sca) + 2 (sast) + 2 (iac) + 2 (secrets_scan) = 9
-    assert summary.total_findings == 9
+    # iter-37.14 — _ANCHORS_LOCAL_CODE now has 5 entries:
+    # 3 (sca, "vulnerabilities" key) + 2 (sast) + 2 (iac)
+    # + 2 (secrets_scan) + 2 (scan_mobile_mobsfscan) = 11
+    assert summary.total_findings == 11
 
 
 # ---------------------------------------------------------------------------

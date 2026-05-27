@@ -99,6 +99,19 @@ def _code_kwargs(target_value: str, workspace_path: str, tool_name: str) -> dict
     return {"repo_path": target_value}
 
 
+def _code_target_path_kwargs(
+    target_value: str, workspace_path: str, tool_name: str,
+) -> dict[str, Any]:
+    """iter-37.14 — kwargs for `scan_mobile_mobsfscan`. Same path
+    resolution as `_code_kwargs` but the tool uses `target_path=`
+    rather than `repo_path=` (the mobsfscan wrapper accepts BOTH
+    source trees AND `.apk`/`.aab` files, hence the more generic
+    parameter name)."""
+    if workspace_path:
+        return {"target_path": workspace_path}
+    return {"target_path": target_value}
+
+
 def _api_url_kwargs(target_value: str, workspace_path: str, tool_name: str) -> dict[str, Any]:
     """Kwargs for API/web-target anchor tools that accept a plain
     `url` parameter (scan_nuclei_templates / scan_sqli / scan_xxe /
@@ -231,6 +244,22 @@ def _api_target_url_kwargs(
     return {"target_url": target_value}
 
 
+def _api_schema_url_kwargs(
+    target_value: str, workspace_path: str, tool_name: str,
+) -> dict[str, Any]:
+    """iter-37.14 — kwargs for `scan_api_schemathesis`. The tool
+    accepts the OpenAPI / Swagger / GraphQL schema URL via
+    `schema_url=`. The harness's default is to construct it from the
+    target by appending `/openapi.json` — schemathesis returns
+    `status="partial"` if that URL doesn't resolve, so the heuristic
+    is safe (no spurious findings; just a cheap probe that confirms
+    spec discovery worked). If openapi_spec_ingest captured a
+    spec_url in an earlier prepass step, callers can pass that
+    instead by overriding kwargs at dispatch time."""
+    base = target_value.rstrip("/")
+    return {"schema_url": f"{base}/openapi.json"}
+
+
 def _tls_audit_kwargs(
     target_value: str, workspace_path: str, tool_name: str,
 ) -> dict[str, Any]:
@@ -270,6 +299,13 @@ _ANCHORS_LOCAL_CODE: list[tuple[str, Any]] = [
     ("scan_iac", _code_kwargs),
     # 4. Secrets in code (gitleaks + trufflehog under the hood).
     ("secrets_scan", _code_kwargs),
+    # 5. iter-37.14 — MobSF mobile-app SAST. Auto-detects Android +
+    #    iOS source trees + `.apk` / `.aab` archives (unpacked via
+    #    apktool). Returns partial when the repo isn't a mobile app
+    #    (no AndroidManifest.xml, no `.apk`, no `Info.plist`), so
+    #    firing it unconditionally is safe — no FPs on non-mobile
+    #    repos, broad coverage on mobile ones.
+    ("scan_mobile_mobsfscan", _code_target_path_kwargs),
 ]
 
 _ANCHORS_API: list[tuple[str, Any]] = [
@@ -324,10 +360,32 @@ _ANCHORS_API: list[tuple[str, Any]] = [
     ("seed_auth", _api_target_url_kwargs),
     # 2e. iter-28.6 — default-credentials probe (pure-python). Tries
     #     top SecLists defaults (admin/admin, root/toor, ...) against
-    #     discovered login endpoint. Pure-python — no hydra dep
-    #     required (#449's image-slim direction preserved). Returns
-    #     partial when no default credential accepted.
+    #     discovered login endpoint. Returns partial when no default
+    #     credential accepted.
+    #
+    #     iter-37.14: now flanked by `probe_default_creds_hydra` (real
+    #     hydra binary, broader corpus, retry/parallelism controls).
+    #     Both run — the pure-python pass is a cheap fast-path; hydra
+    #     catches non-HTTP services (ssh, ftp, mysql, …) and the
+    #     long-tail web-form variants. Findings flow through the
+    #     iter-35.4 sandbox→host propagation so L1.5 hooks fire either
+    #     way.
     ("probe_default_creds", _api_target_url_kwargs),
+    ("probe_default_creds_hydra", _api_target_url_kwargs),
+    # 2f. iter-37.14 — ffuf content discovery. Catches exposed admin /
+    #     debug / .env / .git / actuator / swagger / wp-* paths the
+    #     katana crawler doesn't link to. Uses SecLists common.txt
+    #     when present + a 40-entry high-signal fallback. Single-URL
+    #     contract — emits findings on interesting status codes.
+    ("scan_fuzz_ffuf", _api_target_url_kwargs),
+    # 2g. iter-37.14 — schemathesis OpenAPI property-based fuzzing.
+    #     Reads the spec ingested by openapi_spec_ingest, generates
+    #     structurally-valid Hypothesis test cases, fires them at
+    #     the API. Catches schema-conformance violations, server
+    #     errors on valid inputs, ignored_auth (un-authed 200 on
+    #     security: bearer endpoints). Returns partial when no
+    #     reachable schema.
+    ("scan_api_schemathesis", _api_schema_url_kwargs),
     # 3. Signature corpus — nuclei templates for known CVEs in any
     #    fingerprinted product. Highest known-CVE coverage.
     ("scan_nuclei_templates", _api_url_with_severity_kwargs),
