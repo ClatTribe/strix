@@ -4554,6 +4554,11 @@ _FANOUT_DEEP_SPECIALISTS_WEB: list[tuple[str, Any]] = [
     ("scan_sqli_sqlmap", _api_target_url_kwargs),
     ("scan_xss_dalfox", _api_target_url_kwargs),
     ("open_redirect_check", _api_target_url_kwargs),
+    # iter-Q6.3 — path-traversal specialist alongside the deep
+    # exploitation tools. When routing is OFF
+    # (STRIX_ANCHOR_FANOUT_ROUTING=0), every URL gets every tool —
+    # this list must stay in sync with `_FANOUT_TOOL_INTEREST`.
+    ("scan_path_traversal", _api_url_kwargs),
     ("scan_nuclei_templates", _api_url_kwargs),
 ]
 
@@ -4635,6 +4640,16 @@ _PATH_HINTS_REDIRECT: tuple[str, ...] = (
     "/redirect/", "/unvalidated-redirect/", "/open-redirect/",
     "/sso/", "/oauth/", "/logout",
 )
+# iter-Q6.3 — path-traversal / LFI path hints. WAVSEP uses
+# /lfi/ as the canonical category; real apps use /files/, /docs/,
+# /downloads/ for serving user-controlled paths.
+_PATH_HINTS_LFI: tuple[str, ...] = (
+    "/lfi/", "/local-file-inclusion/", "/file-inclusion/",
+    "/path-traversal/", "/directory-traversal/",
+    "/files/", "/file/", "/download/", "/downloads/",
+    "/doc/", "/docs/", "/view-file/", "/getfile",
+    "/readfile", "/include/",
+)
 
 
 def _routing_enabled() -> bool:
@@ -4678,6 +4693,23 @@ def _has_redirect_signal(parsed: Any, params: set[str]) -> bool:
     return any(h in path for h in _PATH_HINTS_REDIRECT)
 
 
+def _has_lfi_signal(parsed: Any, params: set[str]) -> bool:
+    """iter-Q6.3 — path-traversal / LFI predicate.
+
+    Fires when:
+      * URL has a file-path-shaped query param (`file`, `path`,
+        `template`, `include`, `download`, `view`, …) — matches the
+        `_LFI_PARAM_NAMES` set defined for Q5.34j SQLi exclusion
+      * OR path contains an LFI-hint segment (`/lfi/`,
+        `/path-traversal/`, `/files/`, `/download/`, …) — catches
+        bench fixtures + real-world file-serving routes
+    """
+    if params & _LFI_PARAM_NAMES:
+        return True
+    path = (parsed.path or "").lower()
+    return any(h in path for h in _PATH_HINTS_LFI)
+
+
 def _has_nuclei_signal(parsed: Any, params: set[str]) -> bool:
     """nuclei runs a broad template corpus (CVE / misconfig / LFI / SSRF /
     default-creds) — every URL is a potential template match. Fire always."""
@@ -4690,6 +4722,12 @@ _FANOUT_TOOL_INTEREST: list[tuple[str, Any, Any]] = [
     ("scan_sqli_sqlmap", _api_target_url_kwargs, _has_sqli_signal),
     ("scan_xss_dalfox", _api_target_url_kwargs, _has_xss_signal),
     ("open_redirect_check", _api_target_url_kwargs, _has_redirect_signal),
+    # iter-Q6.3 — path-traversal specialist. Closes the WAVSEP LFI
+    # 0%-recall gap (824 known-vulnerable cases — biggest single
+    # WAVSEP category — got nothing but nuclei pre-Q6.3, which
+    # produces 0 findings on bare-path JSPs because templates need
+    # injection markers). scan_path_traversal takes `url=`.
+    ("scan_path_traversal", _api_url_kwargs, _has_lfi_signal),
     ("scan_nuclei_templates", _api_url_kwargs, _has_nuclei_signal),
 ]
 
@@ -5291,6 +5329,9 @@ _FANOUT_TOOL_CATEGORY_HINTS: dict[str, str] = {
     "scan_sqli_sqlmap": "sqli",
     "scan_xss_dalfox": "xss",
     "open_redirect_check": "redirect",
+    # iter-Q6.3 — path-traversal specialist. Bench scorers map this
+    # back to WAVSEP's `pathtraver` category via the per-CWE table.
+    "scan_path_traversal": "path_traversal",
     "scan_nuclei_templates": "vulnerability",  # generic
     "scan_fuzz_ffuf": "info_disclosure",
     "scan_smuggling_smuggler": "http_smuggling",

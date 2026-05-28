@@ -229,7 +229,8 @@ def test_fanout_skipped_for_non_web_target(monkeypatch) -> None:
 
 def test_fanout_dispatches_each_specialist_per_url(monkeypatch) -> None:
     monkeypatch.setenv("STRIX_ANCHOR_FANOUT_ROUTING", "0")  # iter-Q5.34j ablation
-    """With 2 URLs and 4 fan-out specialists, expect 8 dispatches."""
+    """With 2 URLs and 5 fan-out specialists (post-Q6.3), expect 10
+    dispatches."""
     monkeypatch.setenv("STRIX_ANCHOR_FANOUT", "1")
     record_endpoint_discovered("http://x.test/a")
     record_endpoint_discovered("http://x.test/b")
@@ -247,12 +248,12 @@ def test_fanout_dispatches_each_specialist_per_url(monkeypatch) -> None:
             agent_state=mock.MagicMock(), timeout_s=10,
         ))
 
-    # 4 specialists × 2 URLs = 8 dispatches.
-    assert mocked.call_count == 4 * 2
+    # iter-Q6.3 — 5 specialists × 2 URLs = 10 dispatches.
+    assert mocked.call_count == 5 * 2
 
     # Per-specialist kwarg shape check.
     target_url_tools = {"scan_sqli_sqlmap", "scan_xss_dalfox", "open_redirect_check"}
-    url_tools = {"scan_nuclei_templates"}
+    url_tools = {"scan_nuclei_templates", "scan_path_traversal"}
     for call in mocked.call_args_list:
         tname = call.args[0]
         kwargs = call.kwargs
@@ -270,9 +271,9 @@ def test_fanout_dispatches_each_specialist_per_url(monkeypatch) -> None:
     fanout_results = [
         tr for tr in summary.tool_results if "[fanout " in tr.tool_name
     ]
-    assert len(fanout_results) == 8
-    # Each carried findings=1, so total_findings += 8.
-    assert summary.total_findings == 8
+    assert len(fanout_results) == 10
+    # Each carried findings=1, so total_findings += 10.
+    assert summary.total_findings == 10
     # Rollup summary appended.
     rollup = [
         tr for tr in summary.tool_results if tr.tool_name == "anchor_fanout_summary"
@@ -308,8 +309,8 @@ def test_fanout_respects_per_tool_limit(monkeypatch) -> None:
             agent_state=mock.MagicMock(), timeout_s=10,
         ))
 
-    # 4 specialists × 3 URLs = 12 dispatches.
-    assert mocked.call_count == 4 * 3
+    # iter-Q6.3 — 5 specialists × 3 URLs = 15 dispatches.
+    assert mocked.call_count == 5 * 3
 
 
 def test_fanout_with_no_urls_logs_and_skips(monkeypatch) -> None:
@@ -398,8 +399,9 @@ def test_fanout_bridges_list_findings_to_tracer(monkeypatch) -> None:
             agent_state=mock.MagicMock(), timeout_s=10,
         ))
 
-    # 4 specialists × 1 URL = 4 dispatches → 4 bridged tracer emissions.
-    assert len(emissions) == 4, f"expected 4 emissions, got {len(emissions)}"
+    # iter-Q6.3 — 5 specialists × 1 URL = 5 dispatches → 5 bridged
+    # tracer emissions.
+    assert len(emissions) == 5, f"expected 5 emissions, got {len(emissions)}"
 
     # Each tracer call must carry the expected core fields.
     for em in emissions:
@@ -408,8 +410,9 @@ def test_fanout_bridges_list_findings_to_tracer(monkeypatch) -> None:
         assert em["endpoint"] == "http://x.test/case1.jsp"
         assert "cwe" in em
         # category should fall back to per-tool hint when not in finding.
+        # iter-Q6.3 adds `path_traversal` to the allowed set.
         assert em.get("category") in (
-            "sqli", "xss", "redirect", "vulnerability",
+            "sqli", "xss", "redirect", "path_traversal", "vulnerability",
         )
 
 
@@ -659,12 +662,15 @@ def test_routing_redirect_signal_via_url_shaped_param() -> None:
     assert "open_redirect_check" not in _tool_names_for("http://x.test/products?id=1")
 
 
-def test_routing_lfi_url_only_gets_nuclei() -> None:
-    """An LFI-shaped URL (?file=...) carries no SQLi/XSS/redirect signal —
-    only nuclei (which has LFI templates) runs. Verifies we don't waste
-    sqlmap/dalfox cycles."""
+def test_routing_lfi_url_gets_path_traversal_and_nuclei() -> None:
+    """iter-Q6.3 — an LFI-shaped URL (?file=...) routes to BOTH
+    scan_path_traversal (deep deterministic LFI specialist) AND nuclei
+    (template-based corroboration). Pre-Q6.3 only nuclei fired and the
+    WAVSEP LFI sub-corpus (824 cases — biggest single category) got 0
+    recall. Verifies sqlmap/dalfox/open_redirect still don't waste
+    cycles on a non-injection-shape URL."""
     tools = _tool_names_for("http://x.test/view?file=safe.html")
-    assert tools == {"scan_nuclei_templates"}
+    assert tools == {"scan_path_traversal", "scan_nuclei_templates"}
 
 
 def test_routing_static_url_still_only_nuclei() -> None:
@@ -680,10 +686,12 @@ def test_routing_ablation_via_env(monkeypatch) -> None:
     benchmark ablation runs that want to measure the routing's effect."""
     monkeypatch.setenv("STRIX_ANCHOR_FANOUT_ROUTING", "0")
     tools = _tool_names_for("http://x.test/about")  # nothing routes to this normally
-    # All 4 specialists are returned.
+    # iter-Q6.3 — all 5 specialists are returned (the 4-tool fallback
+    # is now 5 with scan_path_traversal added).
     assert tools == {
         "scan_sqli_sqlmap", "scan_xss_dalfox",
-        "open_redirect_check", "scan_nuclei_templates",
+        "open_redirect_check", "scan_path_traversal",
+        "scan_nuclei_templates",
     }
 
 
@@ -720,9 +728,9 @@ def test_routing_savings_surfaced_in_rollup(monkeypatch) -> None:
     assert len(rollup) == 1
     raw = rollup[0].raw_result
     assert raw["routing_enabled"] is True
-    # 3 URLs × 4 tools = 12 baseline; routing trims it.
-    assert raw["baseline_dispatches"] == 12
-    assert raw["actual_dispatches"] < 12, (
+    # iter-Q6.3 — 3 URLs × 5 tools = 15 baseline; routing trims it.
+    assert raw["baseline_dispatches"] == 15
+    assert raw["actual_dispatches"] < 15, (
         f"routing should drop dispatches; got actual={raw['actual_dispatches']}"
     )
     assert 0 < raw["savings_pct"] <= 100
@@ -1038,3 +1046,89 @@ def test_no_fixture_identifiers_in_q6_2_impl():
         assert ident not in src, (
             f"_fanout_category_key references SUT identifier {ident!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# iter-Q6.3 — path-traversal predicate + fan-out wiring
+# ---------------------------------------------------------------------------
+
+from strix.agents.lead_agent.anchor_prepass import (  # noqa: E402
+    _has_lfi_signal,
+    _PATH_HINTS_LFI,
+    _LFI_PARAM_NAMES,
+)
+
+
+class TestLfiSignalPredicate:
+    """`_has_lfi_signal` — gates `scan_path_traversal` per-URL routing."""
+
+    def _parse(self, url):
+        from urllib.parse import urlparse, parse_qs
+        p = urlparse(url)
+        return p, set(parse_qs(p.query).keys())
+
+    @pytest.mark.parametrize("url", [
+        "http://x/view?file=safe.html",
+        "http://x/page?path=docs/intro.md",
+        "http://x/include?template=footer.tpl",
+        "http://x/get?doc=report.pdf",
+        "http://x/render?view=user-profile",
+    ])
+    def test_lfi_param_matches(self, url):
+        p, params = self._parse(url)
+        assert _has_lfi_signal(p, params) is True
+
+    @pytest.mark.parametrize("url", [
+        "http://x/lfi/Case01-X.jsp",
+        "http://x/path-traversal/sub/case.jsp",
+        "http://x/files/list",
+        "http://x/download/report.pdf",
+        "http://x/file/get/123",
+        "http://x/docs/api",
+    ])
+    def test_lfi_path_hint_matches(self, url):
+        p, params = self._parse(url)
+        assert _has_lfi_signal(p, params) is True
+
+    @pytest.mark.parametrize("url", [
+        "http://x/search?q=hello",
+        "http://x/login?username=foo",
+        "http://x/products?id=42",
+        "http://x/about",
+        "http://x/static/css/main.css",
+    ])
+    def test_non_lfi_urls_skipped(self, url):
+        p, params = self._parse(url)
+        assert _has_lfi_signal(p, params) is False
+
+
+def test_lfi_routing_includes_path_traversal_and_nuclei():
+    """LFI-shape URLs route to scan_path_traversal + scan_nuclei_templates.
+    Pre-Q6.3 only nuclei fired on these. The deep specialist is what
+    converts hint → finding."""
+    tools = _tool_names_for("http://x.test/files/list")
+    assert tools == {"scan_path_traversal", "scan_nuclei_templates"}
+
+
+def test_xss_url_does_not_get_path_traversal():
+    """Q6.3 must not over-fire — XSS-shape URLs shouldn't get the
+    path-traversal specialist (would waste cycles on each XSS case)."""
+    tools = _tool_names_for("http://x.test/search?q=foo")
+    assert "scan_path_traversal" not in tools
+
+
+def test_sqli_url_does_not_get_path_traversal():
+    """Same — SQLi-shape URLs don't route to path-traversal."""
+    tools = _tool_names_for("http://x.test/products?id=42")
+    assert "scan_path_traversal" not in tools
+
+
+def test_no_fixture_identifiers_in_q6_3_impl():
+    """`_has_lfi_signal` + the LFI path hints must not name a single
+    bench fixture — predicates are generic per-shape, not per-target."""
+    import inspect
+    src = inspect.getsource(_has_lfi_signal).lower()
+    hints_src = str(_PATH_HINTS_LFI).lower()
+    for ident in ("juice-shop", "vampi", "crapi", "wavsep", "getedunext"):
+        assert ident not in src, f"_has_lfi_signal references {ident!r}"
+        assert ident not in hints_src, f"_PATH_HINTS_LFI contains {ident!r}"
