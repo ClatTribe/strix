@@ -63,12 +63,14 @@ from benchmarks.per_target.wavsep_scoring import (
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "web" / "wavsep"
 _DEFAULT_TARGET_URL = os.environ.get(
     "WAVSEP_FIXTURE_URL",
-    # iter-Q5.34c — point at the entry-points landing page rather
-    # than `/wavsep/`. WAVSEP's root page intentionally lacks links
-    # (banner: "the index page of the project intentionally lacks
-    # links and forms"). Sandbox tools reach the host fixture via
-    # host.docker.internal.
-    "http://host.docker.internal:8098/wavsep/scan-entry-points.html",
+    # iter-Q7.1 — WAVSEP-native landing page produced by war
+    # extraction. Pre-Q7.1 we used /wavsep/scan-entry-points.html
+    # (a bind-mounted host file) which silently blocked Tomcat
+    # from extracting wavsep.war, so the deployed server served
+    # only the mount and 404'd every actual test case. See the
+    # docker-compose.yml Q7.1 comment block. Sandbox tools reach
+    # the host fixture via host.docker.internal.
+    "http://host.docker.internal:8098/wavsep/index-active.jsp",
 )
 _DEFAULT_EXPECTED_CSV = os.environ.get(
     "WAVSEP_EXPECTED_CSV",
@@ -109,11 +111,18 @@ def _compose_up() -> None:
         check=True,
     )
     # Host-side readiness poll. The fixture maps container 8080 → host 8098.
+    # iter-Q7.1 — poll /wavsep/index-active.jsp (WAVSEP's native landing
+    # page produced by war extraction) instead of the deleted
+    # scan-entry-points.html mount. The native landing page also
+    # confirms that war extraction completed, which the old poll didn't.
+    # Extended timeout from 120s → 180s because cold-start now waits
+    # for wavsep.war to extract AND for the MySQL init step that
+    # startup.sh runs against /wavsep/wavsep-install/install.jsp.
     import urllib.error
     import urllib.request
-    poll_url = "http://localhost:8098/wavsep/scan-entry-points.html"
-    print(f"[bench] polling {poll_url} for readiness (max 120s)")
-    deadline = time.monotonic() + 120
+    poll_url = "http://localhost:8098/wavsep/index-active.jsp"
+    print(f"[bench] polling {poll_url} for readiness (max 180s)")
+    deadline = time.monotonic() + 180
     last_err: str | None = None
     while time.monotonic() < deadline:
         try:

@@ -17,30 +17,47 @@ services:
   # Comparators on the published Shay Chen DAST comparison: Acunetix,
   # Burp Active Scan, Netsparker, IBM AppScan, HP WebInspect, ZAP.
   #
-  # Image: `zaproxy/wavsep` — maintained by the ZAP team (the same
-  # team that uses WAVSEP for their own DAST benchmarking). The
-  # "version of WAVSEP now maintained by the ZAP Team" banner appears
-  # on the root /wavsep/ page. Operator escape: override `WAVSEP_IMAGE`
-  # to swap the image.
+  # Image: `zaproxy/wavsep` — maintained by the ZAP team. The image
+  # ships a 12 MB `wavsep.war` in /opt/tomcat/webapps/ which Tomcat
+  # auto-extracts on startup to /opt/tomcat/webapps/wavsep/ (2,118
+  # JSP test cases + index-active.jsp landing page).
+  #
+  # iter-Q7.1 — DO NOT bind-mount anything inside /opt/tomcat/webapps/wavsep/.
+  # Pre-Q7.1, the fixture bind-mounted scan-entry-points.html there;
+  # the mount created /wavsep/ as a non-empty directory BEFORE Tomcat
+  # could expand wavsep.war into it, so Tomcat skipped the auto-deploy
+  # entirely. The deployed server then served only the mounted file
+  # and 404'd every actual test-case URL. The Q5.34l bench wasted 53
+  # minutes scanning that empty server and produced 98 pattern-match
+  # false positives on Tomcat's encoded URL reflection in 400/404
+  # error pages.
+  #
+  # The Q7.2 fixture smoke gate now guards against this regression —
+  # it HEADs 10 expected URLs after compose-up and refuses to run if
+  # fewer than 50% are 2xx. Bypass with STRIX_WAVSEP_SKIP_FIXTURE_SMOKE=1.
+  #
+  # Strix scans the WAVSEP-native /wavsep/index-active.jsp landing
+  # page, which links to every active test case the image deploys.
+  # The scan-entry-points.html and generate_entrypoints.py files are
+  # retained in the fixture directory as documentation of the URL set
+  # used by expected-cases.csv — they are no longer bind-mounted.
+  #
+  # Operator escape: override `WAVSEP_IMAGE` to swap the image.
   wavsep:
     image: ${WAVSEP_IMAGE:-zaproxy/wavsep:latest}
     container_name: bench-wavsep
     ports:
       - "8098:8080"  # 8098 to avoid clashing with the OWASP Benchmark fixture
-    volumes:
-      # iter-Q5.34c — bake in a flat landing page that lists every
-      # WAVSEP test case URL as an <a href>. The WAVSEP root
-      # /wavsep/ documents that it "intentionally lacks links and
-      # forms"; crawlers (katana / sqlmap-crawl / nuclei) dead-end
-      # there. This mount makes /wavsep/scan-entry-points.html serve
-      # the 1,133-link landing page so strix's crawl-then-scan loop
-      # has somewhere to start. Generated deterministically from
-      # expected-cases.csv via generate_entrypoints.py.
-      - ./scan-entry-points.html:/opt/tomcat/webapps/wavsep/scan-entry-points.html:ro
+    # iter-Q7.1 — no volumes. wavsep.war auto-extracts on Tomcat start.
+    # See the Q7.1 comment block above for the root cause this avoids.
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/wavsep/ || exit 1"]
+      # Healthcheck targets the post-extraction landing page so the
+      # check only flips green AFTER the war has expanded. Pre-Q7.1
+      # this checked /wavsep/ which was already 200 from the (broken)
+      # mount even when the war hadn't extracted.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/wavsep/index-active.jsp || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 60
-      start_period: 60s
+      start_period: 90s  # war extraction + MySQL init takes ~45-60s
     restart: unless-stopped
