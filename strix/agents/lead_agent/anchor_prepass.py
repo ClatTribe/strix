@@ -84,6 +84,98 @@ logger = logging.getLogger(__name__)
 # tool are isolated — the prepass logs and continues with the rest.
 #
 # Kwarg-builder signature: `(target_value, workspace_path, tool_name)`.
+# ---------------------------------------------------------------------------
+# iter-Q5.41 — repository file-tree skip patterns
+# ---------------------------------------------------------------------------
+# Single source of truth for what every L1-SAST tool should NOT scan on
+# code-shape targets. Vendored deps belong to SCA (trivy fs / grype), not
+# SAST; generated assets (minified JS, source maps, build/ output) have no
+# source-level vulns to find; binaries blow up wall time without finding
+# anything. Every major SAST tool we use natively supports glob-style
+# exclude paths (semgrep `--exclude`, bandit `--exclude`, trivy fs
+# `--skip-dirs`, gitleaks via config) — we centralize the patterns here
+# so a single PR adjusts behavior across all tools.
+
+_REPO_SKIP_PATTERNS_DEFAULT: tuple[str, ...] = (
+    # Vendored / installed dependencies (SCA territory, not SAST).
+    "node_modules",
+    "vendor",
+    "bower_components",
+    "third_party",
+    "site-packages",
+    "venv", ".venv", "env", ".env",
+    "Pods",                              # iOS CocoaPods
+    "Carthage",                          # iOS Carthage
+    # Version control internals.
+    ".git",
+    ".hg",
+    ".svn",
+    # Python build / cache trees.
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    "*.egg-info",
+    # JS build output / minified bundles.
+    "dist",
+    "build",
+    "out",
+    "*.min.js",
+    "*.min.css",
+    "*.map",                              # source maps
+    "bundle.js",
+    # Coverage / IDE droppings.
+    ".coverage",
+    "coverage",
+    "htmlcov",
+    ".idea",
+    ".vscode",
+    # Generated docs (rarely contains real vulns).
+    "_site",                              # Jekyll
+    ".docusaurus",
+    ".next",                              # Next.js
+    ".nuxt",                              # Nuxt.js
+    "target",                             # Maven / Rust / sbt
+    # Binaries / archives (semgrep can't analyze them anyway).
+    "*.jar",
+    "*.war",
+    "*.zip",
+    "*.tar",
+    "*.tgz",
+    "*.gz",
+    "*.exe",
+    "*.dll",
+    "*.so",
+    "*.dylib",
+    "*.pyc",
+    "*.class",
+)
+
+
+def _get_repo_skip_patterns() -> list[str]:
+    """Canonical L1-SAST skip-pattern list, with env override.
+
+    `STRIX_REPO_SKIP_PATTERNS_DISABLE=1` returns [] (ablation — every
+    file scanned, useful for benchmark comparisons). Otherwise returns
+    the constant set above, optionally extended by
+    `STRIX_REPO_SKIP_PATTERNS_EXTRA=pat1,pat2,...`.
+    """
+    raw_disable = (
+        os.environ.get("STRIX_REPO_SKIP_PATTERNS_DISABLE") or ""
+    ).strip().lower()
+    if raw_disable in ("1", "true", "yes", "on"):
+        return []
+    out = list(_REPO_SKIP_PATTERNS_DEFAULT)
+    extra = (os.environ.get("STRIX_REPO_SKIP_PATTERNS_EXTRA") or "").strip()
+    if extra:
+        for pat in extra.split(","):
+            p = pat.strip()
+            if p and p not in out:
+                out.append(p)
+    return out
+
+
 # All code-shape anchor tools (scan_sast, scan_sca_lockfiles, scan_iac,
 # secrets_scan) now execute inside the sandbox container, so they always
 # receive the in-sandbox workspace path (`/workspace/<subdir>`). The

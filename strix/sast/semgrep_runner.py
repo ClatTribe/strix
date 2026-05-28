@@ -432,6 +432,7 @@ def run_semgrep(
     configs: list[str | Path] | None = None,
     timeout: int = 600,
     extra_args: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
     runner: Callable[..., Any] | None = None,
 ) -> SemgrepResult:
     """Run Semgrep against `targets` with `configs` rule packs.
@@ -485,6 +486,16 @@ def run_semgrep(
     cmd = ["semgrep", "scan", "--json", "--metrics=off", "--quiet"]
     for c in config_list:
         cmd += ["--config", c]
+    # iter-Q5.41 — path exclusions for vendored/generated/test trees.
+    # semgrep accepts `--exclude PATTERN` repeated for files + dirs. We
+    # always pass a few canonical patterns (node_modules, vendor, .git,
+    # __pycache__, dist, build, *.min.js, *.map) because firing semgrep
+    # against them is universally wasteful: bundled JS is post-build
+    # output, vendored deps are tracked by SCA not SAST, generated assets
+    # have no source-level vulnerabilities to find. Caller can extend via
+    # the `exclude_paths` arg.
+    for pattern in (exclude_paths or []):
+        cmd += ["--exclude", pattern]
     if extra_args:
         cmd += list(extra_args)
     cmd += target_list

@@ -160,6 +160,7 @@ def scan_sast(
     since_commit: str | None = None,
     until_commit: str = "HEAD",
     extra_configs: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
     timeout: int = 600,
     max_findings: int = 200,
     sarif_output_path: str | None = None,
@@ -269,9 +270,24 @@ def scan_sast(
     if not targets:
         targets = [str(repo)]
 
+    # iter-Q5.41 — exclude vendored/generated trees from the scan. Always
+    # apply the strix canonical skip-pattern set; the caller can extend
+    # via `exclude_paths`. Single source of truth is
+    # `anchor_prepass._REPO_SKIP_PATTERNS` — imported here so both the
+    # prepass and direct callers of scan_sast (tests, CLI) get the same
+    # defaults without coupling.
+    from strix.agents.lead_agent.anchor_prepass import _get_repo_skip_patterns
+    merged_excludes = list(_get_repo_skip_patterns())
+    if exclude_paths:
+        # Caller-supplied additions take precedence — appended last so a
+        # user-defined pattern can't be silently dropped by dedup later.
+        for p in exclude_paths:
+            if p and p not in merged_excludes:
+                merged_excludes.append(p)
+
     result: SemgrepResult = run_semgrep(
         targets, configs=None if extra_configs is None else None,
-        extra_args=None, timeout=timeout,
+        extra_args=None, exclude_paths=merged_excludes, timeout=timeout,
     )
     # Append extra_configs as a second invocation? Simpler: wire
     # into `configs`. The default already includes vibe + OWASP;
@@ -281,7 +297,8 @@ def scan_sast(
         # `--config` flags, but our `run_semgrep` API takes a list).
         # We do a second invocation and merge findings.
         extra_result = run_semgrep(
-            targets, configs=extra_configs, timeout=timeout,
+            targets, configs=extra_configs,
+            exclude_paths=merged_excludes, timeout=timeout,
         )
         if extra_result.status == "ok":
             result.findings.extend(extra_result.findings)
