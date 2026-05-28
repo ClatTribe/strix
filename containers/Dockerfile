@@ -667,6 +667,12 @@ RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/
         | sh -s -- -b /usr/local/bin
 RUN curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
         | sh -s -- -b /usr/local/bin
+# iter-Q5.48 — syft (Anchore) for canonical CycloneDX/SPDX SBOM
+# generation. Trivy emits inline SBOM data but syft produces the
+# format-canonical artifact the compliance-evidence emitter folds
+# into the final SOC2/PCI document. Sibling install pattern.
+RUN curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+        | sh -s -- -b /usr/local/bin
 
 # osv-scanner — Google lockfile-against-osv.dev scanner. Wired into
 # scan_sca_lockfiles as the cache-empty fallback (#376).
