@@ -89,6 +89,7 @@ from urllib.parse import (
     parse_qsl,
     quote,
     urlencode,
+    urljoin,
     urlparse,
     urlunparse,
 )
@@ -220,6 +221,55 @@ def _discover_redirect_params(target_url: str) -> list[tuple[str, str]]:
         if name.lower() in _REDIRECT_PARAM_NAMES:
             candidates.append((name, value))
     return candidates
+
+
+# iter-Q7.4 — page form / href param-name discovery. The fan-out
+# dispatches `open_redirect_check(target_url=<bare crawled URL>)` with
+# no query string; pre-Q7.4 that fell back to a 6-name default set
+# (`next, redirect, url, return, goto, dest`), missing redirect params
+# rendered in an on-page <form> or example links (the bare-path
+# redirect-endpoint recall gap). Discovery fetches the page and pulls
+# candidate param names from <form> input fields + same-origin <a href>
+# query keys, ranking redirect-shaped names first.
+_HTML_FIELD_NAME_RE = re.compile(
+    r"<(?:input|textarea|select)\b[^>]*\bname\s*=\s*[\"']([^\"']+)[\"']",
+    re.IGNORECASE,
+)
+_HTML_HREF_RE = re.compile(
+    r"""<a\b[^>]*\bhref\s*=\s*["']([^"'#>]+)["']""", re.IGNORECASE,
+)
+
+
+def _discover_redirect_param_names(target_url: str, timeout: float) -> list[str]:
+    """Fetch the page; return candidate redirect param names from its
+    form fields + same-origin href query keys. Redirect-shaped names
+    (in `_REDIRECT_PARAM_NAMES`) are ordered first."""
+    resp = _http_get(target_url, timeout=timeout)
+    body = resp.get("body") or ""
+    if not isinstance(body, str) or not body:
+        return []
+    origin = urlparse(target_url)
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+
+    for m in _HTML_FIELD_NAME_RE.finditer(body):
+        _add(m.group(1))
+    for hm in _HTML_HREF_RE.finditer(body):
+        href = urljoin(target_url, hm.group(1))
+        hp = urlparse(href)
+        if hp.netloc and origin.netloc and hp.netloc != origin.netloc:
+            continue
+        for k, _v in parse_qsl(hp.query, keep_blank_values=True):
+            _add(k)
+
+    lex = set(_REDIRECT_PARAM_NAMES)
+    names.sort(key=lambda n: (n.lower() not in lex, n.lower()))
+    return names
 
 
 def _build_url_with_param(
@@ -635,6 +685,16 @@ def open_redirect_check(
             if n and n not in probe_param_names:
                 probe_param_names.append(n)
     if not discovered and not extra_param_names:
+        # iter-Q7.4 — bare URL: discover redirect param names from the
+        # page (form fields + href query keys) before resorting to the
+        # blind default set. Discovered names are GET-probed via the
+        # existing machinery; the 6 defaults always ride along (cheap).
+        try:
+            for n in _discover_redirect_param_names(target_url_norm, timeout)[:15]:
+                if n not in probe_param_names:
+                    probe_param_names.append(n)
+        except Exception:  # noqa: BLE001
+            logger.debug("open_redirect: param discovery failed", exc_info=True)
         for n in _DEFAULT_FALLBACK_PARAMS:
             if n not in probe_param_names:
                 probe_param_names.append(n)

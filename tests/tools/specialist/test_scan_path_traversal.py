@@ -81,11 +81,18 @@ def test_proxy_manager_unavailable_returns_error(monkeypatch) -> None:
     assert out["status"] == "error"
 
 
-def test_no_path_shaped_params_returns_partial(monkeypatch) -> None:
+def test_bare_url_no_form_runs_blind_fallback(monkeypatch) -> None:
+    """iter-Q7.4 — a bare URL with no query, no form, and a benign body
+    no longer short-circuits to `partial`. The scanner discovers nothing
+    on the page, falls back to a blind common-param GET sweep, finds no
+    traversal, and returns `ok` (discovery_mode=blind_fallback) having
+    actually fired probes."""
     _patch_proxy(monkeypatch, lambda *a, **kw: {"status_code": 200, "body": "ok"})
-    # No query string and no params arg.
     out = scan_path_traversal(url="http://example.com/api/items")
-    assert out["status"] == "partial"
+    assert out["status"] == "ok"
+    assert out["tool_metadata"]["discovery_mode"] == "blind_fallback"
+    assert out["tool_metadata"]["probes_sent"] > 0
+    assert out["tool_metadata"]["findings_emitted_to_tracer"] == 0
 
 
 # ---------------------------------------------------------------------------

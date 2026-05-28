@@ -587,8 +587,14 @@ def test_replace_query_for_default_fallback(monkeypatch) -> None:
     other query params (preserve_others=False)."""
     log = _patch_get(monkeypatch, lambda url: _resp(body="ok"))
     open_redirect_check("https://app.example.com/?csrf=abc")
-    # Every probe URL should NOT contain `csrf=abc` (replaced).
-    for u in log:
+    # Every PROBE URL should NOT contain `csrf=abc` (replaced). iter-Q7.4
+    # adds a discovery landing fetch of the original URL (which DOES
+    # carry csrf — it's just reading the page), so inspect only the
+    # payload-bearing probe URLs (those carry the `evil.example`
+    # attacker host).
+    probe_urls = [u for u in log if "evil.example" in u]
+    assert probe_urls, "expected at least one payload probe URL"
+    for u in probe_urls:
         params = parse_qs(urlparse(u).query)
         assert "csrf" not in params
 
