@@ -5063,6 +5063,41 @@ def _is_login_url(parsed_or_url: Any) -> bool:
     return any(h in path for h in _PATH_HINTS_LOGIN)
 
 
+def _fanout_category_key(url: str) -> str:
+    """iter-Q6.2 — group URLs by their parent directory so per-category
+    round-robin keeps every URL family represented in the fan-out
+    selection.
+
+    For ``http://x/site/area/topic/sub/leaf.html`` the category key
+    is ``/site/area/topic/sub`` (the leaf ``leaf.html`` is dropped
+    — within one parent directory, leaves are interchangeable
+    members of the same family, sharing the same form / endpoint
+    class / vulnerability surface).
+
+    For a flat site like ``http://x/p00`` ... ``/p19`` the category
+    is ``/`` for every URL (all share the root parent), and the
+    round-robin falls back to a single-bucket sequential walk —
+    matching the pre-Q6.2 behaviour exactly.
+
+    Pure URL parsing, lower-cased, no I/O.
+    """
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+    except Exception:  # noqa: BLE001
+        return "/"
+    segments = (parsed.path or "/").strip("/").split("/")
+    if not segments or segments == [""]:
+        return "/"
+    # Drop the leaf segment so cases in the same directory share a
+    # bucket. Single-segment paths (`/login`, `/p00`) stay in the
+    # root bucket.
+    parent_segments = segments[:-1]
+    if not parent_segments:
+        return "/"
+    return "/" + "/".join(s.lower() for s in parent_segments)
+
+
 def _fanout_dedup_key(url: str) -> str:
     """Shape-key for deduplication: same host + path-SHAPE + sorted set of
     query parameter NAMES (values dropped).
@@ -5162,7 +5197,13 @@ def _select_fanout_urls(
     except Exception:  # noqa: BLE001
         seed_host = ""
 
-    out: list[str] = []
+    # iter-Q6.2 — bucket URLs by category, then round-robin across
+    # buckets to stay within `limit`. Replaces the old `for url in
+    # sorted(candidate_urls): break-at-limit` which truncated late-
+    # alphabet categories (Q5.34l WAVSEP bench diagnostic: 0 of 138
+    # Unvalidated-Redirect URLs reached fan-out because all 200
+    # slots filled with earlier-alphabet categories).
+    buckets: dict[str, list[str]] = {}
     seen_keys: set[str] = set()
     rejected: dict[str, int] = {
         "non_http": 0, "seed": 0, "out_of_scope": 0,
@@ -5202,13 +5243,35 @@ def _select_fanout_urls(
             rejected["shape_dup"] += 1
             continue
         seen_keys.add(key)
-        out.append(url)
-        if len(out) >= limit:
-            break
+        cat = _fanout_category_key(url)
+        buckets.setdefault(cat, []).append(url)
+
+    # Round-robin across buckets in deterministic (sorted-name) order
+    # until `limit` reached or every bucket is drained.
+    out: list[str] = []
+    bucket_names = sorted(buckets)
+    if bucket_names:
+        cursor = {name: 0 for name in bucket_names}
+        active = list(bucket_names)
+        while active and len(out) < limit:
+            still_active: list[str] = []
+            for name in active:
+                if len(out) >= limit:
+                    break
+                idx = cursor[name]
+                if idx < len(buckets[name]):
+                    out.append(buckets[name][idx])
+                    cursor[name] = idx + 1
+                    if cursor[name] < len(buckets[name]):
+                        still_active.append(name)
+            active = still_active
+
     if any(rejected.values()):
         logger.info(
-            "anchor fanout filters dropped urls: %s; kept=%d",
-            {k: v for k, v in rejected.items() if v}, len(out),
+            "anchor fanout filters dropped urls: %s; kept=%d "
+            "across %d categories",
+            {k: v for k, v in rejected.items() if v},
+            len(out), len(bucket_names),
         )
     return out
 
