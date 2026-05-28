@@ -780,6 +780,23 @@ class PrepassSummary:
     total_findings: int = 0
     wall_time_s: float = 0.0
     skipped_reason: str | None = None
+    # iter-Q5.44 — sidecar for domain → child-asset pivoting.
+    # Populated by `_extract_child_assets_from_domain_prepass` after
+    # `_ANCHORS_DOMAIN` runs. Each entry shape:
+    #   {
+    #     "host": str,                  # subdomain (no scheme)
+    #     "ip": str | None,             # resolved A record
+    #     "asset_type": str,            # "web_application" | "ip_address"
+    #     "scheme": str | None,         # "http" | "https" if probed
+    #     "triage": str | None,         # "deep" | "shallow" if from pipeline
+    #     "source": str,                # which tool surfaced it
+    #   }
+    # Downstream consumers: webappsec wrapper (spawns per-child scan),
+    # the L2 lead (sees the list in its system prompt context), and
+    # any future asset-graph emitter.
+    child_assets_discovered: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -810,6 +827,9 @@ class PrepassSummary:
                 }
                 for r in self.tool_results
             ],
+            # iter-Q5.44 — child-asset sidecar. Empty list when the
+            # apex has no children OR target_type wasn't `domain`.
+            "child_assets_discovered": list(self.child_assets_discovered),
         }
 
 
@@ -4246,6 +4266,156 @@ def _gather_surface_for_dispatcher(
 
 
 # ---------------------------------------------------------------------------
+# iter-Q5.44 — domain → child-asset pivoting (subdomain promotion)
+# ---------------------------------------------------------------------------
+# After `_ANCHORS_DOMAIN` runs, the per-tool raw_result dicts carry
+# the discovered subdomains. Today nothing reads them — the L2 lead
+# sees the count via the run summary, but downstream orchestrators
+# (webappsec wrapper) can't spawn per-subdomain child scans without a
+# stable schema.
+#
+# This helper extracts the union of discovered subdomains across:
+#   * domain_recon_pipeline — raw_result["surface_map"]["subdomain_enum"]["subdomains"]
+#                              + raw_result["surface_map"]["subdomain_triage"][] (with IPs / schemes)
+#   * enumerate_subdomains_subfinder — raw_result["findings"][].subdomain
+#
+# and shapes them into PrepassSummary.child_assets_discovered with a
+# stable per-entry schema (host / ip / asset_type / scheme / triage / source).
+#
+# The classification rule: when triage data is present and the
+# subdomain has an HTTP scheme, route it as `web_application`;
+# otherwise route as `ip_address`. Operators / wrappers can override
+# the asset_type by their own policy — we provide the most-likely
+# default so the pivot is one step rather than two.
+
+
+def _normalise_host(value: str) -> str:
+    """Strip scheme + path + port off a string so it's a bare host."""
+    s = value.strip().lower()
+    if "://" in s:
+        s = s.split("://", 1)[1]
+    if "/" in s:
+        s = s.split("/", 1)[0]
+    if ":" in s and not s.startswith("["):  # leave IPv6 brackets alone
+        s = s.rsplit(":", 1)[0]
+    return s.rstrip(".")
+
+
+def _extract_child_assets_from_domain_prepass(
+    summary: Any, apex_domain: str,
+) -> list[dict[str, Any]]:
+    """Extract discovered subdomains from domain-prepass tool_results.
+
+    Reads from:
+      * `domain_recon_pipeline` — primary source. Carries triage
+        results with per-subdomain IP + scheme + live status.
+      * `enumerate_subdomains_subfinder` — secondary source for
+        subdomains the pipeline missed or didn't triage.
+
+    Dedupes by host. When the pipeline and subfinder both report a
+    host, the pipeline entry wins (carries richer triage data).
+
+    The apex itself is excluded from the child list — the prepass
+    already scanned it.
+
+    Returns a list of dicts ready to set on
+    `summary.child_assets_discovered`. Empty list is the no-op signal.
+    """
+    apex = _normalise_host(apex_domain or "")
+    seen: dict[str, dict[str, Any]] = {}
+
+    # Pass 1: domain_recon_pipeline (richer data wins).
+    for tr in getattr(summary, "tool_results", []) or []:
+        if getattr(tr, "tool_name", None) != "domain_recon_pipeline":
+            continue
+        raw = getattr(tr, "raw_result", None)
+        if not isinstance(raw, dict):
+            continue
+        surface_map = raw.get("surface_map")
+        if not isinstance(surface_map, dict):
+            continue
+
+        # Triage entries — preferred (carries IP + scheme + status).
+        triage_list = surface_map.get("subdomain_triage")
+        if isinstance(triage_list, list):
+            for entry in triage_list:
+                if not isinstance(entry, dict):
+                    continue
+                host = _normalise_host(str(entry.get("host") or ""))
+                if not host or host == apex:
+                    continue
+                # Skip entries the pipeline already classified as dead/skip.
+                triage = str(entry.get("triage") or "").strip().lower() or None
+                if triage == "skip":
+                    continue
+                scheme = entry.get("scheme")
+                if scheme not in ("http", "https"):
+                    scheme = None
+                ip = entry.get("ip") or None
+                asset_type = (
+                    "web_application" if scheme in ("http", "https") else "ip_address"
+                )
+                seen[host] = {
+                    "host": host,
+                    "ip": ip,
+                    "asset_type": asset_type,
+                    "scheme": scheme,
+                    "triage": triage,
+                    "source": "domain_recon_pipeline",
+                }
+
+        # Bare subdomain list fallback (in case triage skipped this host).
+        enum_block = surface_map.get("subdomain_enum")
+        if isinstance(enum_block, dict):
+            subs = enum_block.get("subdomains")
+            if isinstance(subs, list):
+                for raw_host in subs:
+                    if not isinstance(raw_host, str):
+                        continue
+                    host = _normalise_host(raw_host)
+                    if not host or host == apex or host in seen:
+                        continue
+                    seen[host] = {
+                        "host": host,
+                        "ip": None,
+                        # Default to ip_address until triage proves otherwise.
+                        # Wrappers can probe + reclassify on their side.
+                        "asset_type": "ip_address",
+                        "scheme": None,
+                        "triage": None,
+                        "source": "domain_recon_pipeline",
+                    }
+
+    # Pass 2: enumerate_subdomains_subfinder (only fills gaps).
+    for tr in getattr(summary, "tool_results", []) or []:
+        if getattr(tr, "tool_name", None) != "enumerate_subdomains_subfinder":
+            continue
+        raw = getattr(tr, "raw_result", None)
+        if not isinstance(raw, dict):
+            continue
+        findings = raw.get("findings")
+        if not isinstance(findings, list):
+            continue
+        for f in findings:
+            if not isinstance(f, dict):
+                continue
+            host = _normalise_host(str(f.get("subdomain") or f.get("host") or ""))
+            if not host or host == apex or host in seen:
+                continue
+            seen[host] = {
+                "host": host,
+                "ip": f.get("ip") or None,
+                "asset_type": "ip_address",
+                "scheme": None,
+                "triage": None,
+                "source": "enumerate_subdomains_subfinder",
+            }
+
+    # Stable order so downstream snapshots compare cleanly.
+    return [seen[h] for h in sorted(seen)]
+
+
+# ---------------------------------------------------------------------------
 # iter-Q5.34e — anchor-prepass fan-out across crawled URLs
 # ---------------------------------------------------------------------------
 # Phase-1 anchors fire each tool ONCE against the seed URL. For
@@ -5308,6 +5478,30 @@ async def run_oss_anchor_prepass(
             summary, agent_state=agent_state, timeout_s=timeout_s,
             target_value=target_value, target_type=target_type,
         )
+
+    # iter-Q5.44 — domain phase-2: extract discovered subdomains
+    # from the recon-pipeline + subfinder raw_results and surface
+    # them as a stable `child_assets_discovered[]` sidecar on the
+    # PrepassSummary. The downstream consumer (webappsec wrapper,
+    # the L2 lead's system prompt context, asset-graph emitter)
+    # uses the sidecar to spawn per-child scans without re-parsing
+    # tool-specific output shapes. Never raises — extraction is
+    # best-effort.
+    if target_type == "domain" and target_value:
+        try:
+            children = _extract_child_assets_from_domain_prepass(
+                summary, apex_domain=target_value,
+            )
+            summary.child_assets_discovered = children
+            logger.info(
+                "domain prepass child-asset pivot: apex=%s discovered=%d",
+                target_value, len(children),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "domain child-asset extraction raised %s: %s — continuing "
+                "with empty sidecar", type(e).__name__, e,
+            )
 
     # ip_address phase-2 — TCP port discovery + per-service probes.
     # No phase-1 anchors exist for ip_address (the existing scan_*
