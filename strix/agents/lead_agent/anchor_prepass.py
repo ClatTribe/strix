@@ -4041,6 +4041,67 @@ def _anchor_fanout_limit() -> int:
     return max(1, min(1000, n))
 
 
+# ---------------------------------------------------------------------------
+# iter-Q5.34i — fan-out filters (static / destructive / shape-dedup)
+# ---------------------------------------------------------------------------
+# Every commercial DAST (Acunetix/Netsparker/Burp/ZAP) drops a large
+# fraction of crawled URLs before per-URL probing: static assets can't
+# be vulnerable; destructive URLs kill the scan session; query-value
+# variations of the same path are the same shape. Without these
+# filters, fan-out wastes O(N) sqlmap/dalfox calls on .css/.png/duplicates
+# and risks tripping logout/delete URLs.
+#
+# We piggyback on the existing iter-29.1 `EndpointProfile` classifier
+# (same code the shape-aware dispatcher uses). To keep fan-out cheap
+# we run the classifier with `probe_if_no_response=False` — pure URL
+# pattern + extension analysis, no extra HTTP round-trips.
+
+# Shapes the fan-out specialists can't meaningfully probe.
+_FANOUT_SKIP_SHAPES: frozenset[str] = frozenset({"static"})
+
+# Endpoint classes the fan-out MUST NOT probe — destructive URLs
+# would mutate the target's state and break a clean re-scan; logout
+# would kill the scan session.
+_FANOUT_SKIP_CLASSES: frozenset[str] = frozenset({
+    "destructive", "auth-logout", "static-asset",
+})
+
+
+def _fanout_dedup_key(url: str) -> str:
+    """Shape-key for deduplication: same host + path + sorted set of
+    query parameter NAMES (values dropped). Collapses
+    `/products?id=1` and `/products?id=2` into one shape, while
+    keeping `/products?id` and `/products?name` distinct.
+
+    Trailing slashes are stripped so katana's `/x/` and `/x` collide
+    (a common crawl source of dupes)."""
+    from urllib.parse import urlparse, parse_qs
+    try:
+        parsed = urlparse(url)
+    except Exception:  # noqa: BLE001
+        return url
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "/").rstrip("/") or "/"
+    query_keys = ",".join(sorted((parse_qs(parsed.query) or {}).keys()))
+    return f"{parsed.scheme}://{host}{path}?{query_keys}"
+
+
+def _should_skip_for_fanout(url: str) -> tuple[bool, str]:
+    """Classifier-driven gate. Returns (should_skip, reason_tag)."""
+    try:
+        from strix.l15.endpoint_classifier import classify_endpoint
+        profile = classify_endpoint(url, probe_if_no_response=False)
+    except Exception:  # noqa: BLE001
+        # Classifier failure is non-fatal — let the URL through. The
+        # downstream specialist will handle malformed URLs itself.
+        return False, ""
+    if profile.shape in _FANOUT_SKIP_SHAPES:
+        return True, f"shape={profile.shape}"
+    if profile.endpoint_class in _FANOUT_SKIP_CLASSES:
+        return True, f"class={profile.endpoint_class}"
+    return False, ""
+
+
 def _select_fanout_urls(
     seed_url: str,
     limit: int,
@@ -4061,9 +4122,15 @@ def _select_fanout_urls(
        Picks up URLs from any host-side recorders (lead-driven URL
        discovery, future sandbox→host workflow_state propagation).
 
-    Filters to http(s) only, drops the seed URL (already covered by
-    phase 1's per-seed pass), dedupes, sorts for determinism, and
-    caps to `limit`.
+    Filtering pipeline (iter-Q5.34i):
+      * Filter to http(s) only
+      * Drop the seed URL (already covered by phase 1's per-seed pass)
+      * Drop URLs the EndpointProfile classifier rejects (static
+        assets, destructive endpoints, logout) — matches what every
+        commercial DAST does pre-probing
+      * Shape-dedup by (host, path, sorted query-param NAMES) so
+        `/x?id=1` and `/x?id=2` collapse to one
+      * Sort for determinism + cap to `limit`
     """
     candidate_urls: set[str] = set()
 
@@ -4092,14 +4159,43 @@ def _select_fanout_urls(
 
     seed_norm = (seed_url or "").rstrip("/")
     out: list[str] = []
+    seen_keys: set[str] = set()
+    rejected: dict[str, int] = {
+        "non_http": 0, "seed": 0,
+        "static": 0, "destructive": 0, "shape_dup": 0,
+    }
     for url in sorted(candidate_urls):
         if not url.lower().startswith(("http://", "https://")):
+            rejected["non_http"] += 1
             continue
         if url.rstrip("/") == seed_norm:
+            rejected["seed"] += 1
             continue
+        # iter-Q5.34i — classifier filter (skip static / destructive /
+        # logout). Mirrors what every commercial DAST does before its
+        # per-URL probe loop.
+        skip, reason = _should_skip_for_fanout(url)
+        if skip:
+            if reason.startswith("shape="):
+                rejected["static"] += 1
+            else:
+                rejected["destructive"] += 1
+            continue
+        # iter-Q5.34i — shape-dedup so query-value variations of the
+        # same path don't each soak up a full sqlmap/dalfox run.
+        key = _fanout_dedup_key(url)
+        if key in seen_keys:
+            rejected["shape_dup"] += 1
+            continue
+        seen_keys.add(key)
         out.append(url)
         if len(out) >= limit:
             break
+    if any(rejected.values()):
+        logger.info(
+            "anchor fanout filters dropped urls: %s; kept=%d",
+            {k: v for k, v in rejected.items() if v}, len(out),
+        )
     return out
 
 
