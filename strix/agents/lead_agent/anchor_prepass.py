@@ -66,6 +66,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re as _re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -3691,6 +3692,18 @@ async def _run_dependent_api_tools(
     if not isinstance(endpoints, list) or not endpoints:
         endpoints_for_auth: list[Any] = []
     else:
+        # iter-Q5.40 — drop health / metrics / spec endpoints. These have no
+        # vulnerability surface for the OWASP API specialists; firing
+        # mass_assignment at /health is a guaranteed waste. Default-on;
+        # disable via STRIX_API_ENDPOINT_ROUTING=0 for ablation.
+        if _api_routing_enabled():
+            endpoints, _ep_rejected = _filter_api_endpoints(endpoints)
+            if any(_ep_rejected.values()):
+                logger.info(
+                    "api endpoint pre-filter dropped: %s; kept=%d",
+                    {k: v for k, v in _ep_rejected.items() if v},
+                    len(endpoints),
+                )
         endpoints_for_auth = endpoints
 
     # iter-17/18: scan_api_bola / scan_api_bfla / scan_api_mass_
@@ -3787,19 +3800,38 @@ async def _run_dependent_api_tools(
         # to actually probe; we accept the state-mutation risk
         # because the captured user is a throwaway strix-bench
         # account.
+        # iter-Q5.40 — per-tool endpoint subset. With routing ON each tool
+        # only sees endpoints whose method/shape matches its vuln class:
+        #   * mass_assignment ← POST/PUT/PATCH (DELETE has no body to mass-assign)
+        #   * bola/idor       ← GET on resource-id paths (`/users/:id`)
+        #   * bfla            ← state-changing methods (POST/PUT/PATCH/DELETE)
+        # STRIX_API_ENDPOINT_ROUTING=0 restores the pre-iter-Q5.40 contract
+        # (every tool gets every endpoint).
+        _eps_mass = _endpoints_for_api_tool(endpoints, "scan_api_mass_assignment")
+        _eps_bola = _endpoints_for_api_tool(endpoints, "scan_api_bola")
+        _eps_bfla = _endpoints_for_api_tool(endpoints, "scan_api_bfla")
+        _eps_idor = _endpoints_for_api_tool(endpoints, "scan_idor")
+        if _api_routing_enabled():
+            logger.info(
+                "api per-tool routing: mass_assignment=%d bola=%d bfla=%d "
+                "idor=%d (from %d total endpoints)",
+                len(_eps_mass), len(_eps_bola), len(_eps_bfla), len(_eps_idor),
+                len(endpoints or []),
+            )
+
         for api_tool, extra_kwargs in (
             ("scan_api_mass_assignment", {
-                "endpoints": endpoints or [],
+                "endpoints": _eps_mass,
                 "auth_label": "user-a",
                 "confirm_mutation": True,
             }),
             ("scan_api_bola", {
-                "endpoints": endpoints or [],
+                "endpoints": _eps_bola,
                 "owner_label": "user-a",
                 "accessor_label": "user-b",
             }),
             ("scan_api_bfla", {
-                "endpoints": endpoints or [],
+                "endpoints": _eps_bfla,
                 "admin_label": "admin",
             }),
             # iter-18: scan_idor is a cross-session IDOR probe that
@@ -3808,9 +3840,11 @@ async def _run_dependent_api_tools(
             # labels carry distinct tokens → real cross-session probe.
             # Takes a list of urls — use the openapi-emitted endpoint
             # URLs. Caps at max_urls=50 internally.
+            # iter-Q5.40: pre-routed to GET-with-:id endpoints, so the
+            # url list is the matching subset (not every endpoint).
             ("scan_idor", {
                 "urls": [
-                    ep.get("url") for ep in (endpoints or [])
+                    ep.get("url") for ep in _eps_idor
                     if isinstance(ep, dict) and ep.get("url")
                 ],
                 "owner_label": "user-a",
@@ -4195,6 +4229,169 @@ def _select_tools_for_url(url: str) -> list[tuple[str, Any]]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# iter-Q5.40 — API per-endpoint routing
+# ---------------------------------------------------------------------------
+# Same shape as Q5.34j (per-URL routing for web_application) but applied to
+# the API phase-2 dispatch. Without this, openapi_spec_ingest's endpoint
+# list (often 100+ entries on real specs) is passed wholesale to every
+# OWASP API specialist — BOLA fires on POST /users (no resource ID to
+# probe), BFLA fires on GET /health (read-only), mass_assignment fires on
+# DELETE /sessions (nothing to mass-assign). The waste is real on
+# documented APIs + the noise dominates downstream triage.
+#
+# Routing rules:
+#   * scan_api_bola / scan_idor    → GET methods AND path has `:id` segment
+#                                    (path-param-driven object access)
+#   * scan_api_bfla                → state-changing methods (POST/PUT/PATCH/DELETE)
+#   * scan_api_mass_assignment     → POST/PUT/PATCH only (DELETE has no body to
+#                                    mass-assign)
+#
+# Pre-filter drops endpoints that aren't worth probing at all:
+#   * health / metrics / probes    → /health, /metrics, /ping, /version, ...
+#   * spec endpoints               → /swagger, /openapi.json, /api-docs
+#   * (GraphQL kept by default — gets routed to inql / graphql probes
+#      elsewhere; not the REST-style specialist target)
+
+
+_API_HEALTH_PATH_HINTS: tuple[str, ...] = (
+    "/health", "/healthz", "/healthcheck", "/health-check",
+    "/status", "/statusz",
+    "/metrics", "/prometheus", "/stats",
+    "/ping", "/pong",
+    "/ready", "/readiness", "/readyz",
+    "/live", "/liveness", "/livez",
+    "/version", "/build-info", "/info",
+    "/favicon.ico", "/robots.txt", "/sitemap.xml",
+)
+_API_SPEC_PATH_HINTS: tuple[str, ...] = (
+    "/swagger", "/openapi", "/api-docs", "/api/docs",
+    "/redoc", "/rapidoc", "/v3/api-docs",
+)
+_API_GRAPHQL_PATH_HINTS: tuple[str, ...] = (
+    "/graphql", "/graphiql", "/playground", "/altair",
+)
+_API_STATE_CHANGING_METHODS: frozenset[str] = frozenset({
+    "POST", "PUT", "PATCH", "DELETE",
+})
+_API_MASS_ASSIGN_METHODS: frozenset[str] = frozenset({
+    "POST", "PUT", "PATCH",
+})
+# Matches `{id}`, `{userId}`, `/:id`, `/:user_id` — the canonical path-param
+# styles emitted by openapi_spec_ingest (OpenAPI / Express / Rails).
+_API_PATH_ID_RE = _re.compile(r"\{[^/{}]+\}|/:[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _api_routing_enabled() -> bool:
+    """iter-Q5.40 — opt-out via STRIX_API_ENDPOINT_ROUTING=0 (ablation).
+    Default ON; the routing is structural to the API phase-2 dispatch and
+    matches what every API security tool does at the route-table level."""
+    raw = (os.environ.get("STRIX_API_ENDPOINT_ROUTING") or "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
+def _api_endpoint_path(ep: Any) -> str:
+    """Extract just the URL path from an endpoint dict (openapi_spec_ingest
+    sometimes emits absolute URLs, sometimes just paths)."""
+    if not isinstance(ep, dict):
+        return ""
+    raw = str(ep.get("path") or ep.get("url") or "")
+    if raw.startswith(("http://", "https://")):
+        from urllib.parse import urlparse
+        try:
+            return urlparse(raw).path or ""
+        except Exception:  # noqa: BLE001
+            return raw
+    return raw
+
+
+def _api_endpoint_method(ep: Any) -> str:
+    if not isinstance(ep, dict):
+        return "GET"
+    return str(ep.get("method") or "GET").upper()
+
+
+def _is_api_health_endpoint(ep: Any) -> bool:
+    path = _api_endpoint_path(ep).lower().rstrip("/")
+    return any(
+        path == h or path.startswith(h + "/") or path.endswith(h)
+        for h in _API_HEALTH_PATH_HINTS
+    )
+
+
+def _is_api_spec_endpoint(ep: Any) -> bool:
+    path = _api_endpoint_path(ep).lower()
+    return any(h in path for h in _API_SPEC_PATH_HINTS)
+
+
+def _is_api_graphql_endpoint(ep: Any) -> bool:
+    path = _api_endpoint_path(ep).lower()
+    return any(h in path for h in _API_GRAPHQL_PATH_HINTS)
+
+
+def _has_api_path_id(ep: Any) -> bool:
+    """True when path contains an `:id`-style or `{id}`-style segment —
+    i.e. the endpoint operates on a specific resource (BOLA candidate)."""
+    return bool(_API_PATH_ID_RE.search(_api_endpoint_path(ep)))
+
+
+def _filter_api_endpoints(
+    endpoints: list[Any],
+    *,
+    drop_health: bool = True,
+    drop_spec: bool = True,
+    drop_graphql: bool = False,
+) -> tuple[list[Any], dict[str, int]]:
+    """Drop endpoints that aren't worth deep-probing. Returns
+    (filtered_endpoints, rejected_counts)."""
+    out: list[Any] = []
+    rejected: dict[str, int] = {"health": 0, "spec": 0, "graphql": 0}
+    for ep in endpoints or []:
+        if drop_health and _is_api_health_endpoint(ep):
+            rejected["health"] += 1
+            continue
+        if drop_spec and _is_api_spec_endpoint(ep):
+            rejected["spec"] += 1
+            continue
+        if drop_graphql and _is_api_graphql_endpoint(ep):
+            rejected["graphql"] += 1
+            continue
+        out.append(ep)
+    return out, rejected
+
+
+def _endpoints_for_api_tool(
+    endpoints: list[Any], tool_name: str,
+) -> list[Any]:
+    """Per-tool endpoint subset. Returns only endpoints whose shape matches
+    the tool's vulnerability class.
+
+    When STRIX_API_ENDPOINT_ROUTING=0 (ablation), returns the full input —
+    every tool gets every endpoint, the pre-iter-Q5.40 contract."""
+    if not _api_routing_enabled():
+        return list(endpoints or [])
+    out: list[Any] = []
+    for ep in endpoints or []:
+        method = _api_endpoint_method(ep)
+        has_id = _has_api_path_id(ep)
+        if tool_name in ("scan_api_bola", "scan_idor"):
+            if method == "GET" and has_id:
+                out.append(ep)
+        elif tool_name == "scan_api_bfla":
+            if method in _API_STATE_CHANGING_METHODS:
+                out.append(ep)
+        elif tool_name == "scan_api_mass_assignment":
+            if method in _API_MASS_ASSIGN_METHODS:
+                out.append(ep)
+        else:
+            # No specific filter known — fall through (broad signature
+            # probes like sqli / ssrf go everywhere).
+            out.append(ep)
+    return out
+
+
 def _anchor_fanout_enabled() -> bool:
     """iter-Q5.34e — opt-in switch for the per-URL fan-out phase.
     Default off; flip with `STRIX_ANCHOR_FANOUT=1`."""
@@ -4254,9 +4451,6 @@ _FANOUT_SKIP_CLASSES: frozenset[str] = frozenset({
 #   * Auth:   `/login` matched the SQLi path hint → routing fired sqlmap,
 #             triggering lockout / CAPTCHA. Login auth-bypass belongs to
 #             scan_auth_flow + probe_default_creds, not fan-out's sqlmap.
-
-
-import re as _re
 
 
 _UUID_RE = _re.compile(
