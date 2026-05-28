@@ -678,6 +678,17 @@ _ANCHORS_CONTAINER: list[tuple[str, Any]] = [
     # fixture. Moved to `_ANCHORS_API` where it belongs (extracts
     # CycloneDX SBOM from black-box HTTP recon).
     ("scan_container_image", _container_kwargs),
+    # iter-Q5.47 — Anchore grype. Different vuln DB than trivy
+    # (catches CVEs trivy misses + vice-versa). The L1.5
+    # corroborator hook promotes CVEs both engines flag to
+    # high-confidence. Kill switch: STRIX_GRYPE_DISABLED=1.
+    ("scan_image_grype", _container_kwargs),
+    # iter-Q5.48 — Anchore syft. Format-canonical SBOM (CycloneDX
+    # by default) that compliance-evidence emission folds into the
+    # final SOC2/PCI artifact and the KG dependency-node emitter
+    # consumes for cross-asset chaining. Kill switch:
+    # STRIX_SYFT_DISABLED=1.
+    ("extract_sbom_syft", _container_kwargs),
 ]
 
 

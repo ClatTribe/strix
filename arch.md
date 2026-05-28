@@ -106,8 +106,8 @@ against.
 |---|---|---|
 | **L1 OSS tools** | CVE detection | **trivy image** (gold standard) |
 | | Misconfig | **dockle** |
-| | SBOM | trivy CycloneDX output (planned: **syft** Q5.48) |
-| | Corroboration | (planned: **grype** Q5.47 — different CVE DB than trivy) |
+| | SBOM | trivy CycloneDX inline + **syft** (Q5.48 — canonical CycloneDX/SPDX, feeds compliance evidence + KG Dependency nodes) |
+| | Corroboration | **grype** (Q5.47 — different vuln DB than trivy; L1.5 corroborator promotes findings both engines flag) |
 | **L1 filtration (Q5.42)** | Base-layer skip (opt-in) | `--pkg-types library` (or env `STRIX_TRIVY_PKG_TYPES`) skips OS packages, surfacing only app-layer CVEs the operator can fix |
 | | Unfixed-CVE drop (opt-in) | `--ignore-unfixed` (or env `STRIX_TRIVY_IGNORE_UNFIXED=1`) drops CVEs without an upstream patch |
 | | Multi-arch pin (opt-in) | `--platform linux/amd64` (or env `STRIX_TRIVY_PLATFORM`) pins arch on a multi-arch manifest so the same CVE isn't double-reported |
