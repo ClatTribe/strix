@@ -201,6 +201,18 @@ def _run_strix(
     """
     run_dir.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "STRIX_RUN_DIR": str(run_dir)}
+    # iter-Q5.30 — skip the sandbox's cold-cache lazy-init (nuclei
+    # templates fetch ~30s, trivy DB ~10-30s, grype DB ~10s,
+    # trivy-java DB ~30s) which can push container-boot past strix's
+    # 142s `_wait_for_tool_server` timeout and produce
+    # `SandboxInitializationError: Tool server failed to start`.
+    # The bench's SAST anchors (semgrep / bandit / trivy fs /
+    # gitleaks / trufflehog / checkov / hadolint / mobsfscan) DON'T
+    # depend on those DBs — they hit per-tool registry packs, not the
+    # nuclei / trivy-image / grype corpora. For DAST runs, callers
+    # can override via env. Honors any value already in os.environ
+    # so power users can flip it back on.
+    env.setdefault("STRIX_SKIP_CACHE_INIT", "1")
     # Strix expects target form `<asset_type>:<value>` (the iter-19
     # `4c23c19` runner change). value is a URL for web/api targets, a
     # filesystem path for local_code/repository.
