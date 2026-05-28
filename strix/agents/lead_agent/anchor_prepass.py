@@ -274,8 +274,26 @@ def _api_url_with_severity_kwargs(
 
 
 def _container_kwargs(target_value: str, workspace_path: str, tool_name: str) -> dict[str, Any]:
-    """Kwargs for container_image scan."""
-    return {"image_ref": target_value}
+    """Kwargs for container_image scan.
+
+    iter-Q5.42 — forward the base-layer-skip / multi-arch knobs from
+    env to the underlying `scan_container_image` invocation so
+    operators can opt into the filters at prepass time without
+    threading kwargs through the harness. The tool also reads the
+    same env vars itself, but forwarding them here makes the
+    decision explicit in prepass logs (`tools_run` carries the
+    kwargs).
+    """
+    kwargs: dict[str, Any] = {"image_ref": target_value}
+    pkg_types_env = os.environ.get("STRIX_TRIVY_PKG_TYPES", "").strip()
+    if pkg_types_env:
+        kwargs["pkg_types"] = pkg_types_env
+    if os.environ.get("STRIX_TRIVY_IGNORE_UNFIXED", "").strip() in {"1", "true", "yes"}:
+        kwargs["ignore_unfixed"] = True
+    platform_env = os.environ.get("STRIX_TRIVY_PLATFORM", "").strip()
+    if platform_env:
+        kwargs["platform"] = platform_env
+    return kwargs
 
 
 # ---------------------------------------------------------------------------

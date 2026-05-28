@@ -108,12 +108,13 @@ against.
 | | Misconfig | **dockle** |
 | | SBOM | trivy CycloneDX output (planned: **syft** Q5.48) |
 | | Corroboration | (planned: **grype** Q5.47 — different CVE DB than trivy) |
-| **L1 filtration (Q5.42 — pending)** | Base-layer skip | `--ignore-base` so customer-added vulns surface separately from alpine/debian baseline noise |
-| | Multi-arch fan-out | Per-platform scan for multi-arch manifests |
+| **L1 filtration (Q5.42)** | Base-layer skip (opt-in) | `--pkg-types library` (or env `STRIX_TRIVY_PKG_TYPES`) skips OS packages, surfacing only app-layer CVEs the operator can fix |
+| | Unfixed-CVE drop (opt-in) | `--ignore-unfixed` (or env `STRIX_TRIVY_IGNORE_UNFIXED=1`) drops CVEs without an upstream patch |
+| | Multi-arch pin (opt-in) | `--platform linux/amd64` (or env `STRIX_TRIVY_PLATFORM`) pins arch on a multi-arch manifest so the same CVE isn't double-reported |
 | **L2 catalog** | Specialists | `scan_image_dockle`, `terminal_execute` |
 | **Bench** | Headline | `bench_l1_only.py --fixture container/nginx-vuln` (needs flesh-out per Q5.61) |
 | | Comparator | No neutral leaderboard; Trivy / Snyk Container / Anchore — self-published only |
-| **Status** | | At-parity for CVE detection. Needs Q5.42 base-skip + Q5.47 grype corroboration + Q5.55 Anchore policy |
+| **Status** | | At-parity for CVE detection. Q5.42 base-skip ✓ shipped. Still wants Q5.47 grype corroboration + Q5.55 Anchore policy |
 
 ---
 
@@ -334,7 +335,7 @@ The asset types differ in *what gets filtered*:
 | web_application | URLs | Q5.34i/j/k |
 | api | endpoints (method + path-shape) | Q5.40 |
 | repository | files (extension + tree position) | Q5.41 (pending) |
-| container_image | image layers | Q5.42 (pending) |
+| container_image | image layers | Q5.42 (shipped — opt-in pkg-types/unfixed/platform) |
 | ip_address | open ports | Q5.43 |
 | domain | subdomains | Q5.44 (pending) |
 
