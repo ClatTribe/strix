@@ -164,8 +164,83 @@ def _trivy_scanners() -> str:
     return raw if raw else _DEFAULT_TRIVY_SCANNERS
 
 
+# ---------------------------------------------------------------------------
+# iter-Q5.42 — base-layer skip + multi-arch knobs
+# ---------------------------------------------------------------------------
+#
+# Container scans on a popular base image (`debian:bookworm`,
+# `node:20`, `python:3.12`, …) blow up the finding count with OS
+# package CVEs the application owner cannot fix — they're owned by
+# the base image maintainer. Three Trivy flags address this:
+#
+# * `--pkg-types library`  — emit ONLY language-ecosystem packages
+#   (npm / pypi / go / cargo / maven / gem / composer). Skips
+#   apt/dpkg/rpm/apk/etc. — i.e. skips the base layer entirely.
+#   Trade-off: misses base-layer CVEs the owner SHOULD bump (e.g.
+#   openssl in a self-maintained base).
+# * `--ignore-unfixed`     — drop CVEs that have no upstream fix.
+#   Trade-off: hides genuinely-pending CVEs an operator might want
+#   to monitor.
+# * `--platform linux/amd64` — pin the arch on a multi-arch
+#   manifest, so the same CVE isn't double-reported per arch.
+#
+# All three are OFF by default (CLAUDE.md: "we don't want to reduce
+# finding vulnerability"). Operators opt in via kwargs or env vars.
+
+_VALID_PKG_TYPES = {"os", "library", "os,library", "library,os"}
+
+
+def _normalise_pkg_types(raw: str | None) -> str | None:
+    """Return a Trivy-acceptable `--pkg-types` value or None.
+
+    Accepts: "os", "library", "os,library" (case- and space-insensitive).
+    Anything else returns None (caller skips the flag).
+    """
+    if not raw:
+        return None
+    cleaned = ",".join(p.strip().lower() for p in raw.split(",") if p.strip())
+    if cleaned in _VALID_PKG_TYPES:
+        return cleaned
+    return None
+
+
+def _resolve_pkg_types(arg: str | None) -> str | None:
+    """Resolution order: explicit kwarg > env > None (omit flag)."""
+    if arg is not None:
+        return _normalise_pkg_types(arg)
+    env = os.environ.get("STRIX_TRIVY_PKG_TYPES", "").strip()
+    return _normalise_pkg_types(env) if env else None
+
+
+def _resolve_ignore_unfixed(arg: bool | None) -> bool:
+    """Resolution order: explicit kwarg > env > False."""
+    if arg is not None:
+        return bool(arg)
+    return os.environ.get("STRIX_TRIVY_IGNORE_UNFIXED", "").strip() in {
+        "1", "true", "yes",
+    }
+
+
+def _resolve_platform(arg: str | None) -> str | None:
+    """Resolution order: explicit kwarg > env > None (omit flag).
+
+    Trivy expects `<os>/<arch>` e.g. `linux/amd64`, `linux/arm64`.
+    We don't validate the value here — Trivy will error out on
+    garbage and the error surfaces normally.
+    """
+    if arg:
+        return arg.strip() or None
+    env = os.environ.get("STRIX_TRIVY_PLATFORM", "").strip()
+    return env or None
+
+
 def _run_trivy_scan(
-    image_ref: str, *, timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
+    image_ref: str,
+    *,
+    timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
+    pkg_types: str | None = None,
+    ignore_unfixed: bool = False,
+    platform: str | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Run `trivy image --format json <ref>` with the configured
     scanners. Returns `(report, error)`.
@@ -213,8 +288,15 @@ def _run_trivy_scan(
         "--exit-code", "0",
         "--scanners", _trivy_scanners(),
         "--severity", "LOW,MEDIUM,HIGH,CRITICAL",
-        image_ref,
     ]
+    # iter-Q5.42 — base-layer skip + multi-arch knobs (all opt-in)
+    if pkg_types:
+        cmd += ["--pkg-types", pkg_types]
+    if ignore_unfixed:
+        cmd.append("--ignore-unfixed")
+    if platform:
+        cmd += ["--platform", platform]
+    cmd.append(image_ref)
     try:
         result = subprocess.run(  # noqa: S603
             cmd,
@@ -1431,6 +1513,9 @@ def scan_container_image(
     image_ref: str,
     timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS,
     max_findings: int = 500,
+    pkg_types: str | None = None,
+    ignore_unfixed: bool | None = None,
+    platform: str | None = None,
 ) -> SpecialistResult:
     """Scan a container image for vulnerable packages via Trivy and
     auto-emit findings.
@@ -1445,6 +1530,22 @@ def scan_container_image(
         max_findings: cap on findings emitted. Trivy can return
             thousands on broken base images; bound to keep the
             tracer payload sane. Default 500.
+        pkg_types: optional Trivy `--pkg-types` value. Accepts
+            "os", "library", or "os,library" (case-insensitive).
+            When set to "library", Trivy emits only language-pkg
+            (npm / pypi / go / cargo / maven / gem / composer)
+            findings and skips OS packages (apt / dpkg / rpm / apk)
+            — the "base-layer skip" knob from iter-Q5.42. Off by
+            default (no flag emitted, Trivy reports everything).
+            Env override: `STRIX_TRIVY_PKG_TYPES`.
+        ignore_unfixed: when True, passes `--ignore-unfixed` to
+            Trivy so CVEs without an upstream fix are dropped. Off
+            by default. Env override: `STRIX_TRIVY_IGNORE_UNFIXED=1`.
+        platform: optional Trivy `--platform` value (e.g.
+            `linux/amd64`, `linux/arm64`). Required when the image
+            is a multi-arch manifest and you want a specific arch
+            scanned. Off by default — Trivy picks the host arch.
+            Env override: `STRIX_TRIVY_PLATFORM`.
 
     Auto-emits one `add_vulnerability_report` per CVE-bearing
     package the image contains, plus one KG `Dependency` node per
@@ -1480,7 +1581,16 @@ def scan_container_image(
             },
         )
 
-    report, err = _run_trivy_scan(image_ref, timeout_seconds=timeout_seconds)
+    resolved_pkg_types = _resolve_pkg_types(pkg_types)
+    resolved_ignore_unfixed = _resolve_ignore_unfixed(ignore_unfixed)
+    resolved_platform = _resolve_platform(platform)
+    report, err = _run_trivy_scan(
+        image_ref,
+        timeout_seconds=timeout_seconds,
+        pkg_types=resolved_pkg_types,
+        ignore_unfixed=resolved_ignore_unfixed,
+        platform=resolved_platform,
+    )
     if report is None:
         return SpecialistResult(
             status="error",
