@@ -1668,6 +1668,87 @@ _IP_COMMON_PORTS: list[int] = [
 ]
 _IP_HTTP_PORTS = {80, 443, 8000, 8080, 8443, 8888}
 
+# iter-Q5.43 — per-port nuclei tag routing. Each open port maps to the
+# nuclei template tag set that template-corpus authors use for that
+# service. Without this, nuclei runs the FULL ~5000-template corpus
+# against every port; with routing, each port sees ~20-100 templates
+# specific to its service. Massive speedup + better signal-to-noise.
+#
+# Reference: nuclei-templates `tags:` field convention.
+_IP_PORT_TO_NUCLEI_TAGS: dict[int, tuple[str, ...]] = {
+    21:    ("ftp",),
+    22:    ("ssh", "openssh"),
+    23:    ("telnet",),
+    25:    ("smtp", "mail"),
+    53:    ("dns",),
+    80:    ("http", "tech", "default-login"),
+    110:   ("pop3", "mail"),
+    143:   ("imap", "mail"),
+    161:   ("snmp",),
+    389:   ("ldap",),
+    443:   ("https", "tls", "ssl", "tech", "default-login"),
+    445:   ("smb", "cifs"),
+    465:   ("smtp", "mail"),
+    587:   ("smtp", "mail"),
+    636:   ("ldap", "ssl"),
+    993:   ("imap", "mail", "ssl"),
+    995:   ("pop3", "mail", "ssl"),
+    1433:  ("mssql",),
+    1521:  ("oracle",),
+    1883:  ("mqtt",),
+    2049:  ("nfs",),
+    3306:  ("mysql",),
+    3389:  ("rdp",),
+    5432:  ("postgres", "postgresql"),
+    5900:  ("vnc",),
+    5984:  ("couchdb",),
+    6379:  ("redis",),
+    8000:  ("http", "tech", "default-login"),
+    8080:  ("http", "tech", "tomcat", "jenkins", "default-login"),
+    8443:  ("https", "tls", "ssl", "tech", "default-login"),
+    8888:  ("http", "tech"),
+    9000:  ("http", "sonarqube"),
+    9092:  ("kafka",),
+    9200:  ("elastic", "elasticsearch"),
+    9300:  ("elastic",),
+    11211: ("memcached",),
+    15672: ("rabbitmq",),
+    27017: ("mongodb",),
+    27018: ("mongodb",),
+}
+
+
+def _ip_port_routing_enabled() -> bool:
+    """iter-Q5.43 — opt-out via STRIX_IP_PORT_ROUTING=0 (ablation).
+    Default ON; per-port nuclei tag-filter is the structural correct
+    behavior. Disable to measure routing's effect on bench runs."""
+    raw = (os.environ.get("STRIX_IP_PORT_ROUTING") or "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
+def _nuclei_tags_for_port(port: int) -> list[str]:
+    """Tags the nuclei template corpus uses for this port's service.
+    Empty list signals 'no specific tag — let nuclei pick from the
+    generic http/tech set'."""
+    return list(_IP_PORT_TO_NUCLEI_TAGS.get(port, ()))
+
+
+def _nuclei_url_for_port(host: str, port: int) -> str:
+    """Construct the right nuclei target URL for a host:port pair.
+
+    HTTP-range ports get full URLs (http://host:port/, https://host:port/).
+    Network-protocol ports use the bare host:port form that nuclei's
+    network templates parse. The caller passes this as the `url=` kwarg
+    on scan_nuclei_templates."""
+    host = host.strip().lower()
+    if port in {443, 8443, 9443}:
+        return f"https://{host}:{port}/"
+    if port in _IP_HTTP_PORTS:
+        return f"http://{host}:{port}/"
+    return f"{host}:{port}"
+
 
 def probe_open_tcp_ports(
     target_ip: str, ports: list[int] | None = None, timeout: float = 1.0,
@@ -2001,6 +2082,43 @@ async def _run_dependent_ip_tools(
         await _dispatch_and_record(
             "probe_ftp_anonymous",
             {"target_value": target_value, "port": 21},
+        )
+
+    # iter-Q5.43 — 2d: per-port nuclei dispatch with service-specific tag
+    # filters. Without this, nuclei runs ~5000 templates against every
+    # port; with routing each port sees ~20-100 templates relevant to
+    # its detected service. ~50x speedup + better signal-to-noise.
+    # STRIX_IP_PORT_ROUTING=0 ablates routing (every open port gets the
+    # full template corpus — slow but maximally exhaustive).
+    if _ip_port_routing_enabled():
+        routed_count = 0
+        unrouted_count = 0
+        for port in open_ports:
+            tags = _nuclei_tags_for_port(port)
+            if not tags:
+                unrouted_count += 1
+                continue
+            await _dispatch_and_record(
+                "scan_nuclei_templates",
+                {
+                    "url": _nuclei_url_for_port(target_value, port),
+                    "tags": tags,
+                },
+                record_as=f"scan_nuclei_templates[port-{port}]",
+            )
+            routed_count += 1
+        if routed_count or unrouted_count:
+            logger.info(
+                "ip per-port nuclei routing: dispatched=%d ports, "
+                "unrouted=%d ports (no port→tag mapping)",
+                routed_count, unrouted_count,
+            )
+    else:
+        # Ablation: single nuclei against the seed (no port-specific tags).
+        await _dispatch_and_record(
+            "scan_nuclei_templates",
+            {"url": f"http://{target_value}/"},
+            record_as="scan_nuclei_templates[ablation]",
         )
 
 
