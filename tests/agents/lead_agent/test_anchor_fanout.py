@@ -632,8 +632,11 @@ def test_routing_no_param_no_path_hint_only_nuclei() -> None:
 
 def test_routing_sqli_signal_via_path_and_param() -> None:
     """sqlmap fires when path looks SQLi-ish OR a param name matches the
-    typical SQLi-target set (id, username, q, search, msg, ...)."""
-    assert "scan_sqli_sqlmap" in _tool_names_for("http://x.test/login")
+    typical SQLi-target set (id, username, q, search, msg, ...).
+
+    iter-Q5.34k carved /login etc. out of the SQLi path-hint list —
+    sqlmap aggression on credential forms triggers account lockout. See
+    test_routing_login_protection."""
     assert "scan_sqli_sqlmap" in _tool_names_for("http://x.test/sqli/Case01.jsp?id=1")
     assert "scan_sqli_sqlmap" in _tool_names_for("http://x.test/products?id=1")
     assert "scan_sqli_sqlmap" in _tool_names_for("http://x.test/search?q=foo")
@@ -723,3 +726,161 @@ def test_routing_savings_surfaced_in_rollup(monkeypatch) -> None:
         f"routing should drop dispatches; got actual={raw['actual_dispatches']}"
     )
     assert 0 < raw["savings_pct"] <= 100
+
+
+# ---------------------------------------------------------------------------
+# iter-Q5.34k — scope, path-shape dedup, login protection
+# ---------------------------------------------------------------------------
+
+from strix.agents.lead_agent.anchor_prepass import (
+    _fanout_dedup_key,
+    _in_scope,
+    _is_login_url,
+    _normalize_host,
+    _path_shape,
+)
+
+
+# ----- path shape -----
+
+@pytest.mark.parametrize("path,expected", [
+    ("/items/1", "/items/:int"),
+    ("/items/42", "/items/:int"),
+    ("/items/9999", "/items/:int"),
+    ("/posts/2024-01-31/recap", "/posts/:date/recap"),
+    ("/users/01234567-89ab-cdef-0123-456789abcdef/profile",
+     "/users/:uuid/profile"),
+    ("/cache/d41d8cd98f00b204e9800998ecf8427e", "/cache/:hash"),
+    # Real path names (mixed letters / words) — kept as-is.
+    ("/products/iphone-15", "/products/iphone-15"),
+    ("/wavsep/active/SQL-Injection/Case01.jsp",
+     "/wavsep/active/SQL-Injection/Case01.jsp"),
+    ("/", "/"),
+    ("", "/"),
+])
+def test_path_shape_normalization(path, expected) -> None:
+    assert _path_shape(path) == expected
+
+
+def test_dedup_key_collapses_numeric_id_paths() -> None:
+    """`/items/1`, `/items/2`, ..., `/items/N` → one dedup bucket. The
+    single biggest waste on catalog-style apps."""
+    assert _fanout_dedup_key("http://x.test/items/1") == _fanout_dedup_key(
+        "http://x.test/items/9999",
+    )
+
+
+def test_dedup_key_keeps_distinct_path_names() -> None:
+    """Real path names (not placeholders) must stay distinct so
+    `/products/iphone-15` and `/products/samsung-galaxy` don't get
+    collapsed into one probe."""
+    assert _fanout_dedup_key("http://x.test/products/iphone-15") != _fanout_dedup_key(
+        "http://x.test/products/samsung-galaxy",
+    )
+
+
+def test_dedup_key_collapses_uuid_paths() -> None:
+    """UUID-shaped path segments collapse to `:uuid`."""
+    a = _fanout_dedup_key("http://x.test/users/01234567-89ab-cdef-0123-456789abcdef")
+    b = _fanout_dedup_key("http://x.test/users/fedcba98-7654-3210-fedc-ba9876543210")
+    assert a == b
+
+
+# ----- scope -----
+
+@pytest.mark.parametrize("seed,url,expected", [
+    # Exact host.
+    ("getedunext.com", "https://getedunext.com/about", True),
+    # www-normalized.
+    ("getedunext.com", "https://www.getedunext.com/", True),
+    ("www.getedunext.com", "https://getedunext.com/", True),
+    # Subdomains.
+    ("getedunext.com", "https://app.getedunext.com/dash", True),
+    ("getedunext.com", "https://api.getedunext.com/v1/u", True),
+    # Out-of-scope.
+    ("getedunext.com", "https://twitter.com/share", False),
+    ("getedunext.com", "https://gettedunext.com/typo", False),
+    ("getedunext.com", "https://cdn.fastly.net/img.jpg", False),
+    # Bench-fixture conventions always in-scope.
+    ("getedunext.com", "http://localhost:8080/x", True),
+    ("getedunext.com", "http://127.0.0.1/y", True),
+    ("getedunext.com", "http://host.docker.internal/z", True),
+])
+def test_in_scope_default_policy(seed, url, expected) -> None:
+    assert _in_scope(url, _normalize_host(seed)) is expected
+
+
+def test_in_scope_extra_hosts_env(monkeypatch) -> None:
+    """`STRIX_ANCHOR_FANOUT_SCOPE_HOSTS` whitelists extra hostnames."""
+    monkeypatch.setenv(
+        "STRIX_ANCHOR_FANOUT_SCOPE_HOSTS", "edge.cloudfront.net, partner.io",
+    )
+    assert _in_scope("https://edge.cloudfront.net/asset", "getedunext.com") is True
+    assert _in_scope("https://partner.io/api", "getedunext.com") is True
+    assert _in_scope("https://other.cdn.net/x", "getedunext.com") is False
+
+
+def test_in_scope_no_seed_lets_through() -> None:
+    """Empty seed host (uncommon — fan-out called without target context)
+    treats all URLs as in-scope to avoid silently dropping everything."""
+    assert _in_scope("https://x.com/", "") is True
+
+
+def test_select_fanout_urls_drops_out_of_scope() -> None:
+    """End-to-end: katana-style endpoint list with off-host links is
+    filtered to in-scope-only URLs."""
+    summary = PrepassSummary(
+        target_type="web_application",
+        target_value="https://getedunext.com/landing",
+    )
+    summary.tool_results.append(ToolResult(
+        tool_name="crawl_with_katana", status="ok",
+        raw_result={
+            "endpoints": [
+                {"url": "https://getedunext.com/about"},
+                {"url": "https://app.getedunext.com/dashboard"},
+                {"url": "https://twitter.com/share"},
+                {"url": "https://cdn.fastly.net/banner.jpg"},
+                {"url": "https://getedunext.com/contact"},
+            ],
+        },
+    ))
+    urls = _select_fanout_urls("https://getedunext.com/landing", 50, summary=summary)
+    # 3 in-scope (about, app.x, contact); twitter and cdn dropped.
+    assert len(urls) == 3
+    for u in urls:
+        assert ("getedunext.com" in u) or ("localhost" in u)
+    assert not any("twitter" in u for u in urls)
+    assert not any("cdn.fastly" in u for u in urls)
+
+
+# ----- login -----
+
+@pytest.mark.parametrize("url,expected", [
+    ("http://x.test/login", True),
+    ("http://x.test/signin", True),
+    ("http://x.test/sign-in", True),
+    ("http://x.test/auth/login", True),
+    ("http://x.test/account/login", True),
+    ("http://x.test/users/sign_in", True),
+    ("http://x.test/sessions/new", True),
+    # Not login.
+    ("http://x.test/products?id=1", False),
+    ("http://x.test/sqli/case01.jsp", False),
+    ("http://x.test/admin/dashboard", False),
+])
+def test_is_login_url(url, expected) -> None:
+    assert _is_login_url(url) is expected
+
+
+def test_routing_login_protection() -> None:
+    """Login URLs route to nuclei ONLY. sqlmap aggression on credential
+    forms triggers account lockout / CAPTCHA — real auth bypass goes
+    through scan_auth_flow + probe_default_creds (separate anchor
+    tools, not fan-out's per-URL probing)."""
+    tools = _tool_names_for("http://x.test/login?username=foo&password=bar")
+    assert tools == {"scan_nuclei_templates"}
+    tools = _tool_names_for("http://x.test/account/login")
+    assert tools == {"scan_nuclei_templates"}
+    tools = _tool_names_for("http://x.test/users/sign_in")
+    assert tools == {"scan_nuclei_templates"}
