@@ -558,6 +558,10 @@ against the `/api/Challenges` endpoint Juice Shop exposes.
 | 33.2 | #477 | Parallel specialist dispatch |
 | 33.3 | #478 | Heuristic shape-based chain linkers |
 | 33.4 | #479 | Chain re-prompting on chain promotion |
+| Q5.32 | #542 | Language-aware semgrep registry pack selection (per-asset Java/JS/Python/Go/Ruby/PHP/etc. packs) — first headline L1-SAST measurement |
+| Q5.33 | #543 | Bench auto-detects cached 2740-case OWASP CSV vs the 25-row CI fixture |
+
+**Headline L1-SAST result post-Q5.32+Q5.33** (OWASP Benchmark v1.2, full 2740 cases, STRIX_L2_DISABLED=1): **Youden 2.15%, TPR 5.02%, FPR 2.87%**. Per-category Youden: cmdi 8.69%, crypto 6.27%, pathtraver 6.10%, sqli 0.76%. Remaining 7 categories at 0% — see §9.1 for the per-category gap analysis and iter-Q5.34 / Q5.35 / Q5.36 proposals to close it.
 
 ---
 
@@ -570,6 +574,35 @@ against the `/api/Challenges` endpoint Juice Shop exposes.
 | **iter-35.3** | Anchor sequence missing `crawl_with_katana` / `webapp_recon_pipeline` | Add registered recon tools to `_ANCHORS_WEB` |
 | **iter-36** | Bench harness measures via subprocess strix CLI — multi-run averaging missing | Run N=5, report median + p10/p90 |
 | **iter-37** | Cost optimization: model-tier routing (cheap for recon, premium for chains) | Wire model selection per phase |
+
+### 9.1 L1-SAST coverage gaps (post-Q5.33)
+
+Current OWASP Benchmark v1.2 (full 2740-case run) shipped state with semgrep `p/java + p/findsecbugs + p/cwe-top-25 + p/owasp-top-ten + p/security-audit`:
+
+| Category | cases | TP | Youden | Reason for gap |
+|---|---:|---:|---:|---|
+| cmdi | 126 | 17 | **8.69%** | covered — semgrep rules fire on `Runtime.exec` shapes |
+| crypto | 130 | 16 | **6.27%** | covered — `Cipher.getInstance("DES"|"RC4")` patterns |
+| pathtraver | 133 | 16 | **6.10%** | covered — `new File(req.getParameter(...))` patterns |
+| sqli | 272 | 22 | 0.76% | partial — Statement.execute matches but most JDBC paths use PreparedStatement-with-concat that semgrep doesn't taint-flow |
+| hash | 129 | 0 | **0%** | `p/java` lacks MD5/SHA1 pack — need explicit `p/insecure-hash` |
+| xss | 246 | 0 | **0%** | JSP `<%= req.getParameter() %>` isn't covered by `p/java`; need `p/jsp` or `p/find-sec-bugs-jsp` |
+| ldapi | 27 | 0 | **0%** | no rule for `DirContext.search(req.getParameter)` |
+| xpathi | 15 | 0 | **0%** | no rule for `XPath.evaluate(req.getParameter)` |
+| securecookie | 36 | 0 | **0%** | needs `p/jsp-config` or servlet-cookie attribute rules |
+| trustbound | 83 | 0 | **0%** | session-attribute tainting — semgrep can't do interprocedural |
+| weakrand | 218 | 0 | **0%** | needs `java.util.Random` rule — likely in `p/security-audit` but disabled |
+
+Overall: **TPR 5.02%, FPR 2.87%, Youden 2.15%**. Industry semgrep ceiling on this corpus is ~15-20%; we're below that because of the missing-pack gaps above.
+
+**Proposed iters:**
+
+| iter | gap | scope |
+|---|---|---|
+| **iter-Q5.34** | semgrep XSS/LDAP/XPath gaps for Java | Add `p/jsp`, `p/find-sec-bugs-jsp`, `p/insecure-hash`, plus inspect why `p/security-audit` weakrand isn't firing |
+| **iter-Q5.35** | Add CodeQL as a sibling SAST anchor (taint-flow) | `codeql` runner in `strix/sast/`, fires alongside semgrep. CodeQL hits ~38% Youden on this corpus — closes most of the gap to Fortify (35%) / Checkmarx (47%) |
+| **iter-Q5.36** | Add SpotBugs-FindSecBugs as a third SAST anchor | Java `.jar`-bytecode analysis; complements semgrep (source) + CodeQL (semantic) |
+| **iter-Q5.37** | Verify per-CWE category mapping (the OWASP Benchmark's category names vs semgrep's CWE tags) | iter-Q5.32 found 8 different CWE-90/643/501/etc. labels; some semgrep findings may be miscategorized and bin-failing the scorer |
 
 ---
 
