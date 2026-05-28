@@ -683,6 +683,22 @@ class PrepassSummary:
             "total_findings_pre_dedupe": self.total_findings,
             "wall_time_s": round(self.wall_time_s, 2),
             "skipped_reason": self.skipped_reason,
+            # iter-Q5.28b — per-tool status + error_reason so the
+            # observability block in simulation_run.json reveals WHY
+            # a tool failed, not just THAT it failed. Without this,
+            # the iter-Q5.27 bench's "5/5 tools failed, 0 findings"
+            # was opaque — we couldn't tell sandbox provisioning
+            # from semgrep-missing from argument-validation-error.
+            "tool_results": [
+                {
+                    "tool_name": r.tool_name,
+                    "status": r.status,
+                    "findings_count": r.findings_count,
+                    "error_reason": r.error_reason,
+                    "wall_time_s": round(r.wall_time_s, 2),
+                }
+                for r in self.tool_results
+            ],
         }
 
 

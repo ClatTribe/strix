@@ -440,9 +440,32 @@ RUN setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip $(which nmap)
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
 # Create the unprivileged runtime user.
+#
+# iter-Q5.29 — extend sudo's `secure_path` so the tool_server, which
+# launches via `sudo -E -u pentester /app/.venv/bin/python -m
+# strix.runtime.tool_server` in the entrypoint, inherits PATH entries
+# for pipx-installed OSS tools (semgrep, bandit, schemathesis, inql,
+# bbot, dnstwist, checkdmarc) at /opt/pipx/bin. Default Debian
+# sudoers ships `Defaults secure_path="/usr/local/sbin:/usr/local/bin:
+# /usr/sbin:/usr/bin:/sbin:/bin"` which is fixed regardless of the
+# caller's PATH — so even `sudo -E` couldn't recover the parent
+# PATH. Symptom prior to fix: every L1-SAST anchor (scan_sast +
+# friends) returned `status=partial / "semgrep CLI not installed"`
+# even though semgrep was in the image. Verified by inspecting
+# `sudo -u pentester sh -c 'echo $PATH'` returning only the default
+# system paths. The OWASP BenchmarkJava L1-SAST bench produced
+# 0% Youden as a direct consequence (iter-Q5.27 → Q5.28 →
+# this PR).
+#
+# The replacement secure_path mirrors the Dockerfile's
+# user-PATH ENV directive below — `/opt/pipx/bin` + `/app/.venv/bin`
+# + go/node/npm-global trees + the standard system paths. This is
+# the canonical PATH every sudo-launched strix process should see.
 RUN useradd -m -s /bin/bash pentester \
  && usermod -aG sudo pentester \
  && echo "pentester ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers \
+ && echo 'Defaults secure_path="/home/pentester/go/bin:/home/pentester/.local/bin:/home/pentester/.npm-global/bin:/app/.venv/bin:/opt/pipx/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' > /etc/sudoers.d/strix-secure-path \
+ && chmod 0440 /etc/sudoers.d/strix-secure-path \
  && touch /home/pentester/.hushlogin \
  && mkdir -p /home/pentester/configs \
              /home/pentester/wordlists \
