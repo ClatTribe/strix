@@ -78,10 +78,19 @@ RUN go install -ldflags="-s -w" github.com/projectdiscovery/httpx/cmd/httpx@late
  # enumerators so duplicates don't double-spawn child scans.
  && go install -ldflags="-s -w" github.com/owasp-amass/amass/v4/...@master \
  && go install -ldflags="-s -w" github.com/projectdiscovery/naabu/v2/cmd/naabu@latest \
- # iter-Q5.49 — kiterunner (Assetnote). API-route brute force using
- # the 50k-route curated wordlist. Sibling to openapi_spec_ingest
- # in _ANCHORS_API. Wordlist downloaded separately to /opt/kiterunner.
- && go install -ldflags="-s -w" github.com/assetnote/kiterunner/cmd/kr@latest \
+ # iter-Q5.49 — kiterunner (Assetnote) — DEFERRED.
+ # The original Q5.49 line was:
+ #   go install github.com/assetnote/kiterunner/cmd/kr@latest
+ # That fails because the kiterunner module ships its binary via
+ # Make (see assetnote/kiterunner README), not as a `cmd/kr`
+ # subpackage. The module IS published at v1.0.2, but the importable
+ # cmd/kr path does not exist. Building from source needs the Make
+ # target + a release tarball download for the routes-large.kite
+ # wordlist; an iter-Q7.4 will re-add it properly via the
+ # `make build` path + a release-asset curl for the wordlist.
+ # The Q5.49 wrapper code still ships (graceful-degrades when
+ # binary missing); the wrapper just returns `status=partial` until
+ # the binary is reinstalled.
  # iter-Q5.51 — ZGrab2 (ZMap project). Structured app-layer banner
  # grabber paired with masscan / nmap.
  && go install -ldflags="-s -w" github.com/zmap/zgrab2/cmd/zgrab2@latest \
