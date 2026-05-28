@@ -4041,21 +4041,58 @@ def _anchor_fanout_limit() -> int:
     return max(1, min(1000, n))
 
 
-def _select_fanout_urls(seed_url: str, limit: int) -> list[str]:
-    """Read URLs from workflow_state (populated by crawl_with_katana /
-    web_crawler / openapi_spec_ingest), filter to http(s), dedupe,
-    drop the seed itself (already covered by phase 1), and cap to
-    `limit`. Sorted for determinism."""
+def _select_fanout_urls(
+    seed_url: str,
+    limit: int,
+    summary: PrepassSummary | None = None,
+) -> list[str]:
+    """Select URLs to fan out across, in priority order:
+
+    1. **Phase-1 tool results** — `summary.tool_results[i].raw_result.endpoints`
+       carries the per-endpoint dicts emitted by crawl_with_katana /
+       web_crawler / openapi_spec_ingest. This is the primary source
+       because those tools execute in the sandbox container, write to
+       the **sandbox-side** workflow_state singleton, and the only
+       data that makes it back to the host is the tool's return value
+       (the `raw_result` dict). See CLAUDE.md §5.1 / iter-35.4 for the
+       same class of issue with vulnerability_reports.
+
+    2. **Host-side workflow_state** — `get_endpoints_discovered_urls()`.
+       Picks up URLs from any host-side recorders (lead-driven URL
+       discovery, future sandbox→host workflow_state propagation).
+
+    Filters to http(s) only, drops the seed URL (already covered by
+    phase 1's per-seed pass), dedupes, sorts for determinism, and
+    caps to `limit`.
+    """
+    candidate_urls: set[str] = set()
+
+    # Source 1: tool_results endpoints (sandbox→host sidecar).
+    if summary is not None:
+        for tr in getattr(summary, "tool_results", []) or []:
+            raw = getattr(tr, "raw_result", None)
+            if not isinstance(raw, dict):
+                continue
+            for ep in raw.get("endpoints") or []:
+                if isinstance(ep, dict):
+                    u = ep.get("url")
+                    if isinstance(u, str):
+                        candidate_urls.add(u)
+                elif isinstance(ep, str):
+                    candidate_urls.add(ep)
+
+    # Source 2: host-side workflow_state.
     try:
         from strix.agents.workflow_state import get_endpoints_discovered_urls
-        urls_all = get_endpoints_discovered_urls()
+        for u in get_endpoints_discovered_urls():
+            if isinstance(u, str):
+                candidate_urls.add(u)
     except Exception:  # noqa: BLE001
-        return []
+        pass
+
     seed_norm = (seed_url or "").rstrip("/")
     out: list[str] = []
-    for url in urls_all:
-        if not isinstance(url, str):
-            continue
+    for url in sorted(candidate_urls):
         if not url.lower().startswith(("http://", "https://")):
             continue
         if url.rstrip("/") == seed_norm:
@@ -4080,7 +4117,8 @@ async def _fanout_deep_specialists_across_endpoints(
     Skips entirely when:
       * `STRIX_ANCHOR_FANOUT` is not set
       * `target_type` is not in {web_application, api}
-      * No crawled URLs are available in workflow_state
+      * No crawled URLs are available in either tool_results sidecar
+        or host-side workflow_state
     """
     if not _anchor_fanout_enabled():
         return
@@ -4088,7 +4126,7 @@ async def _fanout_deep_specialists_across_endpoints(
         return
 
     limit = _anchor_fanout_limit()
-    urls = _select_fanout_urls(target_value, limit)
+    urls = _select_fanout_urls(target_value, limit, summary=summary)
     if not urls:
         logger.info(
             "anchor fanout: STRIX_ANCHOR_FANOUT=1 but no crawled URLs "
