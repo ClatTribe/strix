@@ -4084,7 +4084,11 @@ _REDIRECT_PARAM_NAMES: frozenset[str] = frozenset({
 # search / login URLs also land here as a low-confidence signal.
 _PATH_HINTS_SQLI: tuple[str, ...] = (
     "/sql-injection/", "/sqli/", "/sql_injection/",
-    "/login", "/signin", "/sign-in", "/auth", "/authenticate",
+    # iter-Q5.34k — `/login`, `/signin`, `/auth*` REMOVED from this list.
+    # They're handled by `_PATH_HINTS_LOGIN` below — login URLs route to
+    # nuclei only (NOT sqlmap), because sqlmap aggression against a
+    # credential form triggers account lockout / CAPTCHA. Real auth
+    # bypass goes through scan_auth_flow + probe_default_creds.
 )
 _PATH_HINTS_XSS: tuple[str, ...] = (
     "/xss/", "/rxss/", "/dom-xss/", "/reflected-xss/", "/stored-xss/",
@@ -4156,7 +4160,13 @@ _FANOUT_TOOL_INTEREST: list[tuple[str, Any, Any]] = [
 def _select_tools_for_url(url: str) -> list[tuple[str, Any]]:
     """Return the (tool_name, kwarg_builder) pairs whose interest predicate
     matches this URL. When STRIX_ANCHOR_FANOUT_ROUTING=0 the full
-    `_FANOUT_DEEP_SPECIALISTS_WEB` list is returned (ablation mode)."""
+    `_FANOUT_DEEP_SPECIALISTS_WEB` list is returned (ablation mode).
+
+    iter-Q5.34k — login URLs are short-circuited to nuclei ONLY. Firing
+    sqlmap / dalfox against `?username=...&password=...` triggers account
+    lockout / CAPTCHA on most real apps; auth bypass goes through
+    scan_auth_flow + probe_default_creds (separate anchor tools that run
+    once, not per-URL)."""
     if not _routing_enabled():
         return list(_FANOUT_DEEP_SPECIALISTS_WEB)
     from urllib.parse import parse_qs, urlparse
@@ -4164,6 +4174,14 @@ def _select_tools_for_url(url: str) -> list[tuple[str, Any]]:
         parsed = urlparse(url)
     except Exception:  # noqa: BLE001
         return list(_FANOUT_DEEP_SPECIALISTS_WEB)
+    # iter-Q5.34k — login protection. Match before any other predicate so
+    # sqlmap NEVER fires against a login form.
+    if _is_login_url(parsed):
+        return [
+            (name, builder)
+            for name, builder, _pred in _FANOUT_TOOL_INTEREST
+            if name == "scan_nuclei_templates"
+        ]
     params = set((parse_qs(parsed.query) or {}).keys())
     out: list[tuple[str, Any]] = []
     for tool_name, builder, predicate in _FANOUT_TOOL_INTEREST:
@@ -4223,21 +4241,147 @@ _FANOUT_SKIP_CLASSES: frozenset[str] = frozenset({
 })
 
 
-def _fanout_dedup_key(url: str) -> str:
-    """Shape-key for deduplication: same host + path + sorted set of
-    query parameter NAMES (values dropped). Collapses
-    `/products?id=1` and `/products?id=2` into one shape, while
-    keeping `/products?id` and `/products?name` distinct.
+# ---------------------------------------------------------------------------
+# iter-Q5.34k — scope + path-shape dedup + login protection
+# ---------------------------------------------------------------------------
+# Q5.34i covered extension/destructive/query-name dedup. Three critical
+# gaps remained:
+#
+#   * Scope:  katana follows third-party `<a href>` (twitter, fb, cdn) →
+#             without scope we'd probe other people's sites
+#   * Path:   `/items/1`, `/items/2`, ..., `/items/N` were treated as N
+#             distinct URLs, exploding sqlmap on catalog-style apps
+#   * Auth:   `/login` matched the SQLi path hint → routing fired sqlmap,
+#             triggering lockout / CAPTCHA. Login auth-bypass belongs to
+#             scan_auth_flow + probe_default_creds, not fan-out's sqlmap.
 
-    Trailing slashes are stripped so katana's `/x/` and `/x` collide
-    (a common crawl source of dupes)."""
+
+import re as _re
+
+
+_UUID_RE = _re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    _re.IGNORECASE,
+)
+_HASH_HEX_RE = _re.compile(r"^[0-9a-f]{20,}$", _re.IGNORECASE)
+_DATE_RE = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _normalize_path_segment(seg: str) -> str:
+    """Replace opaque variable segments with their shape placeholder.
+
+    Conservative — segments that aren't unambiguously variable (e.g.
+    `iphone-15`, `Case01.jsp`) are left as-is so legitimately-distinct
+    paths don't get collapsed."""
+    if not seg:
+        return seg
+    if seg.isdigit():
+        return ":int"
+    if _UUID_RE.match(seg):
+        return ":uuid"
+    if _HASH_HEX_RE.match(seg):
+        return ":hash"
+    if _DATE_RE.match(seg):
+        return ":date"
+    return seg
+
+
+def _path_shape(path: str) -> str:
+    """`/items/1` → `/items/:int`, `/users/<uuid>/profile` →
+    `/users/:uuid/profile`. Keeps real path component names so the
+    dedup doesn't collapse unrelated routes."""
+    if not path:
+        return "/"
+    segments = [_normalize_path_segment(s) for s in path.strip("/").split("/")]
+    return "/" + "/".join(segments)
+
+
+def _normalize_host(host: str) -> str:
+    """Strip `www.` so `www.x.com` and `x.com` are scope-equivalent."""
+    if not host:
+        return ""
+    host = host.lower().strip()
+    if host.startswith("www."):
+        return host[4:]
+    return host
+
+
+def _scope_extra_hosts() -> set[str]:
+    """`STRIX_ANCHOR_FANOUT_SCOPE_HOSTS=api.x.com,app.x.com` whitelists
+    extra hostnames the default scope filter would otherwise reject.
+    Useful for multi-domain SaaS apps where seed=x.com but the API lives
+    on api.x.com."""
+    raw = os.environ.get("STRIX_ANCHOR_FANOUT_SCOPE_HOSTS", "")
+    return {_normalize_host(h) for h in raw.split(",") if h.strip()}
+
+
+def _in_scope(url: str, seed_host: str) -> bool:
+    """Default policy: same host or any subdomain of the seed host.
+
+    Localhost / 127.0.0.1 / host.docker.internal are always in-scope —
+    standard bench fixture conventions; disabling them would break every
+    docker-compose-mounted target."""
+    from urllib.parse import urlparse
+    try:
+        host = _normalize_host(urlparse(url).hostname or "")
+    except Exception:  # noqa: BLE001
+        return False
+    if not host:
+        return False
+    if host in {"localhost", "127.0.0.1", "host.docker.internal"}:
+        return True
+    if host in _scope_extra_hosts():
+        return True
+    if not seed_host:
+        return True
+    if host == seed_host:
+        return True
+    return host.endswith("." + seed_host)
+
+
+# Login / signin URL fragments. fan-out routes these to nuclei ONLY —
+# sqlmap aggression triggers account lockout, dalfox payloads are wasted on
+# credential forms. Real auth bypass goes through scan_auth_flow +
+# probe_default_creds (separate anchor tools).
+_PATH_HINTS_LOGIN: tuple[str, ...] = (
+    "/login", "/signin", "/sign-in", "/sign_in",
+    "/auth/login", "/auth/signin", "/auth/sign-in",
+    "/account/login", "/user/login", "/users/sign_in",
+    "/users/login", "/session/new", "/sessions/new",
+)
+
+
+def _is_login_url(parsed_or_url: Any) -> bool:
+    """True if the URL's path matches a known login/signin pattern. Accepts
+    either a urlparse result or a raw URL string."""
+    from urllib.parse import urlparse
+    if isinstance(parsed_or_url, str):
+        try:
+            parsed = urlparse(parsed_or_url)
+        except Exception:  # noqa: BLE001
+            return False
+    else:
+        parsed = parsed_or_url
+    path = (parsed.path or "").lower()
+    return any(h in path for h in _PATH_HINTS_LOGIN)
+
+
+def _fanout_dedup_key(url: str) -> str:
+    """Shape-key for deduplication: same host + path-SHAPE + sorted set of
+    query parameter NAMES (values dropped).
+
+    iter-Q5.34i normalized only query VALUES (`/p?id=1` and `?id=2`
+    collapsed). iter-Q5.34k extends this to PATH segments so `/items/1`,
+    `/items/2`, ..., `/items/N` also collapse to `/items/:int` —
+    catalog-style apps with thousands of numerically-indexed pages no
+    longer explode the dispatch budget."""
     from urllib.parse import urlparse, parse_qs
     try:
         parsed = urlparse(url)
     except Exception:  # noqa: BLE001
         return url
-    host = (parsed.netloc or "").lower()
-    path = (parsed.path or "/").rstrip("/") or "/"
+    host = _normalize_host(parsed.netloc or "")
+    path = _path_shape(parsed.path or "/")
     query_keys = ",".join(sorted((parse_qs(parsed.query) or {}).keys()))
     return f"{parsed.scheme}://{host}{path}?{query_keys}"
 
@@ -4314,10 +4458,17 @@ def _select_fanout_urls(
         pass
 
     seed_norm = (seed_url or "").rstrip("/")
+    # iter-Q5.34k — scope filter against the seed's hostname.
+    from urllib.parse import urlparse as _urlparse_q5k
+    try:
+        seed_host = _normalize_host(_urlparse_q5k(seed_url or "").hostname or "")
+    except Exception:  # noqa: BLE001
+        seed_host = ""
+
     out: list[str] = []
     seen_keys: set[str] = set()
     rejected: dict[str, int] = {
-        "non_http": 0, "seed": 0,
+        "non_http": 0, "seed": 0, "out_of_scope": 0,
         "static": 0, "destructive": 0, "shape_dup": 0,
     }
     for url in sorted(candidate_urls):
@@ -4326,6 +4477,13 @@ def _select_fanout_urls(
             continue
         if url.rstrip("/") == seed_norm:
             rejected["seed"] += 1
+            continue
+        # iter-Q5.34k — scope filter. Drop URLs that katana followed off-site
+        # (twitter share buttons, fb-pixel, CDNs, third-party widgets) so
+        # fan-out never probes assets belonging to anyone else. Honors
+        # STRIX_ANCHOR_FANOUT_SCOPE_HOSTS for multi-domain SaaS apps.
+        if not _in_scope(url, seed_host):
+            rejected["out_of_scope"] += 1
             continue
         # iter-Q5.34i — classifier filter (skip static / destructive /
         # logout). Mirrors what every commercial DAST does before its
@@ -4337,8 +4495,11 @@ def _select_fanout_urls(
             else:
                 rejected["destructive"] += 1
             continue
-        # iter-Q5.34i — shape-dedup so query-value variations of the
-        # same path don't each soak up a full sqlmap/dalfox run.
+        # iter-Q5.34i + Q5.34k — shape-dedup so query-value AND path-value
+        # variations of the same endpoint don't each soak up a full
+        # sqlmap/dalfox run. Q5.34k extends iter-Q5.34i's query-name dedup
+        # to also normalize numeric / UUID / hash / date path segments so
+        # /items/1, /items/2, ..., /items/N all collapse to /items/:int.
         key = _fanout_dedup_key(url)
         if key in seen_keys:
             rejected["shape_dup"] += 1
