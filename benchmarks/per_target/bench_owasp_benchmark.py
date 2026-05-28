@@ -269,7 +269,16 @@ def _load_findings(run_dir: Path) -> list[dict]:
     except json.JSONDecodeError:
         return []
     if isinstance(data, dict):
-        return list(data.get("vulnerability_reports") or [])
+        # iter-Q5.31c — the canonical strix `vulnerabilities.json` has
+        # shape `{findings: [...], count: N, generated_at, run_id,
+        # run_name, schema_version}`. Older / alternative writers used
+        # `vulnerability_reports` as the top-level key. Try both so
+        # the bench works against any strix vintage.
+        return list(
+            data.get("findings")
+            or data.get("vulnerability_reports")
+            or [],
+        )
     if isinstance(data, list):
         return data
     return []
@@ -399,7 +408,14 @@ def main() -> int:
             print(f"[bench] FAIL: invalid JSON in {ep}: {e}", file=sys.stderr)
             return 2
         if isinstance(raw, dict):
-            findings = list(raw.get("vulnerability_reports") or [])
+            # iter-Q5.31c — accept both `findings` (canonical strix
+            # `vulnerabilities.json` schema) and `vulnerability_reports`
+            # (alternative writer shape). Same compat as _load_findings.
+            findings = list(
+                raw.get("findings")
+                or raw.get("vulnerability_reports")
+                or [],
+            )
         elif isinstance(raw, list):
             findings = raw
     else:
