@@ -38,6 +38,34 @@ args = parser.parse_args()
 EXPECTED_TOKEN = args.token
 REQUEST_TIMEOUT = args.timeout
 
+# iter-Q5.31b — instantiate a sandbox-side Tracer at module load and
+# set it as the global so `tracer.add_vulnerability_report` calls
+# from sandbox-resident tools (scan_sast / scan_iac / scan_idor /
+# scan_auth_flow / probe_open_tcp_ports / ... — ~30+ tools) have a
+# place to land. Without this, `get_global_tracer()` returns None
+# inside the tool_server process and every in-tool tracer call is
+# silently a no-op. iter-35.4's pre/post-snapshot sidecar mechanism
+# also requires the tracer to exist — when None, captured stays [].
+# The bench-flow symptom was scan_sast's 200 semgrep findings
+# disappearing on the sandbox side (verified iter-Q5.31 by stderr
+# instrumenting `_propagate_sandbox_findings_to_host`:
+# `findings_emitted_type=NoneType` for every tool call). The sandbox
+# tracer is hookless by design — the host's tracer carries the L1.5
+# hook chain; here we just need a clean append-only store for the
+# pre/post diff to work.
+try:
+    from strix.telemetry.tracer import Tracer, set_global_tracer
+    _sandbox_tracer = Tracer(run_name="sandbox-tool-server")
+    set_global_tracer(_sandbox_tracer)
+except Exception as _sandbox_tracer_init_e:  # noqa: BLE001
+    # Don't block tool_server startup if Tracer init fails — the
+    # tool dispatch path still works, we just lose finding capture.
+    import logging as _lg_st
+    _lg_st.getLogger(__name__).warning(
+        "iter-Q5.31b — sandbox-side Tracer init failed: %s",
+        _sandbox_tracer_init_e,
+    )
+
 app = FastAPI()
 security = HTTPBearer()
 security_dependency = Depends(security)
