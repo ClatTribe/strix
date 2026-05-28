@@ -141,7 +141,7 @@ against.
 
 | Layer | Element | Detail |
 |---|---|---|
-| **L1 OSS tools** | Subdomain enum | **subfinder**, **bbot** (+ planned: **amass** Q5.45, **assetfinder**) |
+| **L1 OSS tools** | Subdomain enum | **subfinder**, **bbot**, **amass** (Q5.45 — passive by default, opt-in active via `STRIX_AMASS_ACTIVE=1`) (+ planned: **assetfinder**) |
 | | DNS hygiene | **checkdmarc** (SPF/DKIM/DMARC/CAA/MTA-STS) |
 | | Typosquats | **dnstwist** |
 | | Pipeline | `domain_recon_pipeline` (orchestrates the above) |

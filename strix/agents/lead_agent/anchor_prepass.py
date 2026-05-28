@@ -716,6 +716,13 @@ _ANCHORS_DOMAIN: list[tuple[str, Any]] = [
     # pipeline so isolated subfinder findings still surface when the
     # pipeline returns partial.
     ("enumerate_subdomains_subfinder", _domain_kwargs),
+    # iter-Q5.45 — amass (OWASP). Ships in parallel to subfinder;
+    # passive by default. Catches subdomains subfinder misses via
+    # ASN/BGP enumeration + extra cert-transparency sources. The
+    # Q5.44 child-asset extractor already dedupes by host across
+    # both enumerators so duplicates don't double-spawn child scans.
+    # Operators flip to active mode via `STRIX_AMASS_ACTIVE=1`.
+    ("enumerate_subdomains_amass", _domain_kwargs),
     # DNS hygiene posture (checkdmarc): SPF / DKIM / DMARC / MX / CAA
     # / MTA-STS. Always-on for every domain asset.
     ("scan_dns_hygiene_checkdmarc", _domain_kwargs),
@@ -4409,6 +4416,34 @@ def _extract_child_assets_from_domain_prepass(
                 "scheme": None,
                 "triage": None,
                 "source": "enumerate_subdomains_subfinder",
+            }
+
+    # Pass 3: enumerate_subdomains_amass — iter-Q5.45 sibling to
+    # subfinder. amass returns subdomains in a top-level `subdomains`
+    # list (not under `findings`); same gap-fill semantics as
+    # subfinder — only adds hosts the pipeline missed.
+    for tr in getattr(summary, "tool_results", []) or []:
+        if getattr(tr, "tool_name", None) != "enumerate_subdomains_amass":
+            continue
+        raw = getattr(tr, "raw_result", None)
+        if not isinstance(raw, dict):
+            continue
+        subs = raw.get("subdomains")
+        if not isinstance(subs, list):
+            continue
+        for raw_host in subs:
+            if not isinstance(raw_host, str):
+                continue
+            host = _normalise_host(raw_host)
+            if not host or host == apex or host in seen:
+                continue
+            seen[host] = {
+                "host": host,
+                "ip": None,
+                "asset_type": "ip_address",
+                "scheme": None,
+                "triage": None,
+                "source": "enumerate_subdomains_amass",
             }
 
     # Stable order so downstream snapshots compare cleanly.
