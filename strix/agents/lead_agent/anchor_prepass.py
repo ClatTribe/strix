@@ -4103,6 +4103,104 @@ def _select_fanout_urls(
     return out
 
 
+# ---------------------------------------------------------------------------
+# iter-Q5.34h — bridge list-shape findings to the host tracer
+# ---------------------------------------------------------------------------
+# Maps each finding's natural key set (rule_id / category / cwe / param /
+# payload / etc.) to `tracer.add_vulnerability_report`'s kwargs. Used by
+# the fan-out phase to surface findings that wrappers like dalfox / ffuf
+# return as a plain list in their result dict.
+
+# Tool-specific category fallback when the finding dict doesn't carry one.
+# CWE_TO_CATEGORY ↔ owasp_benchmark_scoring.OWASP_BENCHMARK_CATEGORIES,
+# kept aligned so per-CWE scoring works across both SAST/DAST harnesses.
+_FANOUT_TOOL_CATEGORY_HINTS: dict[str, str] = {
+    "scan_sqli_sqlmap": "sqli",
+    "scan_xss_dalfox": "xss",
+    "open_redirect_check": "redirect",
+    "scan_nuclei_templates": "vulnerability",  # generic
+    "scan_fuzz_ffuf": "info_disclosure",
+    "scan_smuggling_smuggler": "http_smuggling",
+}
+
+
+def _bridge_findings_to_tracer(
+    findings: list[Any],
+    *,
+    tool_name: str,
+    url: str,
+) -> None:
+    """Emit each list-shape finding via `tracer.add_vulnerability_report`.
+
+    iter-Q5.34h — wrappers that produce findings in `result["findings"]`
+    (vs calling tracer themselves) historically had their findings dropped
+    by the prepass: the L1.5 sidecar (iter-35.4) only intercepts
+    tracer-emitted reports. This helper bridges the gap.
+
+    Robust to varied finding shapes — only the strict superset of fields
+    that map to `add_vulnerability_report` kwargs is forwarded; unknown
+    keys are ignored. Failures are logged + swallowed so a malformed
+    finding never aborts the fan-out pass.
+    """
+    try:
+        from strix.telemetry.tracer import get_global_tracer
+        tracer = get_global_tracer()
+    except Exception:  # noqa: BLE001
+        return
+    if tracer is None:
+        return
+
+    category_hint = _FANOUT_TOOL_CATEGORY_HINTS.get(tool_name)
+
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+
+        # Build the add_vulnerability_report kwargs. Each key is the
+        # canonical name on the tracer side; the right-hand side is the
+        # preferred finding-dict location followed by fallbacks.
+        title = (
+            f.get("title")
+            or f.get("rule_id")
+            or f"{tool_name} finding on {url}"
+        )
+        severity = str(f.get("severity") or "medium").lower()
+        endpoint = (
+            f.get("endpoint")
+            or f.get("url")
+            or url
+        )
+        kwargs: dict[str, Any] = {
+            "title": str(title)[:300],
+            "severity": severity,
+            "endpoint": str(endpoint)[:600],
+        }
+        for src_key, dst_key in (
+            ("cwe", "cwe"), ("cve", "cve"),
+            ("description", "description"),
+            ("evidence", "technical_analysis"),
+            ("remediation", "remediation_steps"),
+            ("category", "category"), ("method", "method"),
+            ("confidence", "confidence"),
+        ):
+            v = f.get(src_key)
+            if v is not None:
+                kwargs[dst_key] = v
+        if "category" not in kwargs and category_hint:
+            kwargs["category"] = category_hint
+        # Pattern-match by default — fanout dispatches haven't run the
+        # post-emit verifier (iter-32.4).
+        kwargs.setdefault("verification_status", "pattern_match")
+
+        try:
+            tracer.add_vulnerability_report(**kwargs)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "anchor fanout: failed to bridge %s finding to tracer "
+                "(%s: %s)", tool_name, type(e).__name__, e,
+            )
+
+
 async def _fanout_deep_specialists_across_endpoints(
     summary: PrepassSummary,
     *,
@@ -4134,9 +4232,18 @@ async def _fanout_deep_specialists_across_endpoints(
         )
         return
 
-    # Concurrency budget reused from the shape-aware dispatcher's knob
-    # so the operator has one place to control sandbox load.
-    raw_conc = os.environ.get("STRIX_DISPATCH_CONCURRENCY", "1").strip()
+    # iter-Q5.34h — fan-out concurrency MUST default to 1. The sandbox
+    # `tool_server` has a one-tool-per-agent_id contract: every new
+    # `/execute` request cancels the previously-running task for the
+    # same agent_id (so the lead's stale tool-call requests don't
+    # accumulate). With STRIX_DISPATCH_CONCURRENCY=4, fan-out's
+    # asyncio.gather races N dispatches through the same agent_id and
+    # each cancels its predecessor — verified by the iter-Q5.34g WAVSEP
+    # run where all 40 fan-out dispatches errored with
+    # "Cancelled by newer request".
+    # Operator can still override via STRIX_ANCHOR_FANOUT_CONCURRENCY
+    # for environments where the lead doesn't share the agent_id.
+    raw_conc = os.environ.get("STRIX_ANCHOR_FANOUT_CONCURRENCY", "1").strip()
     try:
         concurrency = max(1, min(16, int(raw_conc))) if raw_conc else 1
     except (TypeError, ValueError):
@@ -4173,6 +4280,31 @@ async def _fanout_deep_specialists_across_endpoints(
             wall_time_s=result.wall_time_s,
             raw_result=result.raw_result,
         )
+
+        # iter-Q5.34h — bridge list-shape findings to the host tracer.
+        #
+        # Many L1 wrappers (dalfox, sqlmap, ffuf, smuggler, schemathesis,
+        # etc.) return findings as a plain list in `result["findings"]`.
+        # The iter-35.4 sandbox→host sidecar only catches findings emitted
+        # via `tracer.add_vulnerability_report`; list-shape findings get
+        # silently dropped — they appear in `tool_results.findings_count`
+        # but never reach `vulnerabilities.json`.
+        #
+        # For fan-out specifically the cost of NOT bridging is total: a
+        # 10-URL × 4-tool dispatch produces 0 reportable findings in
+        # vulnerabilities.json even when every dispatch succeeds (as
+        # confirmed by the iter-Q5.34g WAVSEP run that emitted 10 dalfox
+        # XSS findings into tool_results but 0 into vulnerabilities.json).
+        # Bridge here so the L1.5 hook chain + bench harness see them.
+        if result.status in ("ok", "partial") and isinstance(
+            result.raw_result, dict,
+        ):
+            raw_findings = result.raw_result.get("findings") or []
+            if isinstance(raw_findings, list):
+                _bridge_findings_to_tracer(
+                    raw_findings, tool_name=tool_name, url=url,
+                )
+
         bucket = rollup.setdefault(tool_name, {
             "attempted": 0, "succeeded": 0, "findings": 0,
         })

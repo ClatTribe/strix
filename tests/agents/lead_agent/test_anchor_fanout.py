@@ -337,3 +337,193 @@ def test_fanout_specialist_list_is_narrow() -> None:
     sandbox load bounded. If the list grows past that, the cap default
     needs re-thinking."""
     assert len(_FANOUT_DEEP_SPECIALISTS_WEB) <= 6
+
+
+# ---------------------------------------------------------------------------
+# iter-Q5.34h — bridge list-shape findings to host tracer
+# ---------------------------------------------------------------------------
+
+
+def test_fanout_bridges_list_findings_to_tracer(monkeypatch) -> None:
+    """Wrappers like dalfox emit findings as a list in their result
+    dict instead of calling `tracer.add_vulnerability_report`. iter-
+    Q5.34h: fan-out must bridge that list back to the tracer so the
+    L1.5 hook chain + bench harness see those findings."""
+    monkeypatch.setenv("STRIX_ANCHOR_FANOUT", "1")
+
+    # Plant a real workflow URL for the fan-out to dispatch against.
+    record_endpoint_discovered("http://x.test/case1.jsp")
+
+    summary = PrepassSummary(
+        target_type="web_application", target_value="http://x.test/seed",
+    )
+
+    # Track tracer emissions.
+    emissions: list[dict[str, Any]] = []
+
+    class FakeTracer:
+        def add_vulnerability_report(self, **kw: Any) -> str:
+            emissions.append(kw)
+            return "vuln-1"
+
+    fake_tracer = FakeTracer()
+    monkeypatch.setattr(
+        "strix.telemetry.tracer.get_global_tracer",
+        lambda: fake_tracer,
+    )
+
+    async def _fake_execute_tool(tool_name: str, *, agent_state, **kwargs):
+        # Each dispatched tool returns a list-shape finding.
+        return {
+            "status": "ok",
+            "findings": [{
+                "rule_id": f"{tool_name}-rule",
+                "title": f"{tool_name} finding",
+                "severity": "high",
+                "cwe": "CWE-79" if "xss" in tool_name else "CWE-89",
+                "description": f"detected by {tool_name}",
+            }],
+        }
+
+    with mock.patch(
+        "strix.tools.executor.execute_tool",
+        new=mock.AsyncMock(side_effect=_fake_execute_tool),
+    ):
+        asyncio.run(_fanout_deep_specialists_across_endpoints(
+            summary, target_type="web_application",
+            target_value="http://x.test/seed",
+            agent_state=mock.MagicMock(), timeout_s=10,
+        ))
+
+    # 4 specialists × 1 URL = 4 dispatches → 4 bridged tracer emissions.
+    assert len(emissions) == 4, f"expected 4 emissions, got {len(emissions)}"
+
+    # Each tracer call must carry the expected core fields.
+    for em in emissions:
+        assert "title" in em
+        assert "severity" in em
+        assert em["endpoint"] == "http://x.test/case1.jsp"
+        assert "cwe" in em
+        # category should fall back to per-tool hint when not in finding.
+        assert em.get("category") in (
+            "sqli", "xss", "redirect", "vulnerability",
+        )
+
+
+def test_fanout_concurrency_defaults_to_1(monkeypatch) -> None:
+    """Without explicit override, concurrency must be 1 to avoid the
+    sandbox tool_server's same-agent_id cancellation race."""
+    monkeypatch.setenv("STRIX_ANCHOR_FANOUT", "1")
+    monkeypatch.delenv("STRIX_ANCHOR_FANOUT_CONCURRENCY", raising=False)
+    record_endpoint_discovered("http://x.test/a")
+    record_endpoint_discovered("http://x.test/b")
+    summary = PrepassSummary(
+        target_type="web_application", target_value="http://x.test/",
+    )
+
+    # Capture dispatch ordering: if concurrency=1, gather still launches
+    # all coroutines but Semaphore(1) serializes them. Verify by
+    # observing that no two dispatches overlap.
+    overlap_max = {"v": 0}
+    running = {"v": 0}
+
+    async def _fake_exec(*args, **kwargs):
+        running["v"] += 1
+        overlap_max["v"] = max(overlap_max["v"], running["v"])
+        await asyncio.sleep(0)
+        running["v"] -= 1
+        return {"status": "ok", "findings": []}
+
+    with mock.patch(
+        "strix.tools.executor.execute_tool",
+        new=mock.AsyncMock(side_effect=_fake_exec),
+    ):
+        asyncio.run(_fanout_deep_specialists_across_endpoints(
+            summary, target_type="web_application", target_value="http://x.test/",
+            agent_state=mock.MagicMock(), timeout_s=10,
+        ))
+
+    assert overlap_max["v"] == 1, (
+        f"concurrency must default to 1 to avoid sandbox cancel race; "
+        f"observed max overlap {overlap_max['v']}"
+    )
+
+
+def test_fanout_concurrency_override_respected(monkeypatch) -> None:
+    """STRIX_ANCHOR_FANOUT_CONCURRENCY explicitly overrides the
+    serial-by-default behavior for operators who've worked around the
+    cancel-by-agent_id issue (e.g. patched tool_server, multi-agent
+    fan-out)."""
+    monkeypatch.setenv("STRIX_ANCHOR_FANOUT", "1")
+    monkeypatch.setenv("STRIX_ANCHOR_FANOUT_CONCURRENCY", "3")
+    record_endpoint_discovered("http://x.test/a")
+    record_endpoint_discovered("http://x.test/b")
+    record_endpoint_discovered("http://x.test/c")
+    record_endpoint_discovered("http://x.test/d")
+    summary = PrepassSummary(
+        target_type="web_application", target_value="http://x.test/",
+    )
+
+    overlap_max = {"v": 0}
+    running = {"v": 0}
+
+    async def _fake_exec(*args, **kwargs):
+        running["v"] += 1
+        overlap_max["v"] = max(overlap_max["v"], running["v"])
+        await asyncio.sleep(0.01)
+        running["v"] -= 1
+        return {"status": "ok", "findings": []}
+
+    with mock.patch(
+        "strix.tools.executor.execute_tool",
+        new=mock.AsyncMock(side_effect=_fake_exec),
+    ):
+        asyncio.run(_fanout_deep_specialists_across_endpoints(
+            summary, target_type="web_application", target_value="http://x.test/",
+            agent_state=mock.MagicMock(), timeout_s=10,
+        ))
+
+    assert overlap_max["v"] >= 2, (
+        f"override should allow concurrent dispatches; "
+        f"observed max overlap {overlap_max['v']}"
+    )
+
+
+def test_fanout_bridge_swallows_emission_errors(monkeypatch) -> None:
+    """A failing tracer.add_vulnerability_report must not abort the
+    fan-out pass — log + continue."""
+    monkeypatch.setenv("STRIX_ANCHOR_FANOUT", "1")
+    record_endpoint_discovered("http://x.test/case.jsp")
+    summary = PrepassSummary(
+        target_type="web_application", target_value="http://x.test/",
+    )
+
+    class BrokenTracer:
+        def add_vulnerability_report(self, **kw: Any) -> str:
+            raise RuntimeError("simulated tracer failure")
+
+    monkeypatch.setattr(
+        "strix.telemetry.tracer.get_global_tracer",
+        lambda: BrokenTracer(),
+    )
+
+    async def _fake_exec(*args, **kwargs):
+        return {
+            "status": "ok",
+            "findings": [{"title": "x", "severity": "low", "cwe": "CWE-79"}],
+        }
+
+    with mock.patch(
+        "strix.tools.executor.execute_tool",
+        new=mock.AsyncMock(side_effect=_fake_exec),
+    ):
+        # Must complete without raising.
+        asyncio.run(_fanout_deep_specialists_across_endpoints(
+            summary, target_type="web_application", target_value="http://x.test/",
+            agent_state=mock.MagicMock(), timeout_s=10,
+        ))
+
+    # Rollup summary still appended.
+    assert any(
+        tr.tool_name == "anchor_fanout_summary" for tr in summary.tool_results
+    )
