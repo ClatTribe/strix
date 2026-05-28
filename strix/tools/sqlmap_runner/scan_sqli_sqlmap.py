@@ -44,6 +44,78 @@ def _sqlmap_available() -> bool:
     return shutil.which(_SQLMAP_BIN) is not None
 
 
+# ---------------------------------------------------------------------------
+# iter-Q6.1 — autodetect --forms / --crawl on bare URLs
+# ---------------------------------------------------------------------------
+# Q5.34l WAVSEP bench (limit=200) found sqlmap firing 102 times against
+# bare-path URLs like `/wavsep/active/SQL-Injection/.../Case01-X.jsp`
+# (no `?param=value`). Each invocation exited in ~100 ms with
+# `[CRITICAL] no parameter(s) found for testing` and produced ZERO
+# findings — despite sqlmap being one of the best SQLi engines on the
+# planet (Acunetix Wivet rates sqlmap's solo WAVSEP recall ~80%).
+#
+# The fix: when target_url has no query string, auto-add `--forms`
+# (parse <form> elements on the page and test their fields) and
+# `--crawl=2` (follow links 2 levels deep to find more forms). The
+# heuristic is conservative — only triggers when sqlmap would
+# otherwise be guaranteed to find nothing.
+
+
+def _resolve_forms(arg: bool | None, target_url: str | None) -> bool:
+    """Return whether to pass --forms.
+
+    Resolution order: explicit kwarg > env > autodetect.
+    Autodetect = True iff target_url is set and has no query string.
+    """
+    if arg is not None:
+        return bool(arg)
+    env = os.environ.get("STRIX_SQLMAP_FORMS_AUTO", "").strip().lower()
+    if env in {"0", "false", "no", "off"}:
+        return False
+    if not target_url:
+        return False
+    # No query string => sqlmap has no injection point to test from
+    # the URL alone; it needs to discover the form on the page.
+    return "?" not in target_url
+
+
+def _resolve_crawl_depth(arg: int | None, forms: bool) -> int:
+    """Return the --crawl depth to emit. 0 = omit the flag.
+
+    Default depth when forms is True: 2 (matches the canonical
+    `sqlmap -u <url> --forms --crawl=2` invocation in the
+    sqlmap docs for form-driven testing).
+    """
+    if arg is not None:
+        return max(0, int(arg))
+    env = os.environ.get("STRIX_SQLMAP_CRAWL_DEPTH", "").strip()
+    if env:
+        try:
+            return max(0, int(env))
+        except (TypeError, ValueError):
+            pass
+    return 2 if forms else 0
+
+
+def _resolve_timeout(arg: int | None) -> int:
+    """Return the subprocess timeout in seconds.
+
+    Resolution order: explicit kwarg > env > default 300s.
+    Bumped from the hard-coded constant because `--forms --crawl=2`
+    runs take 30-120s per URL (vs 0.1s on the no-param fast-fail
+    path), and fan-out callers may want to extend the budget.
+    """
+    if arg is not None:
+        return max(30, int(arg))
+    env = os.environ.get("STRIX_SQLMAP_TIMEOUT_SECONDS", "").strip()
+    if env:
+        try:
+            return max(30, int(env))
+        except (TypeError, ValueError):
+            pass
+    return _DEFAULT_TIMEOUT_SECONDS
+
+
 # Parser regexes — match sqlmap's canonical findings block format:
 #   sqlmap identified the following injection point(s) with a total of N HTTP(s)...
 #   ---
@@ -115,6 +187,9 @@ def scan_sqli_sqlmap(
     risk: int = 1,
     level: int = 1,
     dbms_hint: str | None = None,
+    forms: bool | None = None,
+    crawl_depth: int | None = None,
+    timeout_seconds: int | None = None,
 ) -> dict[str, Any]:
     """sqlmap batch-mode SQLi verification.
 
@@ -128,6 +203,23 @@ def scan_sqli_sqlmap(
         level: 1-5, default 1 — controls test coverage breadth.
         dbms_hint: optionally pre-narrow the DBMS (``mysql``, ``postgres``,
             ``mssql``, ``oracle``, ``sqlite``) — much faster scan.
+        forms: when True, pass ``--forms`` so sqlmap discovers the HTML
+            forms on the target page and tests their fields. When None
+            (default), auto-detects: True iff ``target_url`` has no
+            query string (i.e. no ``?param=value`` for sqlmap to
+            inject into directly). Env override:
+            ``STRIX_SQLMAP_FORMS_AUTO=0`` disables the autodetect.
+            iter-Q6.1 — without this, sqlmap on a WAVSEP-style URL
+            (`/wavsep/active/SQL-Injection/.../Case01-X.jsp`, no
+            params) exits in ~100 ms with `no parameter(s) found
+            for testing`, producing zero findings.
+        crawl_depth: when set, pass ``--crawl=<depth>`` so sqlmap
+            follows links N levels from ``target_url`` to find
+            additional injection points. When None and ``forms``
+            ends up True, defaults to 2. Set to 0 to suppress.
+            Env override: ``STRIX_SQLMAP_CRAWL_DEPTH``.
+        timeout_seconds: subprocess timeout. Default 300s. Env
+            override: ``STRIX_SQLMAP_TIMEOUT_SECONDS``.
 
     Returns:
         ```
@@ -161,6 +253,16 @@ def scan_sqli_sqlmap(
             ),
         }
 
+    # iter-Q6.1 — autodetect --forms / --crawl when target_url has no
+    # query params. Without this, sqlmap on a bare-path URL exits in
+    # ~100 ms with "no parameter(s) found for testing" and produces
+    # zero findings. WAVSEP cases are the canonical example: the
+    # actual SQL injection point is in a <form> on the page, not in
+    # the URL. The auto-add lets sqlmap discover + test that form.
+    resolved_forms = _resolve_forms(forms, target_url)
+    resolved_crawl = _resolve_crawl_depth(crawl_depth, resolved_forms)
+    resolved_timeout = _resolve_timeout(timeout_seconds)
+
     cmd: list[str] = [
         _SQLMAP_BIN,
         "--batch",       # non-interactive (auto-Y for prompts)
@@ -177,11 +279,15 @@ def scan_sqli_sqlmap(
         cmd.extend(["-r", request_file])
     if data:
         cmd.extend(["--data", data])
+    if resolved_forms:
+        cmd.append("--forms")
+    if resolved_crawl and resolved_crawl > 0:
+        cmd.extend(["--crawl", str(resolved_crawl)])
 
     try:
         result = subprocess.run(  # noqa: S603
             cmd, check=False, capture_output=True,
-            timeout=_DEFAULT_TIMEOUT_SECONDS, text=True,
+            timeout=resolved_timeout, text=True,
         )
     except (subprocess.TimeoutExpired, OSError) as e:
         return {
