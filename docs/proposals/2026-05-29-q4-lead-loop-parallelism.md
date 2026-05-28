@@ -123,7 +123,7 @@ the norm; iter-Q4.3 flips it.
 |---|---|---|
 | **Q4.0** ✅ | sandbox tool_server concurrent-per-agent: `(agent_id, request_id)` keying + contextvar finding-capture sink (removes both the agent_id cancellation AND the `_tracer_lock` serializer) | **NEW — the foundational blocker; shipped** |
 | **Q4.1** ✅ | trace instrumentation — per-turn wall-time JSONL (`<run_dir>/turn_timing.jsonl`) in `base_agent._process_iteration` / `_execute_actions`; records the (model_wall_s, tool_wall_s, tool_names) split per turn. Always-on, `STRIX_TURN_TRACE=0` disables; best-effort (never raises) | **shipped** |
-| **Q4.2** | dependency classifier + wire into `process_tool_invocations` as a **safety guard** (partition into serial-chains + parallel-set; gather only within a set) | **re-scoped: safety-first, lands before any prompt change** |
+| **Q4.2** ✅ | dependency classifier (`strix/tools/tool_dependencies.py`: `TOOL_DEPENDENCIES` table + `partition_independent_calls`) wired into `process_tool_invocations` as a **safety guard** — the batch is layered into dependency-ordered waves (concurrent within a wave, sequential across waves) so a state-reader (e.g. `scan_idor`) never races its state-writer (`seed_auth`/`scan_auth_flow`); an all-independent batch collapses to one wave (== pre-Q4.2 gather) | **shipped — safety-first, lands before any prompt change** |
 | **Q4.3** | A-prompt — nudge the lead to emit independent tools together; re-bench | was "Axis A ship"; now narrower (executor already parallel) |
 | **Q4.4** | Axis B — multi-path fan-out + per-slice workflow_state/tracer isolation | unchanged |
 | **Q4.5** | Axis C — speculative prefetch with `prefetch_safe` registry flag | unchanged |

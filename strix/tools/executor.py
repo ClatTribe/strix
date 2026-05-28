@@ -24,6 +24,7 @@ from .registry import (
     needs_agent_state,
     should_execute_in_sandbox,
 )
+from .tool_dependencies import partition_independent_calls
 
 
 _SERVER_TIMEOUT = float(Config.get("strix_sandbox_execution_timeout") or "120")
@@ -663,6 +664,15 @@ async def process_tool_invocations(
     in the same index order as `tool_invocations` so the conversation
     history reads naturally even when the underlying execution
     interleaved.
+
+    iter-Q4.2 — dependency-safe parallelism. The batch is partitioned
+    into dependency-ordered *waves* (`partition_independent_calls`):
+    calls within a wave run concurrently, waves run strictly in order.
+    A tool that needs another tool's side-effect (e.g. `scan_idor`
+    reading the session `seed_auth` captured) therefore never races
+    its prerequisite, even if the model emits the pair in one turn.
+    A batch with no encoded dependencies collapses to a single wave —
+    identical to the pre-Q4.2 full-parallel gather.
     """
     observation_parts: list[str | None] = [None] * len(tool_invocations)
     all_images: list[dict[str, Any]] = []
@@ -681,13 +691,14 @@ async def process_tool_invocations(
             )
             return idx, obs, imgs, finish
 
-        tasks = [_run_one(i, inv) for i, inv in enumerate(tool_invocations)]
-        results = await _asyncio.gather(*tasks, return_exceptions=False)
-        for idx, obs, imgs, finish in results:
-            observation_parts[idx] = obs
-            all_images.extend(imgs)
-            if finish:
-                should_agent_finish = True
+        for wave in partition_independent_calls(tool_invocations):
+            tasks = [_run_one(i, tool_invocations[i]) for i in wave]
+            results = await _asyncio.gather(*tasks, return_exceptions=False)
+            for idx, obs, imgs, finish in results:
+                observation_parts[idx] = obs
+                all_images.extend(imgs)
+                if finish:
+                    should_agent_finish = True
     else:
         for i, tool_inv in enumerate(tool_invocations):
             observation_xml, images, tool_should_finish = await _execute_single_tool(
