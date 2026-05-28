@@ -1,9 +1,98 @@
 # Q4 — Lead-loop parallelism
 
-**Status:** proposal — pending review
+**Status:** proposal — pending review (code-validated 2026-05-29, see §0)
 **Owner:** ClatTribe/strix
 **Created:** 2026-05-29
 **Related:** Q1 (`docs/proposals/2026-05-27-benchmark-suite-strategy.md`), Q2 (`docs/proposals/2026-05-27-token-reduction-v2-stratified-compaction.md`), Q3 (`docs/proposals/2026-05-27-l1-parity-measurement.md`), Q5 (`docs/proposals/2026-05-27-l2-from-first-principles.md`), iter-33.2 (parallel specialist dispatch — shipped)
+
+---
+
+## 0. Validation addendum (2026-05-29 — read before §3)
+
+After drafting the axes in §3, I validated the load-bearing assumptions
+against the actual code (`strix/agents/base_agent.py`,
+`strix/tools/executor.py`, `strix/agents/workflow_state.py`,
+`strix/telemetry/tracer.py`). **One claim was wrong and one new finding
+emerged. The corrected picture:**
+
+### 0.1 Axis A's executor parallelism is ALREADY SHIPPED
+
+`strix/tools/executor.py:639` `process_tool_invocations()` — labelled
+"Phase 1.7" in-tree — **already runs every tool in a turn concurrently**:
+
+```python
+# executor.py:667-684
+parallel_disabled = os.environ.get("STRIX_PARALLEL_TOOL_DISPATCH", "1").strip() == "0"
+if len(tool_invocations) > 1 and not parallel_disabled:
+    tasks = [_run_one(i, inv) for i, inv in enumerate(tool_invocations)]
+    results = await _asyncio.gather(*tasks, return_exceptions=False)  # ← parallel
+```
+
+Default ON (`STRIX_PARALLEL_TOOL_DISPATCH` defaults to `"1"`). The
+LLM-response parser (`strix/llm/utils.py:80` `parse_tool_invocations`
++ `strix/llm/llm.py:711` `_extract_native_tool_invocations`) already
+returns a **list** of tool calls and iterates all `<function=…>`
+blocks / native `tool_calls[]`. The provider layer is litellm
+(`strix/llm/llm.py:8`), which exposes multi-tool responses uniformly
+across Anthropic / Gemini / OpenAI.
+
+**So §3.1's framing of Axis A as new work is incorrect.** The executor
+half is done. What remains under "Axis A" is narrower:
+
+* **A-prompt** — the lead *rarely emits* multiple tools per turn even
+  though the executor would parallelise them. This is a prompt-level
+  nudge ("when next-actions are independent, emit them together"), not
+  an executor change. Measure first (Q4.1) whether the model complies.
+* **A-safety** — see §0.2. This is now the *priority* part of Axis A,
+  not an optional add-on.
+
+### 0.2 NEW FINDING — the existing parallel dispatch is UNGUARDED
+
+`process_tool_invocations` gathers **all** tools in a turn with **no
+dependency ordering**. If the lead emits, in one response:
+
+```
+seed_auth(...)            # captures a session token
+scan_idor(endpoint=...)   # NEEDS that token
+```
+
+…they race — `scan_idor` may start before `seed_auth` finishes writing
+the auth state to `SecurityContext`. Today this is *latent* (the lead's
+default behaviour is one tool per turn, and the prompt doesn't encourage
+dependent batching), but it is a real correctness hazard the moment
+A-prompt encourages more multi-tool turns.
+
+**Consequence for the iter sequence:** the dependency classifier
+(originally Q4.2, framed as a speedup enabler) is actually a **safety
+precondition** for the already-shipped parallelism, and must land
+*before* A-prompt. Renamed below.
+
+### 0.3 Confirmed unchanged
+
+* **Between-turn execution is strictly sequential** (`base_agent.py:480`
+  `await iteration_task`, `:704` `await tool_task`). Iteration N+1 cannot
+  begin until N's LLM call + all N's tools complete. Wall-time =
+  Σ(iteration times). **This is the real gap — Axis B + Axis C target it
+  correctly.**
+* **workflow_state + tracer are unscoped process-global singletons**
+  (`workflow_state.py:156` `_STATE`; `tracer.py:154` `_global_tracer`).
+  Both have a testing-only reset (`reset_for_testing()` /
+  `set_global_tracer()`) but no per-slice instance mechanism. Axis B's
+  per-slice isolation must be built — confirmed as proposed in §3.2.
+
+### 0.4 Corrected iter sequence (supersedes §5)
+
+| iter | scope | changed from §5? |
+|---|---|---|
+| **Q4.1** | trace instrumentation — per-turn wall-time JSONL in `base_agent.agent_loop` / `_process_iteration` | unchanged |
+| **Q4.2** | dependency classifier + wire into `process_tool_invocations` as a **safety guard** (partition into serial-chains + parallel-set; gather only within a set) | **re-scoped: safety-first, lands before any prompt change** |
+| **Q4.3** | A-prompt — nudge the lead to emit independent tools together; re-bench | was "Axis A ship"; now narrower (executor already parallel) |
+| **Q4.4** | Axis B — multi-path fan-out + per-slice workflow_state/tracer isolation | unchanged |
+| **Q4.5** | Axis C — speculative prefetch with `prefetch_safe` registry flag | unchanged |
+| **Q4.6** | combined A+B+C bench vs ZAP/Burp/Acunetix wall-time | unchanged |
+
+§3 below is the original draft, retained for the design rationale; read
+it through the §0 corrections.
 
 ---
 
