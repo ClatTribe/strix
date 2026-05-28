@@ -3983,6 +3983,208 @@ def _gather_surface_for_dispatcher(
     return forms_out, endpoints_out
 
 
+# ---------------------------------------------------------------------------
+# iter-Q5.34e — anchor-prepass fan-out across crawled URLs
+# ---------------------------------------------------------------------------
+# Phase-1 anchors fire each tool ONCE against the seed URL. For
+# `web_application` / `api` targets where katana / web_crawler /
+# openapi_ingest discover dozens-to-thousands of additional URLs (e.g.
+# WAVSEP's 1,133-case fixture surfaced via /wavsep/scan-entry-points.html),
+# those discoveries today only reach the L2 lead — they never feed back
+# into the L1 deep-specialist tools. Result: 0% recall against WAVSEP
+# in `STRIX_L2_DISABLED=1` runs (iter-Q5.34d bench).
+#
+# This phase re-fires a curated subset of deep specialists per discovered
+# URL. Capped per-tool so we don't fire e.g. sqlmap 1,133 times in a
+# single run; uses STRIX_DISPATCH_CONCURRENCY for the same parallelism
+# the shape-aware dispatcher already uses.
+#
+# Opt-in via STRIX_ANCHOR_FANOUT=1 (default off) — the existing recall
+# numbers are the published baseline; turning this on changes them.
+
+# Per-tool URL cap. Override via STRIX_ANCHOR_FANOUT_LIMIT=N.
+_DEFAULT_FANOUT_LIMIT = 50
+
+# The fan-out tool set is intentionally NARROWER than the per-seed
+# anchor list. Each tool here costs O(N_urls) sandbox calls; fire only
+# the highest-leverage detectors:
+#   * scan_sqli_sqlmap — primary SQL-injection detector (CWE-89)
+#   * scan_xss_dalfox — primary reflected/DOM XSS detector (CWE-79)
+#   * open_redirect_check — open-redirect detector (CWE-601)
+#   * scan_nuclei_templates — broad CVE/template coverage (catches
+#     CWE-22 LFI and many others via the lfi/path-traversal tag set)
+_FANOUT_DEEP_SPECIALISTS_WEB: list[tuple[str, Any]] = [
+    ("scan_sqli_sqlmap", _api_target_url_kwargs),
+    ("scan_xss_dalfox", _api_target_url_kwargs),
+    ("open_redirect_check", _api_target_url_kwargs),
+    ("scan_nuclei_templates", _api_url_kwargs),
+]
+
+
+def _anchor_fanout_enabled() -> bool:
+    """iter-Q5.34e — opt-in switch for the per-URL fan-out phase.
+    Default off; flip with `STRIX_ANCHOR_FANOUT=1`."""
+    return os.environ.get("STRIX_ANCHOR_FANOUT", "").lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _anchor_fanout_limit() -> int:
+    """iter-Q5.34e — per-tool URL cap. Default 50; override with
+    `STRIX_ANCHOR_FANOUT_LIMIT=N`. Clamped to [1, 1000] so an
+    accidental N=100_000 doesn't take a benchmark hostage."""
+    raw = os.environ.get("STRIX_ANCHOR_FANOUT_LIMIT", "").strip()
+    try:
+        n = int(raw) if raw else _DEFAULT_FANOUT_LIMIT
+    except (TypeError, ValueError):
+        return _DEFAULT_FANOUT_LIMIT
+    return max(1, min(1000, n))
+
+
+def _select_fanout_urls(seed_url: str, limit: int) -> list[str]:
+    """Read URLs from workflow_state (populated by crawl_with_katana /
+    web_crawler / openapi_spec_ingest), filter to http(s), dedupe,
+    drop the seed itself (already covered by phase 1), and cap to
+    `limit`. Sorted for determinism."""
+    try:
+        from strix.agents.workflow_state import get_endpoints_discovered_urls
+        urls_all = get_endpoints_discovered_urls()
+    except Exception:  # noqa: BLE001
+        return []
+    seed_norm = (seed_url or "").rstrip("/")
+    out: list[str] = []
+    for url in urls_all:
+        if not isinstance(url, str):
+            continue
+        if not url.lower().startswith(("http://", "https://")):
+            continue
+        if url.rstrip("/") == seed_norm:
+            continue
+        out.append(url)
+        if len(out) >= limit:
+            break
+    return out
+
+
+async def _fanout_deep_specialists_across_endpoints(
+    summary: PrepassSummary,
+    *,
+    target_type: str,
+    target_value: str,
+    agent_state: Any,
+    timeout_s: int,
+) -> None:
+    """iter-Q5.34e — re-fire the deep-specialist subset against each
+    crawled URL (up to the per-tool cap). Mutates `summary` in place.
+
+    Skips entirely when:
+      * `STRIX_ANCHOR_FANOUT` is not set
+      * `target_type` is not in {web_application, api}
+      * No crawled URLs are available in workflow_state
+    """
+    if not _anchor_fanout_enabled():
+        return
+    if target_type not in ("web_application", "api"):
+        return
+
+    limit = _anchor_fanout_limit()
+    urls = _select_fanout_urls(target_value, limit)
+    if not urls:
+        logger.info(
+            "anchor fanout: STRIX_ANCHOR_FANOUT=1 but no crawled URLs "
+            "available — phase skipped",
+        )
+        return
+
+    # Concurrency budget reused from the shape-aware dispatcher's knob
+    # so the operator has one place to control sandbox load.
+    raw_conc = os.environ.get("STRIX_DISPATCH_CONCURRENCY", "1").strip()
+    try:
+        concurrency = max(1, min(16, int(raw_conc))) if raw_conc else 1
+    except (TypeError, ValueError):
+        concurrency = 1
+
+    logger.info(
+        "anchor fanout: %d URL(s), %d specialist(s), concurrency=%d, "
+        "cap=%d/tool",
+        len(urls),
+        len(_FANOUT_DEEP_SPECIALISTS_WEB),
+        concurrency,
+        limit,
+    )
+
+    sem = asyncio.Semaphore(concurrency)
+    rollup: dict[str, dict[str, int]] = {}
+
+    async def _dispatch_one(
+        tool_name: str, builder: Any, url: str, idx: int, total: int,
+    ) -> ToolResult:
+        kwargs = builder(url, "", tool_name)
+        async with sem:
+            result = await _run_one_tool(
+                tool_name, kwargs,
+                agent_state=agent_state, timeout_s=timeout_s,
+            )
+        # Tag the result so it's distinguishable from the per-seed run
+        # of the same tool in `summary.tool_results`.
+        result = ToolResult(
+            tool_name=f"{tool_name}[fanout {idx + 1}/{total}]",
+            status=result.status,
+            findings_count=result.findings_count,
+            error_reason=result.error_reason,
+            wall_time_s=result.wall_time_s,
+            raw_result=result.raw_result,
+        )
+        bucket = rollup.setdefault(tool_name, {
+            "attempted": 0, "succeeded": 0, "findings": 0,
+        })
+        bucket["attempted"] += 1
+        if result.status in ("ok", "partial"):
+            bucket["succeeded"] += 1
+        bucket["findings"] += result.findings_count
+        return result
+
+    tasks: list[Any] = []
+    for tool_name, builder in _FANOUT_DEEP_SPECIALISTS_WEB:
+        per_tool_urls = urls[:limit]
+        for i, url in enumerate(per_tool_urls):
+            tasks.append(_dispatch_one(
+                tool_name, builder, url, i, len(per_tool_urls),
+            ))
+    results: list[Any] = await asyncio.gather(*tasks, return_exceptions=True)
+    for r in results:
+        if isinstance(r, ToolResult):
+            summary.tool_results.append(r)
+            summary.total_findings += r.findings_count
+            if r.status in ("ok", "partial"):
+                summary.tools_succeeded.append(r.tool_name)
+            else:
+                summary.tools_failed.append(r.tool_name)
+            summary.tools_run.append(r.tool_name)
+
+    # Roll-up tool_result so the markdown report shows what fan-out did
+    # in one row instead of N rows. Mirrors the iter-30.3 dispatcher
+    # summary pattern.
+    summary.tool_results.append(ToolResult(
+        tool_name="anchor_fanout_summary",
+        status="ok",
+        findings_count=sum(b["findings"] for b in rollup.values()),
+        raw_result={
+            "status": "ok",
+            "findings": [],
+            "urls_total": len(urls),
+            "concurrency": concurrency,
+            "per_tool": rollup,
+        },
+    ))
+    summary.tools_run.append("anchor_fanout_summary")
+    summary.tools_succeeded.append("anchor_fanout_summary")
+    logger.info(
+        "anchor fanout complete: urls=%d per_tool=%s",
+        len(urls), rollup,
+    )
+
+
 async def run_oss_anchor_prepass(
     *,
     target_type: str,
@@ -4188,6 +4390,23 @@ async def run_oss_anchor_prepass(
             logger.warning(
                 "shape-aware dispatcher raised %s: %s — continuing without "
                 "phase-2.5 dispatch", type(e).__name__, e,
+            )
+
+    # iter-Q5.34e — phase 3: fan out deep specialists (sqlmap / dalfox /
+    # open_redirect_check / nuclei) across the URLs katana / web_crawler
+    # / openapi_ingest registered in workflow_state. The per-seed run
+    # already ran in phase 1; this hits the crawl tree. Opt-in via
+    # STRIX_ANCHOR_FANOUT=1.
+    if target_type in ("api", "web_application"):
+        try:
+            await _fanout_deep_specialists_across_endpoints(
+                summary, target_type=target_type, target_value=target_value,
+                agent_state=agent_state, timeout_s=timeout_s,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "anchor fanout raised %s: %s — continuing without "
+                "phase-3 fan-out", type(e).__name__, e,
             )
 
     summary.wall_time_s = _t.monotonic() - overall_start

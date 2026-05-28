@@ -427,6 +427,17 @@ def advance_phase(
     return True, "ok"
 
 
+def get_endpoints_discovered_urls() -> list[str]:
+    """iter-Q5.34e — return the union of pre- and post-auth discovered
+    URLs as a sorted list. The `snapshot()` view only exposes counts +
+    a sample; callers that need the full URL set (e.g. the anchor-
+    prepass fan-out phase) need this. Pure read; no mutation."""
+    with _LOCK:
+        s = _get_or_create()
+        merged = s.endpoints_discovered | s.post_auth_endpoints_discovered
+    return sorted(merged)
+
+
 def get_current_phase() -> Phase:
     """Fast accessor for the current phase. Doesn't lock — phase
     reads are racy-but-OK (the worst that happens is a tool gate
