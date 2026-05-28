@@ -1,6 +1,9 @@
 import asyncio
 import contextlib
+import json
 import logging
+import os
+import time
 from typing import TYPE_CHECKING, Any, Optional
 
 
@@ -23,6 +26,24 @@ from .state import AgentState
 
 
 logger = logging.getLogger(__name__)
+
+
+def _action_tool_name(action: Any) -> str:
+    """iter-Q4.1 — best-effort tool name from a parsed tool invocation.
+
+    Tool invocations come through as dicts (`{"toolName": ...}`) from
+    `parse_tool_invocations` / `_extract_native_tool_invocations`, but
+    callers occasionally pass objects with a `.tool_name` / `.name`
+    attribute. Degrade to `"?"` rather than raise — this only feeds a
+    diagnostic trace.
+    """
+    if isinstance(action, dict):
+        return str(
+            action.get("toolName") or action.get("tool_name") or action.get("name") or "?"
+        )
+    return str(
+        getattr(action, "tool_name", None) or getattr(action, "name", None) or "?"
+    )
 
 
 class AgentMeta(type):
@@ -94,6 +115,9 @@ class BaseAgent(metaclass=AgentMeta):
             self.llm.set_agent_identity(self.state.agent_name, self.state.agent_id)
         self._current_task: asyncio.Task[Any] | None = None
         self._force_stop = False
+        # iter-Q4.1 — per-turn model-stream wall time, set in
+        # `_process_iteration` and consumed by `_emit_turn_timing`.
+        self._turn_model_wall_s: float | None = None
 
         # Roadmap §8.0: track the last LLM cumulative-stats snapshot
         # we pushed to the agent state, so we can record deltas
@@ -643,12 +667,20 @@ class BaseAgent(metaclass=AgentMeta):
     async def _process_iteration(self, tracer: Optional["Tracer"]) -> bool | None:
         final_response = None
 
+        # iter-Q4.1 — time the model turn (the `llm.generate` stream).
+        # Paired with the tool-execution timer in `_execute_actions`,
+        # this is the per-turn (model_wall, tool_wall) split the Q4
+        # proposal needs to decide whether the lead loop is
+        # model-bound (→ Axis A/C wins) or tool-bound (→ Axis B win).
+        _model_t0 = time.monotonic()
         async for response in self.llm.generate(self.state.get_conversation_history()):
             final_response = response
             if tracer and response.content:
                 tracer.update_streaming_content(self.state.agent_id, response.content)
+        self._turn_model_wall_s = time.monotonic() - _model_t0
 
         if final_response is None:
+            self._emit_turn_timing(tracer, tool_wall_s=0.0, tool_names=[])
             return False
 
         content_stripped = (final_response.content or "").strip()
@@ -665,6 +697,7 @@ class BaseAgent(metaclass=AgentMeta):
                 "and the scan is complete"
             )
             self.state.add_message("user", corrective_message)
+            self._emit_turn_timing(tracer, tool_wall_s=0.0, tool_names=[])
             return False
 
         thinking_blocks = getattr(final_response, "thinking_blocks", None)
@@ -686,6 +719,9 @@ class BaseAgent(metaclass=AgentMeta):
         if actions:
             return await self._execute_actions(actions, tracer)
 
+        # No tool calls this turn (pure-text reasoning) — record a
+        # tool_wall=0 row so the trace still accounts for the turn.
+        self._emit_turn_timing(tracer, tool_wall_s=0.0, tool_names=[])
         return None
 
     async def _execute_actions(self, actions: list[Any], tracer: Optional["Tracer"]) -> bool:
@@ -700,13 +736,30 @@ class BaseAgent(metaclass=AgentMeta):
         )
         self._current_task = tool_task
 
+        # iter-Q4.1 — time the tool-execution half of the turn. Paired
+        # with the model timer in `_process_iteration`, this is the
+        # per-turn split that tells us where wall-time goes.
+        _tool_t0 = time.monotonic()
         try:
             should_agent_finish = await tool_task
             self._current_task = None
         except asyncio.CancelledError:
             self._current_task = None
             self.state.add_error("Tool execution cancelled by user")
+            self._emit_turn_timing(
+                tracer,
+                tool_wall_s=time.monotonic() - _tool_t0,
+                tool_names=[_action_tool_name(a) for a in actions],
+                cancelled=True,
+            )
             raise
+        tool_wall_s = time.monotonic() - _tool_t0
+
+        self._emit_turn_timing(
+            tracer,
+            tool_wall_s=tool_wall_s,
+            tool_names=[_action_tool_name(a) for a in actions],
+        )
 
         self.state.messages = conversation_history
 
@@ -719,6 +772,58 @@ class BaseAgent(metaclass=AgentMeta):
             return True
 
         return False
+
+    def _emit_turn_timing(
+        self,
+        tracer: Optional["Tracer"],
+        *,
+        tool_wall_s: float,
+        tool_names: list[str],
+        cancelled: bool = False,
+    ) -> None:
+        """iter-Q4.1 — append one per-turn timing row to
+        ``<run_dir>/turn_timing.jsonl``.
+
+        Records the (model_wall_s, tool_wall_s) split + the tools the
+        turn dispatched, so the Q4 analysis can quantify whether the
+        lead loop is model-bound (favours Axis A multi-tool / Axis C
+        prefetch) or tool-bound (favours Axis B multi-path fan-out)
+        before any parallelism axis is implemented.
+
+        Best-effort + always-on but cheaply skippable via
+        ``STRIX_TURN_TRACE=0``. Any failure (no run dir, IO error) is
+        swallowed — instrumentation must never break the scan.
+        """
+        if os.environ.get("STRIX_TURN_TRACE", "1").strip().lower() in {
+            "0", "false", "no", "off",
+        }:
+            return
+        try:
+            model_wall_s = getattr(self, "_turn_model_wall_s", None)
+            row = {
+                "agent_id": getattr(self.state, "agent_id", None),
+                "iteration": getattr(self.state, "iteration", None),
+                "model_wall_s": (
+                    round(model_wall_s, 4) if model_wall_s is not None else None
+                ),
+                "tool_wall_s": round(tool_wall_s, 4),
+                "n_tools": len(tool_names),
+                "tool_names": tool_names,
+                "cancelled": cancelled,
+                "ts": time.time(),
+            }
+            if tracer is None or not hasattr(tracer, "get_run_dir"):
+                return
+            run_dir = tracer.get_run_dir()
+            path = run_dir / "turn_timing.jsonl"
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row) + "\n")
+        except Exception:  # noqa: BLE001
+            logger.debug("turn-timing trace emit failed", exc_info=True)
+        finally:
+            # Reset so a stale model time can't bleed into the next
+            # turn if `_process_iteration` somehow doesn't set it.
+            self._turn_model_wall_s = None
 
     def _check_agent_messages(self, state: AgentState) -> None:  # noqa: PLR0912
         try:
