@@ -534,6 +534,137 @@ class TestToDictSerialization:
 # Anti-overfit: no fixture identifiers in implementation
 # ----------------------------------------------------------------------
 
+# ----------------------------------------------------------------------
+# iter-Q5.45 — amass extraction (added alongside subfinder)
+# ----------------------------------------------------------------------
+
+class TestExtractorAmassFallback:
+    def test_amass_subdomains_extracted(self) -> None:
+        summary = PrepassSummary(target_type="domain", target_value="example.com")
+        summary.tool_results.append(ToolResult(
+            tool_name="enumerate_subdomains_amass",
+            status="ok",
+            findings_count=0,
+            raw_result={
+                "status": "ok",
+                "domain": "example.com",
+                "subdomains": ["api.example.com", "mx.example.com"],
+                "total_found": 2,
+            },
+        ))
+        children = _extract_child_assets_from_domain_prepass(
+            summary, "example.com",
+        )
+        hosts = sorted(c["host"] for c in children)
+        assert hosts == ["api.example.com", "mx.example.com"]
+        for c in children:
+            assert c["source"] == "enumerate_subdomains_amass"
+            assert c["asset_type"] == "ip_address"
+
+    def test_amass_apex_excluded(self) -> None:
+        summary = PrepassSummary(target_type="domain", target_value="example.com")
+        summary.tool_results.append(ToolResult(
+            tool_name="enumerate_subdomains_amass",
+            status="ok",
+            findings_count=0,
+            raw_result={"subdomains": ["example.com", "api.example.com"]},
+        ))
+        children = _extract_child_assets_from_domain_prepass(
+            summary, "example.com",
+        )
+        assert [c["host"] for c in children] == ["api.example.com"]
+
+    def test_amass_only_fills_gaps_pipeline_wins(self) -> None:
+        """When pipeline + amass both surface the same host, pipeline wins."""
+        summary = PrepassSummary(target_type="domain", target_value="example.com")
+        summary.tool_results.append(ToolResult(
+            tool_name="domain_recon_pipeline",
+            status="ok",
+            findings_count=0,
+            raw_result={
+                "surface_map": {
+                    "subdomain_triage": [
+                        {"host": "api.example.com", "scheme": "https", "triage": "deep"},
+                    ],
+                },
+            },
+        ))
+        summary.tool_results.append(ToolResult(
+            tool_name="enumerate_subdomains_amass",
+            status="ok",
+            findings_count=0,
+            raw_result={
+                "subdomains": ["api.example.com", "extra.example.com"],
+            },
+        ))
+        children = _extract_child_assets_from_domain_prepass(
+            summary, "example.com",
+        )
+        by_host = {c["host"]: c for c in children}
+        assert by_host["api.example.com"]["source"] == "domain_recon_pipeline"
+        assert by_host["api.example.com"]["asset_type"] == "web_application"
+        assert by_host["extra.example.com"]["source"] == "enumerate_subdomains_amass"
+        assert by_host["extra.example.com"]["asset_type"] == "ip_address"
+
+    def test_amass_only_fills_gaps_subfinder_wins_when_present(self) -> None:
+        """Subfinder runs before amass in the extractor — when both
+        report the same host, subfinder's entry wins."""
+        summary = PrepassSummary(target_type="domain", target_value="example.com")
+        summary.tool_results.append(ToolResult(
+            tool_name="enumerate_subdomains_subfinder",
+            status="ok",
+            findings_count=1,
+            raw_result={"findings": [{"subdomain": "api.example.com", "ip": "1.2.3.4"}]},
+        ))
+        summary.tool_results.append(ToolResult(
+            tool_name="enumerate_subdomains_amass",
+            status="ok",
+            findings_count=0,
+            raw_result={"subdomains": ["api.example.com", "other.example.com"]},
+        ))
+        children = _extract_child_assets_from_domain_prepass(
+            summary, "example.com",
+        )
+        by_host = {c["host"]: c for c in children}
+        # Subfinder ran first → its entry (with IP) stayed.
+        assert by_host["api.example.com"]["source"] == "enumerate_subdomains_subfinder"
+        assert by_host["api.example.com"]["ip"] == "1.2.3.4"
+        # Amass-only host shows amass source.
+        assert by_host["other.example.com"]["source"] == "enumerate_subdomains_amass"
+
+    def test_amass_skips_non_string_entries(self) -> None:
+        summary = PrepassSummary(target_type="domain", target_value="example.com")
+        summary.tool_results.append(ToolResult(
+            tool_name="enumerate_subdomains_amass",
+            status="ok",
+            findings_count=0,
+            raw_result={
+                "subdomains": [
+                    None,
+                    42,
+                    {"name": "garbage"},
+                    "api.example.com",
+                ],
+            },
+        ))
+        children = _extract_child_assets_from_domain_prepass(
+            summary, "example.com",
+        )
+        assert [c["host"] for c in children] == ["api.example.com"]
+
+    def test_amass_with_no_subdomains_list_skipped(self) -> None:
+        summary = PrepassSummary(target_type="domain", target_value="example.com")
+        summary.tool_results.append(ToolResult(
+            tool_name="enumerate_subdomains_amass",
+            status="partial",
+            findings_count=0,
+            raw_result={"reason": "binary missing"},
+        ))
+        assert _extract_child_assets_from_domain_prepass(
+            summary, "example.com",
+        ) == []
+
+
 def test_no_fixture_identifiers_in_q5_44_impl() -> None:
     """Source-grep: extractor must not reference SUT-specific hosts."""
     import inspect

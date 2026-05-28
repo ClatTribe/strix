@@ -71,6 +71,12 @@ RUN go install -ldflags="-s -w" github.com/projectdiscovery/httpx/cmd/httpx@late
  && go install -ldflags="-s -w" github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest \
  && go install -ldflags="-s -w" github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest \
  && go install -ldflags="-s -w" github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
+ # iter-Q5.45 — OWASP amass ships in parallel to subfinder.
+ # Passive by default; catches subdomains subfinder misses via
+ # ASN/BGP enumeration + extra cert-transparency sources. The
+ # Q5.44 child-asset extractor dedupes by host across both
+ # enumerators so duplicates don't double-spawn child scans.
+ && go install -ldflags="-s -w" github.com/owasp-amass/amass/v4/...@master \
  && go install -ldflags="-s -w" github.com/projectdiscovery/naabu/v2/cmd/naabu@latest \
  && go install -ldflags="-s -w" github.com/ffuf/ffuf/v2@latest \
  # iter-21.7 — cosign for Sigstore signature + SLSA / SBOM /
