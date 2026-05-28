@@ -72,6 +72,22 @@ class ToolExecutionRequest(BaseModel):
 class ToolExecutionResponse(BaseModel):
     result: Any | None = None
     error: str | None = None
+    # iter-Q5.31 — sandbox-emitted findings sidecar surfaced as an
+    # explicit field, NOT via piggyback on `result`. The previous
+    # iter-35.4 mechanism (stuff `_sandbox_emitted_findings` key into
+    # the result dict) relied on the `result: Any` field preserving
+    # arbitrary keys through Pydantic + FastAPI's response_model
+    # serialization. In practice, Pydantic 2's serializer for
+    # `Any`-typed fields containing dicts dropped keys that weren't
+    # in the inner type's schema — `SpecialistResult.model_dump()`
+    # produces a dict with exactly the SpecialistResult fields, the
+    # subsequent `result["_sandbox_emitted_findings"] = ...` mutation
+    # was lost across the HTTP boundary even though it survived
+    # in-process. Diagnostic: iter-Q5.31 instrumented
+    # `_propagate_sandbox_findings_to_host` and confirmed the host
+    # received the SpecialistResult-shaped dict WITHOUT the sidecar
+    # key (8 keys = the 8 SpecialistResult fields, no 9th).
+    findings_emitted: list[dict[str, Any]] | None = None
 
 
 _tracer_lock = asyncio.Lock()
@@ -204,7 +220,20 @@ async def execute_tool(
 
     try:
         result = await task
-        return ToolExecutionResponse(result=result)
+        # iter-Q5.31 — extract the sidecar from the result dict (if
+        # attached by `_attach_findings_sidecar`) and put it on the
+        # explicit `findings_emitted` field. The wrapped-result
+        # variant (non-dict tool returns) puts both sidecar + the
+        # original result inside a wrapper dict — unwrap that too so
+        # the host receives the original result shape it expects.
+        findings_emitted = None
+        if isinstance(result, dict):
+            findings_emitted = result.pop("_sandbox_emitted_findings", None)
+            if "_sandbox_wrapped_result" in result and len(result) == 1:
+                result = result.get("_sandbox_wrapped_result")
+        return ToolExecutionResponse(
+            result=result, findings_emitted=findings_emitted,
+        )
 
     except asyncio.CancelledError:
         return ToolExecutionResponse(error="Cancelled by newer request")
