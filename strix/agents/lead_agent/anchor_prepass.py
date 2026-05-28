@@ -5446,17 +5446,23 @@ async def _fanout_deep_specialists_across_endpoints(
         )
         return
 
-    # iter-Q5.34h — fan-out concurrency MUST default to 1. The sandbox
-    # `tool_server` has a one-tool-per-agent_id contract: every new
-    # `/execute` request cancels the previously-running task for the
-    # same agent_id (so the lead's stale tool-call requests don't
-    # accumulate). With STRIX_DISPATCH_CONCURRENCY=4, fan-out's
-    # asyncio.gather races N dispatches through the same agent_id and
-    # each cancels its predecessor — verified by the iter-Q5.34g WAVSEP
-    # run where all 40 fan-out dispatches errored with
-    # "Cancelled by newer request".
-    # Operator can still override via STRIX_ANCHOR_FANOUT_CONCURRENCY
-    # for environments where the lead doesn't share the agent_id.
+    # iter-Q5.34h / iter-Q4.0 — fan-out concurrency.
+    #
+    # Pre-Q4.0 this MUST have defaulted to 1: the sandbox `tool_server`
+    # keyed running tasks by agent_id alone and cancelled the prior
+    # task on every new same-agent `/execute` request. Fan-out fired N
+    # dispatches under ONE agent_id, so each cancelled its predecessor
+    # — verified by the iter-Q5.34g WAVSEP run where all 40 dispatches
+    # errored with "Cancelled by newer request". Default-1 forced the
+    # 200-URL fan-out to run serially (the 2h WAVSEP bench).
+    #
+    # iter-Q4.0 fixed the root cause: the tool_server now keys on
+    # (agent_id, request_id) and the executor sends a unique request_id
+    # per call, so concurrent same-agent dispatches no longer cancel
+    # each other. It is now SAFE to raise STRIX_ANCHOR_FANOUT_CONCURRENCY
+    # above 1. The default stays 1 here so a not-yet-rebuilt sandbox
+    # (still running the pre-Q4.0 tool_server) doesn't regress; iter-Q4.3
+    # will flip the default to N once the rebuilt sandbox is the norm.
     raw_conc = os.environ.get("STRIX_ANCHOR_FANOUT_CONCURRENCY", "1").strip()
     try:
         concurrency = max(1, min(16, int(raw_conc))) if raw_conc else 1

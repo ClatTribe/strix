@@ -5,6 +5,7 @@ import asyncio
 import os
 import signal
 import sys
+import uuid
 from typing import Any
 
 import uvicorn
@@ -70,7 +71,9 @@ app = FastAPI()
 security = HTTPBearer()
 security_dependency = Depends(security)
 
-agent_tasks: dict[str, asyncio.Task[Any]] = {}
+# iter-Q4.0 — keyed by (agent_id, request_id) so concurrent tools
+# under one agent run in parallel instead of cancelling each other.
+agent_tasks: dict[tuple[str, str], asyncio.Task[Any]] = {}
 
 
 def verify_token(credentials: HTTPAuthorizationCredentials) -> str:
@@ -95,6 +98,14 @@ class ToolExecutionRequest(BaseModel):
     agent_id: str
     tool_name: str
     kwargs: dict[str, Any]
+    # iter-Q4.0 — unique per-call id. The running-task registry keys
+    # on (agent_id, request_id) so concurrent tools under one agent
+    # no longer cancel each other (the pre-Q4.0 `agent_id`-only key
+    # cancelled the in-flight task on every new same-agent request,
+    # forcing fan-out to serial). Optional for backward-compat: an
+    # older host that doesn't send it gets a server-generated id, so
+    # each request still keys uniquely.
+    request_id: str | None = None
 
 
 class ToolExecutionResponse(BaseModel):
@@ -118,7 +129,10 @@ class ToolExecutionResponse(BaseModel):
     findings_emitted: list[dict[str, Any]] | None = None
 
 
-_tracer_lock = asyncio.Lock()
+# iter-Q4.0 — the iter-35.4 `_tracer_lock` (held across each tool run
+# to serialise pre/post tracer snapshots) is gone. Per-call finding
+# capture now uses a contextvar sink (tracer._finding_capture_sink),
+# so concurrent tool runs no longer contend on a shared lock.
 
 
 async def _run_tool(agent_id: str, tool_name: str, kwargs: dict[str, Any]) -> Any:
@@ -158,33 +172,33 @@ async def _run_tool(agent_id: str, tool_name: str, kwargs: dict[str, Any]) -> An
 
     converted_kwargs = convert_arguments(tool_func, kwargs)
 
-    # iter-35.4 — pre/post snapshot of the sandbox tracer to capture
-    # findings the tool emitted in-band. The lock keeps concurrent
-    # tool runs from cross-contaminating each other's captures.
-    async with _tracer_lock:
-        sandbox_tracer = _get_sandbox_tracer()
-        pre_count = (
-            len(sandbox_tracer.vulnerability_reports) if sandbox_tracer else 0
-        )
-        try:
-            result = await asyncio.to_thread(tool_func, **converted_kwargs)
-        except BaseException:
-            # Restore pre-call state on failure so a crashed tool
-            # doesn't leave half-emitted findings dangling.
-            if sandbox_tracer is not None:
-                del sandbox_tracer.vulnerability_reports[pre_count:]
-            raise
+    # iter-Q4.0 — per-call contextvar capture sink (replaces the
+    # iter-35.4 `_tracer_lock` + index-snapshot scheme). The old
+    # scheme held `_tracer_lock` across the ENTIRE tool run so two
+    # concurrent tools couldn't interleave their appends to the
+    # shared sandbox tracer's `vulnerability_reports` list — which
+    # serialised every fan-out / multi-tool dispatch and was the
+    # dominant bottleneck behind the 2h WAVSEP bench.
+    #
+    # The sink is contextvar-scoped: each asyncio task gets its own,
+    # and `asyncio.to_thread` copies the context into the worker
+    # thread, so a tool calling `tracer.add_vulnerability_report`
+    # from inside `to_thread` lands its findings in THIS call's sink
+    # (see tracer._finding_capture_sink). No shared mutable state,
+    # no lock, no cross-call contamination — concurrent tools run
+    # truly in parallel.
+    from strix.telemetry.tracer import (
+        pop_finding_capture_sink,
+        push_finding_capture_sink,
+    )
 
-        captured: list[dict[str, Any]] = []
-        if sandbox_tracer is not None and len(
-            sandbox_tracer.vulnerability_reports,
-        ) > pre_count:
-            captured = list(
-                sandbox_tracer.vulnerability_reports[pre_count:],
-            )
-            # Truncate so the sandbox tracer doesn't accumulate state
-            # across tool calls — it's not the authoritative store.
-            del sandbox_tracer.vulnerability_reports[pre_count:]
+    sink, token = push_finding_capture_sink()
+    try:
+        result = await asyncio.to_thread(tool_func, **converted_kwargs)
+    finally:
+        pop_finding_capture_sink(token)
+
+    captured: list[dict[str, Any]] = list(sink)
 
     if captured:
         # Inject the sidecar into the result so the host can re-emit
@@ -193,16 +207,6 @@ async def _run_tool(agent_id: str, tool_name: str, kwargs: dict[str, Any]) -> An
         result = _attach_findings_sidecar(result, captured)
 
     return result
-
-
-def _get_sandbox_tracer() -> Any:
-    """Return the sandbox-side tracer singleton, or None if the
-    tracer subsystem is unavailable (tests, partial init, etc.)."""
-    try:
-        from strix.telemetry.tracer import get_global_tracer
-        return get_global_tracer()
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def _attach_findings_sidecar(
@@ -234,17 +238,30 @@ async def execute_tool(
 
     agent_id = request.agent_id
 
-    if agent_id in agent_tasks:
-        old_task = agent_tasks[agent_id]
-        if not old_task.done():
-            old_task.cancel()
+    # iter-Q4.0 — key the running-task registry on (agent_id,
+    # request_id) instead of agent_id alone. Pre-Q4.0 a new request
+    # for an in-flight agent_id CANCELLED the running task ("newest
+    # request wins per agent"), correct for the sequential L2 lead
+    # but fatal for concurrent dispatch: fan-out fired N tools under
+    # ONE agent_id, so request #2 cancelled #1, #3 cancelled #2 …
+    # only the last survived. That's why fan-out concurrency was
+    # pinned to 1 (serial) and the WAVSEP bench took 2h+.
+    #
+    # request_id is unique per call (host sends a uuid; absent →
+    # server-generated), so there is no collision and no implicit
+    # cancellation. Concurrent tools under one agent now run in
+    # parallel. Orphaned tasks (host stopped awaiting) self-clean at
+    # REQUEST_TIMEOUT via the asyncio.wait_for below — bounded, so
+    # dropping the eager cancel costs nothing in practice.
+    request_id = request.request_id or uuid.uuid4().hex
+    task_key = (agent_id, request_id)
 
     task = asyncio.create_task(
         asyncio.wait_for(
             _run_tool(agent_id, request.tool_name, request.kwargs), timeout=REQUEST_TIMEOUT
         )
     )
-    agent_tasks[agent_id] = task
+    agent_tasks[task_key] = task
 
     try:
         result = await task
@@ -279,8 +296,8 @@ async def execute_tool(
         return ToolExecutionResponse(error=f"Unexpected error: {e}")
 
     finally:
-        if agent_tasks.get(agent_id) is task:
-            del agent_tasks[agent_id]
+        if agent_tasks.get(task_key) is task:
+            del agent_tasks[task_key]
 
 
 @app.post("/register_agent")
@@ -298,8 +315,9 @@ async def health_check() -> dict[str, Any]:
         "sandbox_mode": str(SANDBOX_MODE),
         "environment": "sandbox" if SANDBOX_MODE else "main",
         "auth_configured": "true" if EXPECTED_TOKEN else "false",
-        "active_agents": len(agent_tasks),
-        "agents": list(agent_tasks.keys()),
+        "active_agents": len({a for a, _ in agent_tasks}),
+        "active_tasks": len(agent_tasks),
+        "agents": sorted({a for a, _ in agent_tasks}),
     }
 
 

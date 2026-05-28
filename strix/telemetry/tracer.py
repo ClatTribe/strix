@@ -1,3 +1,4 @@
+import contextvars
 import json
 import logging
 import os
@@ -156,6 +157,53 @@ _global_tracer: Optional["Tracer"] = None
 _OTEL_BOOTSTRAP_LOCK = threading.Lock()
 _OTEL_BOOTSTRAPPED = False
 _OTEL_REMOTE_ENABLED = False
+
+
+# iter-Q4.0 — per-call finding capture sink (contextvar).
+#
+# The sandbox tool_server runs each tool inside its own asyncio task
+# (one per concurrent fan-out / multi-tool dispatch). Pre-Q4.0 it
+# serialised them under `_tracer_lock` held across the whole tool
+# run, because the capture logic (snapshot `vulnerability_reports`
+# length → run tool → slice the new entries) breaks if two tools
+# interleave their appends to the shared list.
+#
+# This contextvar replaces that index-snapshot scheme. When a sink
+# is active, `add_vulnerability_report` routes the finding into the
+# sink and returns WITHOUT touching `self.vulnerability_reports`,
+# running the L1.5 hook chain, or persisting. Each asyncio task sets
+# its own sink (contextvars are task-isolated; `asyncio.to_thread`
+# copies the context into the worker thread so a tool calling the
+# tracer from inside `to_thread` sees the right sink). No shared
+# mutable state ⇒ no lock ⇒ concurrent tools no longer serialise.
+#
+# The host re-emits each captured finding through its OWN tracer
+# (executor `_propagate_sandbox_findings_to_host`) — that is where
+# the real L1.5 hooks fire (iter-35.4). On the host path the sink is
+# never set, so `add_vulnerability_report` behaves exactly as before.
+_finding_capture_sink: contextvars.ContextVar[list[dict[str, Any]] | None] = (
+    contextvars.ContextVar("strix_finding_capture_sink", default=None)
+)
+
+
+def push_finding_capture_sink() -> tuple[list[dict[str, Any]], contextvars.Token]:
+    """Begin capturing emitted findings into a fresh per-call buffer.
+
+    Returns ``(sink, token)``. Pass ``token`` to
+    ``pop_finding_capture_sink`` in a ``finally`` to restore the
+    previous sink. While active, every ``add_vulnerability_report``
+    call on ANY tracer instance routes into ``sink`` instead of the
+    tracer's global store / hook chain.
+    """
+    sink: list[dict[str, Any]] = []
+    token = _finding_capture_sink.set(sink)
+    return sink, token
+
+
+def pop_finding_capture_sink(token: contextvars.Token) -> None:
+    """Restore the capture sink that was active before the matching
+    ``push_finding_capture_sink`` call."""
+    _finding_capture_sink.reset(token)
 
 
 _VALID_KILL_CHAIN_STEP_TYPES: tuple[str, ...] = (
@@ -1920,6 +1968,24 @@ class Tracer:
                 report["is_canonical"] = True
         except Exception:  # noqa: BLE001
             logger.warning("canonical-finding validation failed", exc_info=True)
+
+        # iter-Q4.0 — concurrent sandbox capture short-circuit.
+        # When a per-call capture sink is active (set by
+        # tool_server._run_tool around each concurrent tool run),
+        # route the fully-built report into that sink and return
+        # WITHOUT appending to self.vulnerability_reports, running the
+        # L1.5 hook chain, or persisting. This lets N tools run
+        # concurrently in the sandbox without the cross-call
+        # `_tracer_lock` that previously serialised them — each task's
+        # findings land in its own sink (contextvar-isolated), so
+        # there's no shared-list index race. The host re-emits each
+        # captured finding through its own tracer, where the real
+        # L1.5 hooks fire (iter-35.4). On the host path the sink is
+        # never set, so this is a no-op and the original flow runs.
+        _sink = _finding_capture_sink.get()
+        if _sink is not None:
+            _sink.append(report)
+            return report_id
 
         # iter-25 L1.5 — three deterministic post-enrichment hooks
         # run before fingerprint-dedup and before the row is persisted:
