@@ -131,6 +131,105 @@ def _compose_up() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# iter-Q7.2 — fixture content smoke-test
+# ---------------------------------------------------------------------------
+# A "fixture ready" check that only verifies `/wavsep/scan-entry-points.html`
+# returns 200 doesn't catch the failure mode where the landing page is
+# mounted in but the JSP test cases the page references aren't actually
+# deployed on the server (e.g. `zaproxy/wavsep:latest` ships an empty
+# Tomcat with no /active/ tree). When this happens every fan-out URL
+# 404s and the bench wastes the full wall-time on a phantom corpus,
+# scoring 0% recall plus dalfox pattern-match FPs on Tomcat's encoded
+# error pages.
+#
+# Smoke gate: HEAD the first N expectation URLs from expected-cases.csv.
+# If fewer than `_SMOKE_MIN_HIT_RATE` come back as 2xx/3xx, refuse to
+# run the bench — surfacing the gap in seconds rather than 53 minutes.
+
+
+_SMOKE_PROBE_COUNT = 10
+_SMOKE_MIN_HIT_RATE = 0.5  # ≥50% of probed URLs must be live
+_SMOKE_DISABLE_ENV = "STRIX_WAVSEP_SKIP_FIXTURE_SMOKE"
+
+
+def _smoke_test_expected_cases(
+    target_base: str, expectations: list[Any],
+) -> None:
+    """Sample N expected URLs, HEAD each, fail loudly if hit rate is too low.
+
+    Args:
+        target_base: ``http://host:port`` (no trailing slash).
+        expectations: list of `WavsepExpectation` from
+            `load_expected_cases`. Each carries a `.url_path` like
+            ``/wavsep/active/SQL-Injection/.../Case01-X.jsp``.
+
+    Bypass via ``STRIX_WAVSEP_SKIP_FIXTURE_SMOKE=1`` for diagnostic
+    runs against a known-broken fixture (e.g. when bisecting a
+    bench regression).
+    """
+    if os.environ.get(_SMOKE_DISABLE_ENV, "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }:
+        print(f"[bench] {_SMOKE_DISABLE_ENV} set — skipping fixture smoke test")
+        return
+    if not expectations:
+        print("[bench] smoke test skipped (no expectations to sample)")
+        return
+
+    # Take an evenly-spread sample so we don't only probe one
+    # category (CSV is grouped by category — `expectations[:10]`
+    # would hit only the first one).
+    step = max(1, len(expectations) // _SMOKE_PROBE_COUNT)
+    sample = expectations[::step][:_SMOKE_PROBE_COUNT]
+
+    import urllib.error
+    import urllib.request
+
+    base = target_base.rstrip("/")
+    hits = 0
+    statuses: list[tuple[str, int | str]] = []
+    for exp in sample:
+        url_path = getattr(exp, "url_path", "") or ""
+        if not url_path:
+            continue
+        url = f"{base}{url_path if url_path.startswith('/') else '/' + url_path}"
+        try:
+            req = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                status = resp.status
+                if 200 <= status < 400:
+                    hits += 1
+                statuses.append((url_path, status))
+        except urllib.error.HTTPError as e:
+            statuses.append((url_path, e.code))
+        except (urllib.error.URLError, OSError) as e:
+            statuses.append((url_path, f"err:{type(e).__name__}"))
+
+    probed = len(statuses)
+    hit_rate = (hits / probed) if probed else 0.0
+    print(
+        f"[bench] fixture smoke test: {hits}/{probed} expected URLs "
+        f"live ({hit_rate:.0%}); threshold ≥{_SMOKE_MIN_HIT_RATE:.0%}",
+    )
+    if hit_rate < _SMOKE_MIN_HIT_RATE:
+        # Bring down the doomed compose stack so the operator doesn't
+        # have an orphan container to clean up.
+        _compose_down()
+        sample_str = ", ".join(f"{p}={s}" for p, s in statuses[:5])
+        raise RuntimeError(
+            f"WAVSEP fixture smoke test failed: only {hits}/{probed} "
+            f"of the expected case URLs returned 2xx/3xx (need "
+            f"≥{_SMOKE_MIN_HIT_RATE:.0%}). The deployed image is "
+            f"probably missing the WAVSEP webapp content — running "
+            f"the bench against it would burn wall-time scanning "
+            f"404 pages and emit pattern-match false positives "
+            f"from the error-page URL reflection. First few results: "
+            f"{sample_str}. Bypass with {_SMOKE_DISABLE_ENV}=1 if "
+            f"you intend to diagnose this state."
+        )
+
+
 def _compose_down() -> None:
     compose_file = _FIXTURE_DIR / "docker-compose.yml"
     if not compose_file.is_file():
@@ -334,6 +433,21 @@ def main() -> int:
                 except (subprocess.CalledProcessError, RuntimeError) as exc:
                     print(
                         f"[bench] FAIL: docker compose up failed: {exc}",
+                        file=sys.stderr,
+                    )
+                    return 2
+                # iter-Q7.2 — refuse to scan when the deployed fixture
+                # doesn't actually serve the expected JSPs. Catches the
+                # `zaproxy/wavsep:latest`-style "empty webapp" failure
+                # mode in seconds vs the previous 53-minute waste.
+                try:
+                    _smoke_test_expected_cases(
+                        target_base="http://localhost:8098",
+                        expectations=expectations,
+                    )
+                except RuntimeError as exc:
+                    print(
+                        f"[bench] FAIL: fixture smoke test failed: {exc}",
                         file=sys.stderr,
                     )
                     return 2
