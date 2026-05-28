@@ -120,6 +120,10 @@ against.
 
 ### `ip_address` — Network scan
 
+Wave-2 additions (Q5.50 masscan + Q5.51 ZGrab2) bracket nmap: masscan fires first as the fast port-discovery pass (1000 pkt/s, <1s for top-1000 TCP), nmap follows with deep service-version probing, then ZGrab2 grabs structured app-layer banners on the open ports for downstream tech-stack fingerprinting.
+
+### `ip_address` — Network scan (matrix)
+
 | Layer | Element | Detail |
 |---|---|---|
 | **L1 OSS tools** | Port discovery | **nmap** (via fingerprint_services_nmap) |
@@ -141,7 +145,7 @@ against.
 
 | Layer | Element | Detail |
 |---|---|---|
-| **L1 OSS tools** | Subdomain enum | **subfinder**, **bbot**, **amass** (Q5.45 — passive by default, opt-in active via `STRIX_AMASS_ACTIVE=1`), **crt.sh** (Q5.46 — cert-transparency mining, no binary; kill switch `STRIX_CRTSH_DISABLED=1`) (+ planned: **assetfinder**) |
+| **L1 OSS tools** | Subdomain enum | **subfinder**, **bbot**, **amass** (Q5.45 — passive by default, opt-in active via `STRIX_AMASS_ACTIVE=1`), **crt.sh** (Q5.46 — cert-transparency mining, no binary; kill switch `STRIX_CRTSH_DISABLED=1`) |
 | | DNS hygiene | **checkdmarc** (SPF/DKIM/DMARC/CAA/MTA-STS) |
 | | Typosquats | **dnstwist** |
 | | Pipeline | `domain_recon_pipeline` (orchestrates the above) |

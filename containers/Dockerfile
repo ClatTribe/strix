@@ -78,6 +78,13 @@ RUN go install -ldflags="-s -w" github.com/projectdiscovery/httpx/cmd/httpx@late
  # enumerators so duplicates don't double-spawn child scans.
  && go install -ldflags="-s -w" github.com/owasp-amass/amass/v4/...@master \
  && go install -ldflags="-s -w" github.com/projectdiscovery/naabu/v2/cmd/naabu@latest \
+ # iter-Q5.49 — kiterunner (Assetnote). API-route brute force using
+ # the 50k-route curated wordlist. Sibling to openapi_spec_ingest
+ # in _ANCHORS_API. Wordlist downloaded separately to /opt/kiterunner.
+ && go install -ldflags="-s -w" github.com/assetnote/kiterunner/cmd/kr@latest \
+ # iter-Q5.51 — ZGrab2 (ZMap project). Structured app-layer banner
+ # grabber paired with masscan / nmap.
+ && go install -ldflags="-s -w" github.com/zmap/zgrab2/cmd/zgrab2@latest \
  && go install -ldflags="-s -w" github.com/ffuf/ffuf/v2@latest \
  # iter-21.7 — cosign for Sigstore signature + SLSA / SBOM /
  # VEX attestation verification. The verification code in
@@ -427,6 +434,7 @@ RUN apt-get update \
         jq parallel ripgrep procps htop tmux gdb \
         nmap ncat ndiff sqlmap \
         hydra \
+        masscan \
         libcap2-bin libnss3-tools \
         libnss3 libnspr4 libdbus-1-3 \
         libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libatspi2.0-0 \
@@ -440,6 +448,8 @@ RUN apt-get update \
 
 # nmap needs raw-socket + admin caps for SYN scans / OS detection.
 RUN setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip $(which nmap)
+# iter-Q5.50 — masscan needs the same raw-socket caps to fire SYN packets.
+RUN setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip $(which masscan)
 
 # uv for venv management. Installed system-wide so both root (sandbox setup)
 # and pentester (runtime tool-server) can invoke it.

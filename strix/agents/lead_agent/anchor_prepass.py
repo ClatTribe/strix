@@ -484,6 +484,13 @@ _ANCHORS_API: list[tuple[str, Any]] = [
     #    they CAN'T run from the prepass — they error on missing
     #    endpoints kwarg.
     ("openapi_spec_ingest", _api_target_kwargs),
+    # iter-Q5.49 — kiterunner API-route brute force using the
+    # 50k-route assetnote wordlist. Catches API endpoints the
+    # OpenAPI spec doesn't document (undocumented internal endpoints,
+    # legacy v0/v1 routes, debug paths). Sibling to openapi_spec_ingest;
+    # the two together hit both spec-described and shadow routes.
+    # Kill switch: STRIX_KITERUNNER_DISABLED=1.
+    ("discover_api_endpoints_kiterunner", _api_target_url_kwargs),
     # 2a-bis. iter-35.3 — JS-AST web crawl. Pulls SPA routes from
     #     Angular/React/Vue bundles + robots.txt + sitemap.xml. This
     #     is what the L2 Lead in standard mode wasn't reliably
@@ -697,10 +704,23 @@ _ANCHORS_CONTAINER: list[tuple[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 _ANCHORS_IP: list[tuple[str, Any]] = [
-    # Service / port fingerprinting — first because every other IP
-    # tool benefits from knowing which ports are alive + what's on
-    # them. Takes `target=` (IP literal or CIDR).
+    # iter-Q5.50 — masscan: fast first-pass port discovery. Scans
+    # the top-1000 TCP ports in <1s at 1000 pkt/s, so nmap's
+    # service-version probing only fires against KNOWN-open ports.
+    # Sibling to nmap; running first cuts nmap's wall time on big
+    # IP scans. Kill switch: STRIX_MASSCAN_DISABLED=1.
+    ("fingerprint_services_masscan", _ip_target_kwargs),
+    # Service / port fingerprinting — second, with service-version
+    # probing on the open ports masscan found. Takes `target=`
+    # (IP literal or CIDR).
     ("fingerprint_services_nmap", _ip_target_kwargs),
+    # iter-Q5.51 — ZGrab2 banner grabber. After nmap identifies
+    # open ports, ZGrab2 grabs the structured app-layer banner
+    # (http / ssh / tls / smtp …) — feeds SecurityContext.tech_stack
+    # for downstream nuclei CVE selection. The default 'http' module
+    # matches the most common case; specialists can re-fire with
+    # other modules. Kill switch: STRIX_ZGRAB_DISABLED=1.
+    ("grab_banner_zgrab2", _ip_target_kwargs),
     # HTTP probe — populates SecurityContext.tech_stack for any IP
     # that serves HTTP/HTTPS. Takes `hosts=` (list, even for single
     # target).
