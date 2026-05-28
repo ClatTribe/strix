@@ -63,8 +63,12 @@ from benchmarks.per_target.wavsep_scoring import (
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "web" / "wavsep"
 _DEFAULT_TARGET_URL = os.environ.get(
     "WAVSEP_FIXTURE_URL",
-    # Sandbox tools reach the host fixture via host.docker.internal.
-    "http://host.docker.internal:8098/wavsep/",
+    # iter-Q5.34c — point at the entry-points landing page rather
+    # than `/wavsep/`. WAVSEP's root page intentionally lacks links
+    # (banner: "the index page of the project intentionally lacks
+    # links and forms"). Sandbox tools reach the host fixture via
+    # host.docker.internal.
+    "http://host.docker.internal:8098/wavsep/scan-entry-points.html",
 )
 _DEFAULT_EXPECTED_CSV = os.environ.get(
     "WAVSEP_EXPECTED_CSV",

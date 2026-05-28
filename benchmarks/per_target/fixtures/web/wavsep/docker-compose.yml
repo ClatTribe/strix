@@ -27,10 +27,20 @@ services:
     container_name: bench-wavsep
     ports:
       - "8098:8080"  # 8098 to avoid clashing with the OWASP Benchmark fixture
+    volumes:
+      # iter-Q5.34c — bake in a flat landing page that lists every
+      # WAVSEP test case URL as an <a href>. The WAVSEP root
+      # /wavsep/ documents that it "intentionally lacks links and
+      # forms"; crawlers (katana / sqlmap-crawl / nuclei) dead-end
+      # there. This mount makes /wavsep/scan-entry-points.html serve
+      # the 1,133-link landing page so strix's crawl-then-scan loop
+      # has somewhere to start. Generated deterministically from
+      # expected-cases.csv via generate_entrypoints.py.
+      - ./scan-entry-points.html:/opt/tomcat/webapps/wavsep/scan-entry-points.html:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8080/wavsep/ || exit 1"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 30
-      start_period: 30s
+      retries: 60
+      start_period: 60s
     restart: unless-stopped
