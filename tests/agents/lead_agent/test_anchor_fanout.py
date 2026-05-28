@@ -126,6 +126,68 @@ def test_select_fanout_urls_empty_workflow_returns_empty() -> None:
     assert _select_fanout_urls("http://x.test", 50) == []
 
 
+def test_select_fanout_urls_reads_endpoints_from_tool_results() -> None:
+    """iter-Q5.34f — primary source is `summary.tool_results[i].
+    raw_result.endpoints`. Sandbox-side katana writes URLs to its own
+    sandbox-side workflow_state singleton; the host never sees that.
+    The only data that crosses the sandbox→host boundary is the
+    tool's return value, so the fan-out MUST read from there."""
+    summary = PrepassSummary(target_type="web_application", target_value="http://x.test/")
+    summary.tool_results.append(ToolResult(
+        tool_name="crawl_with_katana",
+        status="ok",
+        findings_count=0,
+        raw_result={
+            "status": "ok",
+            "endpoints": [
+                {"url": "http://x.test/page-a", "method": "GET"},
+                {"url": "http://x.test/page-b", "method": "GET"},
+                {"url": "http://x.test/page-c", "method": "POST"},
+            ],
+        },
+    ))
+    urls = _select_fanout_urls("http://x.test/", 50, summary=summary)
+    assert urls == [
+        "http://x.test/page-a",
+        "http://x.test/page-b",
+        "http://x.test/page-c",
+    ]
+
+
+def test_select_fanout_urls_merges_tool_results_and_workflow_state() -> None:
+    """Both sources contribute; the union is deduped + sorted."""
+    record_endpoint_discovered("http://x.test/from-workflow")
+    summary = PrepassSummary(target_type="web_application", target_value="http://x.test/")
+    summary.tool_results.append(ToolResult(
+        tool_name="crawl_with_katana",
+        status="ok",
+        raw_result={
+            "endpoints": [
+                {"url": "http://x.test/from-tool-result"},
+                {"url": "http://x.test/from-workflow"},  # dupe — should collapse
+            ],
+        },
+    ))
+    urls = _select_fanout_urls("http://x.test/", 50, summary=summary)
+    assert urls == [
+        "http://x.test/from-tool-result",
+        "http://x.test/from-workflow",
+    ]
+
+
+def test_select_fanout_urls_tolerates_string_endpoints() -> None:
+    """Some recon tools emit `endpoints: list[str]` instead of
+    `endpoints: list[dict]` — both forms should work."""
+    summary = PrepassSummary(target_type="web_application", target_value="http://x.test/")
+    summary.tool_results.append(ToolResult(
+        tool_name="some_recon",
+        status="ok",
+        raw_result={"endpoints": ["http://x.test/a", "http://x.test/b"]},
+    ))
+    urls = _select_fanout_urls("http://x.test/", 50, summary=summary)
+    assert urls == ["http://x.test/a", "http://x.test/b"]
+
+
 # ---------------------------------------------------------------------------
 # End-to-end fan-out — patch execute_tool, observe dispatched kwargs
 # ---------------------------------------------------------------------------
