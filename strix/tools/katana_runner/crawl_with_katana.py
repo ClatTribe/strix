@@ -111,34 +111,60 @@ def crawl_with_katana(
             ),
         }
 
-    cmd = [
-        _KATANA_BIN,
-        "-u", target_url.strip(),
-        "-jsonl",
-        "-depth", str(max_depth),
-        "-silent",
-    ]
-    if headless:
-        cmd.extend(["-headless", "-no-sandbox"])
-    if js_crawl:
-        # -jc: parse JS files for endpoints.
-        # -jsl: jsluice (memory-intensive but finds endpoints baked
-        #       into bundled webpack/rollup output).
-        cmd.extend(["-jc", "-jsl"])
-    if extract_forms:
-        cmd.append("-fx")
+    # iter-Q5.34g — STRIX_KATANA_HEADLESS=0 globally forces non-headless.
+    # Set by operators who know their fleet's sandbox image lacks a
+    # working Chromium; avoids paying the headless-attempt round-trip
+    # cost on every crawl.
+    env_headless = (os.environ.get("STRIX_KATANA_HEADLESS") or "").strip().lower()
+    if env_headless in ("0", "false", "no", "off"):
+        headless = False
 
-    try:
-        result = subprocess.run(  # noqa: S603
-            cmd, check=False, capture_output=True,
-            timeout=_DEFAULT_TIMEOUT_SECONDS, text=True,
-        )
-    except (subprocess.TimeoutExpired, OSError) as e:
+    def _run(use_headless: bool) -> subprocess.CompletedProcess | None:
+        cmd = [
+            _KATANA_BIN,
+            "-u", target_url.strip(),
+            "-jsonl",
+            "-depth", str(max_depth),
+            "-silent",
+        ]
+        if use_headless:
+            cmd.extend(["-headless", "-no-sandbox"])
+        if js_crawl:
+            # -jc: parse JS files for endpoints.
+            # -jsl: jsluice (memory-intensive but finds endpoints baked
+            #       into bundled webpack/rollup output).
+            cmd.extend(["-jc", "-jsl"])
+        if extract_forms:
+            cmd.append("-fx")
+        try:
+            return subprocess.run(  # noqa: S603
+                cmd, check=False, capture_output=True,
+                timeout=_DEFAULT_TIMEOUT_SECONDS, text=True,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+
+    result = _run(headless)
+    if result is None:
         return {
             "success": False, "status": "error", "target": target_url,
             "endpoints_discovered": 0, "endpoints": [],
-            "reason": f"katana invocation failed: {type(e).__name__}: {e}",
+            "reason": "katana invocation failed (TimeoutExpired/OSError)",
         }
+
+    # iter-Q5.34g — auto-fallback. The strix-sandbox image's headless
+    # Chromium is unreliable (diagnostic: same target returns 0
+    # endpoints with `-headless -no-sandbox`, 200+ endpoints without).
+    # If we asked for headless and got 0 endpoints with no stdout
+    # produced, retry once without headless. Costs an extra crawl
+    # only in the failing case; preserves SPA JS-routing coverage
+    # for sandboxes where Chromium does work.
+    headless_fallback_attempted = False
+    if headless and not (result.stdout or "").strip():
+        headless_fallback_attempted = True
+        fallback = _run(use_headless=False)
+        if fallback is not None:
+            result = fallback
 
     endpoints: list[dict[str, Any]] = []
     forms: list[dict[str, Any]] = []
@@ -230,4 +256,9 @@ def crawl_with_katana(
         "endpoints": endpoints,
         "forms": forms,
         "forms_discovered": len(forms),
+        # iter-Q5.34g — surface the headless-fallback retry so operators
+        # can see "katana fell back from headless to static" in run logs.
+        # When True, the first attempt (with -headless) produced no
+        # stdout and we re-ran without it.
+        "headless_fallback_used": headless_fallback_attempted,
     }
