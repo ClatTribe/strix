@@ -84,8 +84,20 @@ _BASELINE_DIR.mkdir(exist_ok=True)
 
 
 def _compose_up() -> None:
-    """Bring up the WAVSEP docker-compose stack. First pull is fast
-    (small image); subsequent runs reuse the cached layer."""
+    """Bring up the WAVSEP docker-compose stack + wait for the
+    `/wavsep/` endpoint to respond HTTP 200.
+
+    iter-Q5.34d — `docker compose up --wait` proved unreliable
+    against this fixture: the in-container healthcheck (curl -fsS
+    /wavsep/) reports `unhealthy` even when the same curl from
+    inside the container returns 200, likely because Tomcat takes
+    longer than the start_period to fully deploy the wavsep webapp
+    with the bind-mounted scan-entry-points.html. We replace
+    `--wait` with a host-side poll: bring the container up without
+    `--wait`, then HTTP-poll `/wavsep/scan-entry-points.html` until
+    it serves a 200 (matches the actual readiness gate the bench
+    cares about). Total grace: ~120 seconds.
+    """
     compose_file = _FIXTURE_DIR / "docker-compose.yml"
     if not compose_file.is_file():
         raise FileNotFoundError(
@@ -93,8 +105,29 @@ def _compose_up() -> None:
         )
     print(f"[bench] docker compose up -d -f {compose_file}")
     subprocess.run(  # noqa: S603
-        ["docker", "compose", "-f", str(compose_file), "up", "-d", "--wait"],
+        ["docker", "compose", "-f", str(compose_file), "up", "-d"],
         check=True,
+    )
+    # Host-side readiness poll. The fixture maps container 8080 → host 8098.
+    import urllib.error
+    import urllib.request
+    poll_url = "http://localhost:8098/wavsep/scan-entry-points.html"
+    print(f"[bench] polling {poll_url} for readiness (max 120s)")
+    deadline = time.monotonic() + 120
+    last_err: str | None = None
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(poll_url, timeout=5) as resp:
+                if 200 <= resp.status < 300:
+                    print(f"[bench] fixture ready (HTTP {resp.status})")
+                    return
+                last_err = f"HTTP {resp.status}"
+        except (urllib.error.URLError, OSError) as exc:
+            last_err = str(exc)
+        time.sleep(2)
+    raise RuntimeError(
+        f"WAVSEP fixture failed to become ready within 120s; "
+        f"last error: {last_err}"
     )
 
 
@@ -298,7 +331,7 @@ def main() -> int:
             if not args.no_compose:
                 try:
                     _compose_up()
-                except subprocess.CalledProcessError as exc:
+                except (subprocess.CalledProcessError, RuntimeError) as exc:
                     print(
                         f"[bench] FAIL: docker compose up failed: {exc}",
                         file=sys.stderr,
