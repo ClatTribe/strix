@@ -73,12 +73,42 @@ _DEFAULT_TARGET_URL = os.environ.get(
     # Pointing strix at the root would yield a Tomcat 404 page.
     "OWASP_BENCH_FIXTURE_URL", "http://host.docker.internal:8080/benchmark/",
 )
-_DEFAULT_EXPECTED_CSV = os.environ.get(
-    "OWASP_BENCH_EXPECTED_CSV",
-    str(_FIXTURE_DIR / "expectedresults-1.2.csv"),
-)
 _BASELINE_DIR = Path(__file__).parent / "baseline"
 _BASELINE_DIR.mkdir(exist_ok=True)
+
+
+def _resolve_default_expected_csv() -> str:
+    """Return the best expectedresults-1.2.csv path available.
+
+    iter-Q5.33 — when `--target-type=local_code` runs, the harness
+    extracts the full BenchmarkJava source tree (~2740 test cases)
+    into `<baseline>/_benchmarkjava-src-cache/BenchmarkJava-src/`, and
+    the upstream `expectedresults-1.2.csv` ships inside that tree.
+    Prefer that file (2740 expectations → comparable to the published
+    leaderboard) over the 25-row CI fixture (a non-representative
+    slice that produces statistically meaningless Youden scores).
+
+    Resolution order:
+      1. `OWASP_BENCH_EXPECTED_CSV` env override (operator escape hatch).
+      2. `<baseline>/_benchmarkjava-src-cache/BenchmarkJava-src/expectedresults-1.2.csv`
+         (full 2740 rows, written by Q5.27's source cache).
+      3. `<fixture>/expectedresults-1.2.csv` (25-row CI fixture).
+    """
+    env_override = os.environ.get("OWASP_BENCH_EXPECTED_CSV")
+    if env_override:
+        return env_override
+    cached_full = (
+        _BASELINE_DIR
+        / "_benchmarkjava-src-cache"
+        / "BenchmarkJava-src"
+        / "expectedresults-1.2.csv"
+    )
+    if cached_full.is_file():
+        return str(cached_full)
+    return str(_FIXTURE_DIR / "expectedresults-1.2.csv")
+
+
+_DEFAULT_EXPECTED_CSV = _resolve_default_expected_csv()
 
 
 # ---------------------------------------------------------------------------

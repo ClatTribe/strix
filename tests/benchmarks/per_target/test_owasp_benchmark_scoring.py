@@ -533,3 +533,79 @@ def test_scoring_module_has_no_juiceshop_or_vampi_identifiers():
             f"contains fixture-specific identifier {forbidden!r} — "
             f"the scoring module must be fixture-agnostic."
         )
+
+
+# ---------------------------------------------------------------------------
+# iter-Q5.33 — default expected-CSV resolution prefers cached full corpus
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_default_expected_csv_prefers_cached_full(tmp_path, monkeypatch):
+    """When the full 2740-row CSV is cached under
+    `_benchmarkjava-src-cache/BenchmarkJava-src/`, the harness should
+    pick it over the 25-row CI fixture so Youden numbers are
+    statistically comparable to the published leaderboard."""
+    # Build a fake baseline layout with both files present.
+    baseline = tmp_path / "baseline"
+    cache_root = baseline / "_benchmarkjava-src-cache" / "BenchmarkJava-src"
+    cache_root.mkdir(parents=True)
+    fixture_dir = tmp_path / "fixtures" / "web" / "owasp-benchmark"
+    fixture_dir.mkdir(parents=True)
+    full_csv = cache_root / "expectedresults-1.2.csv"
+    small_csv = fixture_dir / "expectedresults-1.2.csv"
+    full_csv.write_text("# full\n", encoding="utf-8")
+    small_csv.write_text("# small\n", encoding="utf-8")
+
+    # Force the bench module to use our tmp paths.
+    monkeypatch.delenv("OWASP_BENCH_EXPECTED_CSV", raising=False)
+    import benchmarks.per_target.bench_owasp_benchmark as mod
+    monkeypatch.setattr(mod, "_BASELINE_DIR", baseline)
+    monkeypatch.setattr(mod, "_FIXTURE_DIR", fixture_dir)
+
+    chosen = mod._resolve_default_expected_csv()
+    assert chosen == str(full_csv), (
+        "Should pick the cached 2740-row CSV when it exists"
+    )
+
+
+def test_resolve_default_expected_csv_falls_back_to_fixture(tmp_path, monkeypatch):
+    """When the cached corpus is absent, fall back to the CI fixture so
+    a fresh checkout (no source extracted yet) still works."""
+    baseline = tmp_path / "baseline"
+    baseline.mkdir(parents=True)
+    fixture_dir = tmp_path / "fixtures" / "web" / "owasp-benchmark"
+    fixture_dir.mkdir(parents=True)
+    small_csv = fixture_dir / "expectedresults-1.2.csv"
+    small_csv.write_text("# small\n", encoding="utf-8")
+
+    monkeypatch.delenv("OWASP_BENCH_EXPECTED_CSV", raising=False)
+    import benchmarks.per_target.bench_owasp_benchmark as mod
+    monkeypatch.setattr(mod, "_BASELINE_DIR", baseline)
+    monkeypatch.setattr(mod, "_FIXTURE_DIR", fixture_dir)
+
+    chosen = mod._resolve_default_expected_csv()
+    assert chosen == str(small_csv)
+
+
+def test_resolve_default_expected_csv_honors_env_override(tmp_path, monkeypatch):
+    """`OWASP_BENCH_EXPECTED_CSV` env var must win over auto-detection
+    so operators can point at an arbitrary CSV without code changes."""
+    override = tmp_path / "custom.csv"
+    override.write_text("# override\n", encoding="utf-8")
+    monkeypatch.setenv("OWASP_BENCH_EXPECTED_CSV", str(override))
+
+    # Also seed both paths so env wins even when full corpus exists.
+    baseline = tmp_path / "baseline"
+    cache_root = baseline / "_benchmarkjava-src-cache" / "BenchmarkJava-src"
+    cache_root.mkdir(parents=True)
+    (cache_root / "expectedresults-1.2.csv").write_text("# full\n", encoding="utf-8")
+    fixture_dir = tmp_path / "fixtures" / "web" / "owasp-benchmark"
+    fixture_dir.mkdir(parents=True)
+    (fixture_dir / "expectedresults-1.2.csv").write_text("# small\n", encoding="utf-8")
+
+    import benchmarks.per_target.bench_owasp_benchmark as mod
+    monkeypatch.setattr(mod, "_BASELINE_DIR", baseline)
+    monkeypatch.setattr(mod, "_FIXTURE_DIR", fixture_dir)
+
+    chosen = mod._resolve_default_expected_csv()
+    assert chosen == str(override)
