@@ -4021,6 +4021,162 @@ _FANOUT_DEEP_SPECIALISTS_WEB: list[tuple[str, Any]] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# iter-Q5.34j — per-URL tool routing
+# ---------------------------------------------------------------------------
+# Commercial DASTs don't fire every detector at every URL — they route based
+# on URL/param shape (Burp's "audit insertion points", Acunetix's
+# "intelligent fuzzing", Netsparker's "vulnerability profile per URL"). Without
+# routing, fan-out wastes ~50% of dispatches: e.g. sqlmap against a
+# /static/.html with no params, dalfox against an /api/v1/users/123 with a
+# numeric-only ID. Worse, total wall time scales linearly with N_tools ×
+# N_urls when many of those pairs have no signal.
+#
+# Each fan-out specialist gets an "interest predicate" — a fast (no I/O)
+# heuristic on the URL's path + query-param names. The predicate returns
+# True iff the URL has at least one plausible attack surface for that tool.
+
+# Param-name hints — common conventions across web frameworks. Sets so we can
+# do O(1) intersect against the URL's actual param names.
+_SQLI_PARAM_NAMES: frozenset[str] = frozenset({
+    # IDs / FKs / pagination — typical SQLi targets.
+    "id", "uid", "user_id", "userid", "pid", "product_id", "cat_id",
+    "category_id", "item_id", "order_id", "page_id", "post_id",
+    "ref_id", "session_id",
+    # Credentials / login fields.
+    "user", "username", "uname", "email", "login",
+    "password", "passwd", "pwd", "pass",
+    # Search / filter — heavily exercised by sqlmap.
+    "q", "query", "search", "keyword", "kw", "term",
+    "filter", "sort", "order", "orderby", "field", "select",
+    # Pagination.
+    "page", "limit", "offset", "count", "per_page", "pagesize",
+    # Categorization.
+    "category", "cat", "type", "kind", "role", "status",
+    # Generic user input fields that get passed to backend queries.
+    "name", "title", "tag", "alias", "label",
+    "input", "data", "val", "value",
+    "msg", "message", "comment", "subject",
+})
+
+# Params with file-path / include-path semantics — LFI / RFI / path-traversal
+# territory, NOT SQLi or XSS.
+_LFI_PARAM_NAMES: frozenset[str] = frozenset({
+    "file", "filename", "path", "pathname",
+    "include", "inc",
+    "template", "tpl", "view", "viewname", "doc", "document",
+    "show", "display", "open", "load",
+    "img", "image",
+})
+
+# Params with URL semantics — open-redirect / SSRF candidates.
+_REDIRECT_PARAM_NAMES: frozenset[str] = frozenset({
+    "url", "redirect", "redir", "return", "returnurl", "return_url",
+    "next", "next_url", "target", "dest", "destination",
+    "goto", "to", "callback", "continue", "forward",
+    "ref", "referrer", "referer",
+    "redirect_uri", "redirect_url", "u",
+    "r", "back", "back_url", "rurl",
+})
+
+# Path substrings that strongly hint a vuln class. Mostly populated by
+# benchmark-style fixtures (WAVSEP, DVWA, Juice Shop) but real-world auth /
+# search / login URLs also land here as a low-confidence signal.
+_PATH_HINTS_SQLI: tuple[str, ...] = (
+    "/sql-injection/", "/sqli/", "/sql_injection/",
+    "/login", "/signin", "/sign-in", "/auth", "/authenticate",
+)
+_PATH_HINTS_XSS: tuple[str, ...] = (
+    "/xss/", "/rxss/", "/dom-xss/", "/reflected-xss/", "/stored-xss/",
+    "/search", "/comment", "/feedback", "/contact",
+)
+_PATH_HINTS_REDIRECT: tuple[str, ...] = (
+    "/redirect/", "/unvalidated-redirect/", "/open-redirect/",
+    "/sso/", "/oauth/", "/logout",
+)
+
+
+def _routing_enabled() -> bool:
+    """iter-Q5.34j — per-URL tool routing. Default ON; flip with
+    `STRIX_ANCHOR_FANOUT_ROUTING=0` to fall back to firing every fan-out
+    tool against every URL (useful for benchmark ablation)."""
+    raw = (os.environ.get("STRIX_ANCHOR_FANOUT_ROUTING") or "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
+def _has_sqli_signal(parsed: Any, params: set[str]) -> bool:
+    """sqlmap is expensive — fire only when there's at least one
+    plausible injection surface."""
+    if params & _SQLI_PARAM_NAMES:
+        return True
+    path = (parsed.path or "").lower()
+    return any(h in path for h in _PATH_HINTS_SQLI)
+
+
+def _has_xss_signal(parsed: Any, params: set[str]) -> bool:
+    """dalfox is broader — checks reflection of every param it sees. Fire
+    whenever the URL has any non-file/non-redirect-shaped param OR matches
+    an XSS-hinting path."""
+    text_params = params - _LFI_PARAM_NAMES - _REDIRECT_PARAM_NAMES - {
+        "id", "uid", "user_id", "userid", "pid", "page_id",
+    }
+    if text_params:
+        return True
+    path = (parsed.path or "").lower()
+    return any(h in path for h in _PATH_HINTS_XSS)
+
+
+def _has_redirect_signal(parsed: Any, params: set[str]) -> bool:
+    """open-redirect check needs a URL-shaped param OR a redirect-style
+    path. Without those, it's a guaranteed no-op."""
+    if params & _REDIRECT_PARAM_NAMES:
+        return True
+    path = (parsed.path or "").lower()
+    return any(h in path for h in _PATH_HINTS_REDIRECT)
+
+
+def _has_nuclei_signal(parsed: Any, params: set[str]) -> bool:
+    """nuclei runs a broad template corpus (CVE / misconfig / LFI / SSRF /
+    default-creds) — every URL is a potential template match. Fire always."""
+    return True
+
+
+# (tool_name, kwarg_builder, interest_predicate). The order is the order
+# fan-out dispatches them; predicate gates each (URL, tool) pair.
+_FANOUT_TOOL_INTEREST: list[tuple[str, Any, Any]] = [
+    ("scan_sqli_sqlmap", _api_target_url_kwargs, _has_sqli_signal),
+    ("scan_xss_dalfox", _api_target_url_kwargs, _has_xss_signal),
+    ("open_redirect_check", _api_target_url_kwargs, _has_redirect_signal),
+    ("scan_nuclei_templates", _api_url_kwargs, _has_nuclei_signal),
+]
+
+
+def _select_tools_for_url(url: str) -> list[tuple[str, Any]]:
+    """Return the (tool_name, kwarg_builder) pairs whose interest predicate
+    matches this URL. When STRIX_ANCHOR_FANOUT_ROUTING=0 the full
+    `_FANOUT_DEEP_SPECIALISTS_WEB` list is returned (ablation mode)."""
+    if not _routing_enabled():
+        return list(_FANOUT_DEEP_SPECIALISTS_WEB)
+    from urllib.parse import parse_qs, urlparse
+    try:
+        parsed = urlparse(url)
+    except Exception:  # noqa: BLE001
+        return list(_FANOUT_DEEP_SPECIALISTS_WEB)
+    params = set((parse_qs(parsed.query) or {}).keys())
+    out: list[tuple[str, Any]] = []
+    for tool_name, builder, predicate in _FANOUT_TOOL_INTEREST:
+        try:
+            if predicate(parsed, params):
+                out.append((tool_name, builder))
+        except Exception:  # noqa: BLE001
+            # A misbehaving predicate must NOT silently drop the tool.
+            # Worst case: dispatch when we shouldn't — same as no routing.
+            out.append((tool_name, builder))
+    return out
+
+
 def _anchor_fanout_enabled() -> bool:
     """iter-Q5.34e — opt-in switch for the per-URL fan-out phase.
     Default off; flip with `STRIX_ANCHOR_FANOUT=1`."""
@@ -4410,13 +4566,32 @@ async def _fanout_deep_specialists_across_endpoints(
         bucket["findings"] += result.findings_count
         return result
 
+    # iter-Q5.34j — build (url, tool, builder) triples via per-URL routing.
+    # `_select_tools_for_url` returns the full specialist list when
+    # STRIX_ANCHOR_FANOUT_ROUTING=0 (ablation), otherwise filters to tools
+    # whose interest predicate matched.
+    url_tool_pairs: list[tuple[str, str, Any]] = []
+    skipped_pairs: dict[str, int] = {}
+    for url in urls[:limit]:
+        routed = _select_tools_for_url(url)
+        routed_names = {t for t, _ in routed}
+        for tool_name, _ in _FANOUT_DEEP_SPECIALISTS_WEB:
+            if tool_name not in routed_names:
+                skipped_pairs[tool_name] = skipped_pairs.get(tool_name, 0) + 1
+        for tool_name, builder in routed:
+            url_tool_pairs.append((url, tool_name, builder))
+    if skipped_pairs:
+        logger.info(
+            "anchor fanout routing: skipped %d (tool, url) pairs without "
+            "signal: %s",
+            sum(skipped_pairs.values()), skipped_pairs,
+        )
+
     tasks: list[Any] = []
-    for tool_name, builder in _FANOUT_DEEP_SPECIALISTS_WEB:
-        per_tool_urls = urls[:limit]
-        for i, url in enumerate(per_tool_urls):
-            tasks.append(_dispatch_one(
-                tool_name, builder, url, i, len(per_tool_urls),
-            ))
+    for i, (url, tool_name, builder) in enumerate(url_tool_pairs):
+        tasks.append(_dispatch_one(
+            tool_name, builder, url, i, len(url_tool_pairs),
+        ))
     results: list[Any] = await asyncio.gather(*tasks, return_exceptions=True)
     for r in results:
         if isinstance(r, ToolResult):
@@ -4431,6 +4606,13 @@ async def _fanout_deep_specialists_across_endpoints(
     # Roll-up tool_result so the markdown report shows what fan-out did
     # in one row instead of N rows. Mirrors the iter-30.3 dispatcher
     # summary pattern.
+    baseline_dispatches = len(urls[:limit]) * len(_FANOUT_DEEP_SPECIALISTS_WEB)
+    actual_dispatches = len(url_tool_pairs)
+    savings_pct = (
+        round(100 * (baseline_dispatches - actual_dispatches) /
+              max(1, baseline_dispatches), 1)
+        if baseline_dispatches else 0.0
+    )
     summary.tool_results.append(ToolResult(
         tool_name="anchor_fanout_summary",
         status="ok",
@@ -4441,6 +4623,13 @@ async def _fanout_deep_specialists_across_endpoints(
             "urls_total": len(urls),
             "concurrency": concurrency,
             "per_tool": rollup,
+            # iter-Q5.34j routing telemetry — surfaces in the bench
+            # markdown so operators can see how much waste was saved.
+            "routing_enabled": _routing_enabled(),
+            "baseline_dispatches": baseline_dispatches,
+            "actual_dispatches": actual_dispatches,
+            "savings_pct": savings_pct,
+            "skipped_pairs_per_tool": skipped_pairs,
         },
     ))
     summary.tools_run.append("anchor_fanout_summary")
