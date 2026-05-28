@@ -146,12 +146,13 @@ against.
 | | Typosquats | **dnstwist** |
 | | Pipeline | `domain_recon_pipeline` (orchestrates the above) |
 | | Web hygiene | nuclei against `http(s)://<domain>` |
-| **L1 filtration (Q5.44 — pending)** | Catch-all DNS skip | `*.x.com` resolving everywhere → suppress |
-| | Child-asset pivot | Each active subdomain → spawn child `web_application` (if 80/443 open) or `ip_address` (otherwise) |
+| **L1 filtration (Q5.44)** | Child-asset pivot sidecar | `PrepassSummary.child_assets_discovered[]` — extracted from `domain_recon_pipeline.surface_map.subdomain_triage[]` + `subdomain_enum.subdomains[]` + `enumerate_subdomains_subfinder.findings[]`. Each entry: `{host, ip, asset_type, scheme, triage, source}`. Apex excluded; `triage=skip` dropped; pipeline data wins over subfinder. |
+| | Child-asset classification | scheme present (http/https) → `web_application`; no scheme → `ip_address`. Downstream wrappers can re-classify by policy. |
+| | Catch-all DNS skip (pending) | `*.x.com` resolving everywhere → suppress (planned Q5.44b) |
 | **L2 catalog** | Specialists | `send_request`, `terminal_execute` |
 | **Bench** | Headline | No fixture yet (gap per Q5.63) |
 | | Comparator | subfinder vs amass vs assetfinder published rates — no neutral leaderboard |
-| **Status** | | Behind on cert-transparency mining (Q5.46 crt.sh). Q5.44 pivot is the architectural unlock |
+| **Status** | | Q5.44 pivot sidecar ✓ shipped (downstream wrappers can now spawn per-child scans without re-parsing pipeline output). Behind on cert-transparency mining (Q5.46 crt.sh) and catch-all DNS filter (Q5.44b). |
 
 ---
 
@@ -337,7 +338,7 @@ The asset types differ in *what gets filtered*:
 | repository | files (extension + tree position) | Q5.41 (pending) |
 | container_image | image layers | Q5.42 (shipped — opt-in pkg-types/unfixed/platform) |
 | ip_address | open ports | Q5.43 |
-| domain | subdomains | Q5.44 (pending) |
+| domain | subdomains | Q5.44 (shipped — child-asset sidecar) |
 
 But the *shape* is identical — and the iter sequence Q5.40 / Q5.41 /
 Q5.42 / Q5.43 / Q5.44 is just applying that shape to each asset's
