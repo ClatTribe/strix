@@ -228,6 +228,7 @@ def test_fanout_skipped_for_non_web_target(monkeypatch) -> None:
 
 
 def test_fanout_dispatches_each_specialist_per_url(monkeypatch) -> None:
+    monkeypatch.setenv("STRIX_ANCHOR_FANOUT_ROUTING", "0")  # iter-Q5.34j ablation
     """With 2 URLs and 4 fan-out specialists, expect 8 dispatches."""
     monkeypatch.setenv("STRIX_ANCHOR_FANOUT", "1")
     record_endpoint_discovered("http://x.test/a")
@@ -286,6 +287,7 @@ def test_fanout_dispatches_each_specialist_per_url(monkeypatch) -> None:
 
 
 def test_fanout_respects_per_tool_limit(monkeypatch) -> None:
+    monkeypatch.setenv("STRIX_ANCHOR_FANOUT_ROUTING", "0")  # iter-Q5.34j ablation
     """STRIX_ANCHOR_FANOUT_LIMIT caps URLs per tool — verify with 10
     URLs + limit=3."""
     monkeypatch.setenv("STRIX_ANCHOR_FANOUT", "1")
@@ -345,6 +347,7 @@ def test_fanout_specialist_list_is_narrow() -> None:
 
 
 def test_fanout_bridges_list_findings_to_tracer(monkeypatch) -> None:
+    monkeypatch.setenv("STRIX_ANCHOR_FANOUT_ROUTING", "0")  # iter-Q5.34j ablation
     """Wrappers like dalfox emit findings as a list in their result
     dict instead of calling `tracer.add_vulnerability_report`. iter-
     Q5.34h: fan-out must bridge that list back to the tracer so the
@@ -606,3 +609,117 @@ def test_select_fanout_urls_drops_static_and_dedups(monkeypatch) -> None:
     assert not any(".css" in u for u in urls)
     assert not any(".png" in u for u in urls)
     assert not any("delete-user" in u for u in urls)
+
+
+# ---------------------------------------------------------------------------
+# iter-Q5.34j — per-URL tool routing
+# ---------------------------------------------------------------------------
+
+from strix.agents.lead_agent.anchor_prepass import _select_tools_for_url
+
+
+def _tool_names_for(url: str) -> set[str]:
+    return {t for t, _ in _select_tools_for_url(url)}
+
+
+def test_routing_no_param_no_path_hint_only_nuclei() -> None:
+    """URLs with neither params nor SQL/XSS/redirect path hints fall through
+    to nuclei only — the broad-template detector that can find CVEs / CSP
+    issues / misconfigs without a specific signal."""
+    assert _tool_names_for("http://x.test/about") == {"scan_nuclei_templates"}
+    assert _tool_names_for("http://x.test/landing.html") == {"scan_nuclei_templates"}
+
+
+def test_routing_sqli_signal_via_path_and_param() -> None:
+    """sqlmap fires when path looks SQLi-ish OR a param name matches the
+    typical SQLi-target set (id, username, q, search, msg, ...)."""
+    assert "scan_sqli_sqlmap" in _tool_names_for("http://x.test/login")
+    assert "scan_sqli_sqlmap" in _tool_names_for("http://x.test/sqli/Case01.jsp?id=1")
+    assert "scan_sqli_sqlmap" in _tool_names_for("http://x.test/products?id=1")
+    assert "scan_sqli_sqlmap" in _tool_names_for("http://x.test/search?q=foo")
+
+
+def test_routing_xss_signal_excludes_id_only_urls() -> None:
+    """dalfox skips URLs whose only param is a numeric ID — those won't
+    reflect text. It does fire on any text-shaped param."""
+    assert "scan_xss_dalfox" not in _tool_names_for("http://x.test/p?id=1")
+    assert "scan_xss_dalfox" in _tool_names_for("http://x.test/p?q=hello")
+    assert "scan_xss_dalfox" in _tool_names_for("http://x.test/p?msg=foo")
+
+
+def test_routing_redirect_signal_via_url_shaped_param() -> None:
+    """open-redirect runs when a redirect-shaped param appears, OR when
+    the path hints redirect (/redirect/, /sso/, /oauth/)."""
+    assert "open_redirect_check" in _tool_names_for("http://x.test/r?url=foo")
+    assert "open_redirect_check" in _tool_names_for("http://x.test/r?next=/dash")
+    assert "open_redirect_check" in _tool_names_for("http://x.test/oauth/callback")
+    assert "open_redirect_check" not in _tool_names_for("http://x.test/products?id=1")
+
+
+def test_routing_lfi_url_only_gets_nuclei() -> None:
+    """An LFI-shaped URL (?file=...) carries no SQLi/XSS/redirect signal —
+    only nuclei (which has LFI templates) runs. Verifies we don't waste
+    sqlmap/dalfox cycles."""
+    tools = _tool_names_for("http://x.test/view?file=safe.html")
+    assert tools == {"scan_nuclei_templates"}
+
+
+def test_routing_static_url_still_only_nuclei() -> None:
+    """A URL that survived the Q5.34i classifier filter but has no signal
+    falls through to nuclei alone — safer than dropping it entirely."""
+    tools = _tool_names_for("http://x.test/landing")
+    assert tools == {"scan_nuclei_templates"}
+
+
+def test_routing_ablation_via_env(monkeypatch) -> None:
+    """STRIX_ANCHOR_FANOUT_ROUTING=0 disables routing — every tool fires
+    against every URL, restoring the iter-Q5.34e contract. Used by
+    benchmark ablation runs that want to measure the routing's effect."""
+    monkeypatch.setenv("STRIX_ANCHOR_FANOUT_ROUTING", "0")
+    tools = _tool_names_for("http://x.test/about")  # nothing routes to this normally
+    # All 4 specialists are returned.
+    assert tools == {
+        "scan_sqli_sqlmap", "scan_xss_dalfox",
+        "open_redirect_check", "scan_nuclei_templates",
+    }
+
+
+def test_routing_savings_surfaced_in_rollup(monkeypatch) -> None:
+    """The anchor_fanout_summary tool_result must surface
+    `routing_enabled`, `baseline_dispatches`, `actual_dispatches`, and
+    `savings_pct` so the bench markdown can show 'we saved X% of
+    sandbox calls' rather than just the raw run."""
+    monkeypatch.setenv("STRIX_ANCHOR_FANOUT", "1")
+    record_endpoint_discovered("http://x.test/about")        # 1 tool: nuclei
+    record_endpoint_discovered("http://x.test/login")        # 2 tools: sqlmap + nuclei
+    record_endpoint_discovered("http://x.test/search?q=foo") # 3 tools
+    summary = PrepassSummary(
+        target_type="web_application", target_value="http://x.test/seed",
+    )
+
+    async def _fake(*args, **kwargs):
+        return {"status": "ok", "findings": []}
+
+    with mock.patch(
+        "strix.tools.executor.execute_tool",
+        new=mock.AsyncMock(side_effect=_fake),
+    ):
+        asyncio.run(_fanout_deep_specialists_across_endpoints(
+            summary, target_type="web_application",
+            target_value="http://x.test/seed",
+            agent_state=mock.MagicMock(), timeout_s=10,
+        ))
+
+    rollup = [
+        tr for tr in summary.tool_results
+        if tr.tool_name == "anchor_fanout_summary"
+    ]
+    assert len(rollup) == 1
+    raw = rollup[0].raw_result
+    assert raw["routing_enabled"] is True
+    # 3 URLs × 4 tools = 12 baseline; routing trims it.
+    assert raw["baseline_dispatches"] == 12
+    assert raw["actual_dispatches"] < 12, (
+        f"routing should drop dispatches; got actual={raw['actual_dispatches']}"
+    )
+    assert 0 < raw["savings_pct"] <= 100
