@@ -527,3 +527,82 @@ def test_fanout_bridge_swallows_emission_errors(monkeypatch) -> None:
     assert any(
         tr.tool_name == "anchor_fanout_summary" for tr in summary.tool_results
     )
+
+
+# ---------------------------------------------------------------------------
+# iter-Q5.34i — classifier-driven URL filter
+# ---------------------------------------------------------------------------
+
+from strix.agents.lead_agent.anchor_prepass import (
+    _fanout_dedup_key,
+    _should_skip_for_fanout,
+)
+
+
+@pytest.mark.parametrize("url,expected_skip,reason_contains", [
+    ("http://x.test/main.css", True, "static"),
+    ("http://x.test/logo.png", True, "static"),
+    ("http://x.test/bundle.js", True, "static"),
+    ("http://x.test/admin/delete-user", True, "destructive"),
+    ("http://x.test/api/users/123/remove", True, "destructive"),
+    ("http://x.test/products?id=1", False, ""),
+    ("http://x.test/search?q=foo", False, ""),
+    ("http://x.test/wavsep/active/SQL-Injection/Case01.jsp", False, ""),
+])
+def test_should_skip_classifier(url, expected_skip, reason_contains) -> None:
+    skip, reason = _should_skip_for_fanout(url)
+    assert skip is expected_skip
+    if reason_contains:
+        assert reason_contains in reason
+
+
+def test_dedup_key_collapses_query_values() -> None:
+    assert _fanout_dedup_key("http://x.test/p?id=1") == _fanout_dedup_key(
+        "http://x.test/p?id=2",
+    )
+
+
+def test_dedup_key_keeps_distinct_param_names() -> None:
+    assert _fanout_dedup_key("http://x.test/p?id=1") != _fanout_dedup_key(
+        "http://x.test/p?name=foo",
+    )
+
+
+def test_dedup_key_normalizes_trailing_slash() -> None:
+    assert _fanout_dedup_key("http://x.test/page/") == _fanout_dedup_key(
+        "http://x.test/page",
+    )
+
+
+def test_select_fanout_urls_drops_static_and_dedups(monkeypatch) -> None:
+    """End-to-end: a katana-style endpoint list with the typical mix
+    of static assets, destructive endpoints, and value-only query
+    variations gets filtered down to one row per shape."""
+    summary = PrepassSummary(target_type="web_application", target_value="http://x.test/")
+    summary.tool_results.append(ToolResult(
+        tool_name="crawl_with_katana",
+        status="ok",
+        raw_result={
+            "endpoints": [
+                {"url": "http://x.test/products?id=1"},
+                {"url": "http://x.test/products?id=2"},      # query-value dup
+                {"url": "http://x.test/products?id=3"},      # query-value dup
+                {"url": "http://x.test/main.css"},           # static
+                {"url": "http://x.test/logo.png"},           # static
+                {"url": "http://x.test/admin/delete-user"},  # destructive
+                {"url": "http://x.test/search?q=foo"},       # distinct shape
+                {"url": "http://x.test/about"},              # distinct shape
+            ],
+        },
+    ))
+    urls = _select_fanout_urls("http://x.test/", 50, summary=summary)
+    # /products?id (1 shape), /search?q (1 shape), /about (1 shape) = 3 URLs
+    assert len(urls) == 3
+    # Either /products?id=1 OR ?id=2 OR ?id=3 — depends on sort — but
+    # one of the three.
+    assert any("products" in u for u in urls)
+    assert any("search" in u for u in urls)
+    assert any("about" in u for u in urls)
+    assert not any(".css" in u for u in urls)
+    assert not any(".png" in u for u in urls)
+    assert not any("delete-user" in u for u in urls)
