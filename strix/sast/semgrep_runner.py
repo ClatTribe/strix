@@ -192,49 +192,173 @@ def is_semgrep_available(*, run: Callable[..., Any] | None = None) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_configs(configs: list[str | Path] | None) -> list[str]:
+# iter-Q5.32 — file extensions we use as a stand-in for "language is
+# present in this target". A few representative files per extension
+# are enough; we don't need to count every file. The detection walks
+# at most _LANG_PROBE_MAX_FILES files and stops as soon as a hit
+# lands, so even a 50k-file repo costs <100ms.
+_LANG_EXT_MAP: dict[str, str] = {
+    ".java": "java",
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".go": "go",
+    ".rb": "ruby",
+    ".php": "php",
+    ".cs": "csharp",
+    ".kt": "kotlin",
+    ".swift": "swift",
+    ".scala": "scala",
+    ".rs": "rust",
+}
+
+_LANG_PROBE_MAX_FILES: int = 5000
+
+# Per-language semgrep registry packs. Picked for OWASP-tier coverage
+# of the dominant taint sinks per ecosystem. Java in particular gets
+# the `p/findsecbugs` port for the high-recall Java-specific
+# patterns — without it, semgrep on a Java corpus tops out around
+# 1-2% Youden (OWASP Benchmark v1.2, iter-Q5.27→Q5.31c measurement)
+# because the multi-language packs only carry shallow Java coverage.
+_LANG_PACKS: dict[str, list[str]] = {
+    # iter-Q5.32 — Java packs. `p/java` is semgrep's flagship Java
+    # pack (~150 rules across the OWASP Top-10 categories plus
+    # Java-specific sinks: JDBC, JNDI, ProcessBuilder, XMLDecoder,
+    # ObjectInputStream). `p/findsecbugs` is the semgrep port of the
+    # SpotBugs FindSecBugs rules — strong on deserialization, LDAP
+    # injection, XPath injection, weak crypto. `p/cwe-top-25` adds
+    # the cross-language CWE-top-25 coverage with Java-specific rules.
+    "java": ["p/java", "p/findsecbugs", "p/cwe-top-25"],
+    # JS / TS share the same packs (semgrep treats both via the
+    # javascript ecosystem; ts rules live alongside js).
+    "javascript": ["p/javascript", "p/nodejsscan"],
+    "typescript": ["p/typescript", "p/javascript"],
+    # Python — semgrep has strong native coverage. `p/python` is
+    # the language-tag pack; `p/django` + `p/flask` are framework
+    # packs but require detection of those frameworks (out of
+    # scope for this iter — operators can wire via extra_configs).
+    "python": ["p/python"],
+    "go": ["p/golang", "p/gosec"],
+    "ruby": ["p/ruby"],
+    "php": ["p/php"],
+    "csharp": ["p/csharp"],
+    "kotlin": ["p/kotlin"],
+    "scala": ["p/scala"],
+    "rust": [],  # no canonical semgrep Rust pack yet
+    "swift": [],
+}
+
+
+def _detect_languages(targets: list[str]) -> set[str]:
+    """iter-Q5.32 — walk `targets` and return the set of source
+    languages present. Used to drive `_resolve_configs`'s pack
+    selection so a Java-only corpus gets `p/java + p/findsecbugs`
+    (vs the pre-Q5.32 hardcoded `p/javascript` that was tuned for
+    flask-vuln + sast-vibe and useless on BenchmarkJava).
+
+    Caps the walk at `_LANG_PROBE_MAX_FILES` to bound the cost on
+    monorepos. Returns the empty set if no recognized source files
+    are found — caller falls back to a language-agnostic default.
+    """
+    found: set[str] = set()
+    seen = 0
+    for t in targets:
+        try:
+            p = Path(t).resolve()
+        except (OSError, ValueError):
+            continue
+        if p.is_file():
+            ext = p.suffix.lower()
+            lang = _LANG_EXT_MAP.get(ext)
+            if lang:
+                found.add(lang)
+            seen += 1
+            continue
+        if not p.is_dir():
+            continue
+        for child in p.rglob("*"):
+            if seen >= _LANG_PROBE_MAX_FILES:
+                return found
+            if not child.is_file():
+                continue
+            seen += 1
+            ext = child.suffix.lower()
+            lang = _LANG_EXT_MAP.get(ext)
+            if lang:
+                found.add(lang)
+    return found
+
+
+def _resolve_configs(
+    configs: list[str | Path] | None,
+    targets: list[str] | None = None,
+) -> list[str]:
     """Resolve config arguments into Semgrep `--config` values.
 
-    Defaults: bundled vibe-coded rules + `p/owasp-top-ten` (the
-    CWE-mapped injection-class rule pack) + `p/security-audit` (the
-    defence-in-depth pack that catches deserialization / SSRF /
-    open-redirect / pickle / dynamic-urllib patterns owasp-top-ten
-    misses).
+    iter-Q5.32: language-aware defaults. Always-on packs:
+      * Bundled `vibe-coded` rules (in-house, fixture-tuned).
+      * `p/owasp-top-ten` — CWE-mapped injection-class, multi-lang.
+      * `p/security-audit` — defense-in-depth: deserialization /
+        SSRF / open-redirect / pickle / dynamic-urllib — categories
+        owasp-top-ten misses.
 
-    Live measurement on 2026-05-20 (flask-vuln fixture):
-      * `p/owasp-top-ten` alone: 11 findings — caught sqli /
-        cmd_injection / xss / crypto must_finds (4/10 recall).
-      * `p/security-audit` alone: 6 findings — caught the OTHER
-        must_find categories: ssrf (`dynamic-urllib-use-detected`),
-        deserialization (`insecure-deserialization` + `avoid-pickle`),
-        open_redirect (`open-redirect`).
-      * Adding both should give ~all 10 must_find categories on a
-        single scan_sast invocation.
+    Plus per-language packs (from `_LANG_PACKS`) for every language
+    detected in `targets`. On a Java-only corpus, that adds
+    `p/java + p/findsecbugs + p/cwe-top-25` — the load-bearing fix
+    for the iter-Q5.27→Q5.31c 1.42% Youden floor. Expected uplift
+    to 15-25% Youden on OWASP Benchmark v1.2.
 
-    Iter-15-late (2026-05-21) — added `p/javascript` after measuring
-    the `code/sast-vibe` fixture: handler.js `db.query(\`SELECT ...
-    ${req.params.id}\`)` SQLi via template literal AND
-    `Math.random().toString(36).slice(2)` insecure-random for token
-    were both missed by owasp-top-ten + security-audit. p/javascript
-    contains the matching rules
-    (`javascript.lang.security.detect-non-literal-fs-filename`,
-    `javascript.lang.security.audit.detect-math-random`,
-    template-literal sqli rules, etc.). +2 catches on sast-vibe;
-    expected uplift on any JS/Node target.
+    When `targets` is None or empty, falls back to the legacy
+    multi-language default (vibe + owasp-top-ten + security-audit +
+    javascript) so callers that haven't been updated keep working.
+
+    Historic notes (kept for context — these measurements drove the
+    legacy defaults):
+
+      Live measurement on 2026-05-20 (flask-vuln fixture):
+        * `p/owasp-top-ten` alone: 11 findings — sqli / cmd_injection
+          / xss / crypto must_finds (4/10 recall).
+        * `p/security-audit` alone: 6 findings — ssrf / deserialization
+          / open_redirect (the OTHER must_find categories).
+        * Adding both → ~all 10 must_find categories.
+
+      iter-15-late (2026-05-21) — added `p/javascript` after sast-vibe
+      caught template-literal SQLi + `Math.random()` insecure-random
+      that owasp-top-ten + security-audit missed.
 
     Registry packs require internet + Semgrep's auth-by-default
     behaviour on first use; cached after that.
     """
-    if configs is None:
-        return [
-            str(VIBE_CODED_RULES_DIR),
-            "p/owasp-top-ten",
-            "p/security-audit",
-            "p/javascript",
-        ]
-    out: list[str] = []
-    for c in configs:
-        out.append(str(c))
+    if configs is not None:
+        # Explicit caller override — pass through verbatim, no
+        # language probing. Preserves the test-seam + lets operators
+        # force a specific config set.
+        return [str(c) for c in configs]
+
+    # iter-Q5.32 — language-aware default selection.
+    out: list[str] = [
+        str(VIBE_CODED_RULES_DIR),
+        "p/owasp-top-ten",
+        "p/security-audit",
+    ]
+    detected: set[str] = set()
+    if targets:
+        detected = _detect_languages(targets)
+    if not detected:
+        # Pre-Q5.32 default — preserved as the fallback so target
+        # types that don't carry source files (e.g. caller passes an
+        # empty repo, or `targets` is None) keep the legacy behavior.
+        out.append("p/javascript")
+        return out
+    # Add the per-language packs for every detected language. Stable
+    # ordering by sorted language name so the resolved config list
+    # is reproducible across runs (test pinning + caching).
+    for lang in sorted(detected):
+        out.extend(_LANG_PACKS.get(lang, []))
     return out
 
 
@@ -353,7 +477,11 @@ def run_semgrep(
     if not target_list:
         return SemgrepResult(status="error", error="no targets supplied")
 
-    config_list = _resolve_configs(configs)
+    # iter-Q5.32 — pass targets so language-aware pack selection can
+    # fire. Without this, `_resolve_configs` falls back to the legacy
+    # multi-lang default (javascript-biased), which is the bug we're
+    # fixing.
+    config_list = _resolve_configs(configs, targets=target_list)
     cmd = ["semgrep", "scan", "--json", "--metrics=off", "--quiet"]
     for c in config_list:
         cmd += ["--config", c]

@@ -26,8 +26,11 @@ from strix.sast.semgrep_runner import (
     SemgrepResult,
     VIBE_CODED_RULES_DIR,
     _CWE_TO_CATEGORY,
+    _LANG_PACKS,
+    _detect_languages,
     _infer_language_from_path,
     _normalise_finding,
+    _resolve_configs,
     is_semgrep_available,
     run_semgrep,
 )
@@ -338,3 +341,150 @@ def test_vibe_coded_rules_dir_exists() -> None:
     yaml_files = list(VIBE_CODED_RULES_DIR.glob("*.yml"))
     # 9 rules per the README; allow drift in either direction.
     assert len(yaml_files) >= 8, [p.name for p in yaml_files]
+
+
+# ---------------------------------------------------------------------------
+# iter-Q5.32 — language-aware pack selection
+# ---------------------------------------------------------------------------
+
+
+def test_detect_languages_picks_up_java_files(tmp_path: Path) -> None:
+    """Java files in the target tree → 'java' in the detected set.
+    Foundational for the OWASP BenchmarkJava SAST headline — without
+    detection, semgrep ran with `p/javascript` on a Java corpus and
+    scored 1.42% Youden (pre-Q5.32)."""
+    (tmp_path / "Foo.java").write_text("class Foo {}\n")
+    (tmp_path / "Bar.java").write_text("class Bar {}\n")
+    langs = _detect_languages([str(tmp_path)])
+    assert "java" in langs
+
+
+def test_detect_languages_finds_multiple_languages(tmp_path: Path) -> None:
+    """Mixed-language repos (e.g. paired web+code fixtures) get
+    packs for every language present."""
+    (tmp_path / "Foo.java").write_text("class Foo {}\n")
+    (tmp_path / "app.py").write_text("print(1)\n")
+    (tmp_path / "main.go").write_text("package main\n")
+    langs = _detect_languages([str(tmp_path)])
+    assert {"java", "python", "go"}.issubset(langs)
+
+
+def test_detect_languages_empty_for_non_source_target(tmp_path: Path) -> None:
+    """A target with no recognized source files → empty set,
+    triggering the language-agnostic fallback in _resolve_configs."""
+    (tmp_path / "README.md").write_text("# Empty\n")
+    (tmp_path / "data.json").write_text("{}\n")
+    langs = _detect_languages([str(tmp_path)])
+    assert langs == set()
+
+
+def test_detect_languages_handles_file_target(tmp_path: Path) -> None:
+    """Single-file target (not a dir) — the helper accepts either."""
+    f = tmp_path / "Single.java"
+    f.write_text("class Single {}\n")
+    langs = _detect_languages([str(f)])
+    assert langs == {"java"}
+
+
+def test_detect_languages_handles_nonexistent_path_gracefully() -> None:
+    """Defensive: bogus paths return empty set, don't raise."""
+    langs = _detect_languages(["/this/does/not/exist/anywhere"])
+    assert langs == set()
+
+
+def test_resolve_configs_java_picks_java_packs(tmp_path: Path) -> None:
+    """Java-only target → vibe + owasp-top-ten + security-audit +
+    java-specific packs (p/java + p/findsecbugs + p/cwe-top-25).
+    The load-bearing fix for OWASP Benchmark v1.2 SAST headline."""
+    (tmp_path / "Foo.java").write_text("class Foo {}\n")
+    configs = _resolve_configs(None, targets=[str(tmp_path)])
+    # Always-on packs present.
+    assert str(VIBE_CODED_RULES_DIR) in configs
+    assert "p/owasp-top-ten" in configs
+    assert "p/security-audit" in configs
+    # Java packs present.
+    assert "p/java" in configs
+    assert "p/findsecbugs" in configs
+    assert "p/cwe-top-25" in configs
+    # JavaScript pack NOT present — was the iter-Q5.32 fix.
+    assert "p/javascript" not in configs
+
+
+def test_resolve_configs_javascript_picks_js_packs(tmp_path: Path) -> None:
+    """JS / Node target → p/javascript + p/nodejsscan, no Java packs."""
+    (tmp_path / "app.js").write_text("console.log(1)\n")
+    configs = _resolve_configs(None, targets=[str(tmp_path)])
+    assert "p/javascript" in configs
+    assert "p/nodejsscan" in configs
+    assert "p/java" not in configs
+    assert "p/findsecbugs" not in configs
+
+
+def test_resolve_configs_python_picks_python_pack(tmp_path: Path) -> None:
+    """Python target → p/python."""
+    (tmp_path / "app.py").write_text("print(1)\n")
+    configs = _resolve_configs(None, targets=[str(tmp_path)])
+    assert "p/python" in configs
+
+
+def test_resolve_configs_mixed_languages_includes_all_packs(
+    tmp_path: Path,
+) -> None:
+    """Paired-asset fixture (e.g. vibe-app with Java + JS) → packs
+    for every language detected."""
+    (tmp_path / "Foo.java").write_text("class Foo {}\n")
+    (tmp_path / "app.js").write_text("console.log(1)\n")
+    configs = _resolve_configs(None, targets=[str(tmp_path)])
+    assert "p/java" in configs
+    assert "p/javascript" in configs
+
+
+def test_resolve_configs_no_targets_falls_back_to_legacy_default() -> None:
+    """When `targets` is None or empty (callers that haven't been
+    updated to pass targets), the legacy default fires so the
+    pre-Q5.32 behavior is preserved."""
+    configs = _resolve_configs(None, targets=None)
+    assert str(VIBE_CODED_RULES_DIR) in configs
+    assert "p/owasp-top-ten" in configs
+    assert "p/security-audit" in configs
+    # Legacy default included p/javascript — preserved.
+    assert "p/javascript" in configs
+
+
+def test_resolve_configs_explicit_configs_passes_through(
+    tmp_path: Path,
+) -> None:
+    """Explicit caller config list bypasses language detection —
+    test seam preserved for operators who want full control."""
+    (tmp_path / "Foo.java").write_text("class Foo {}\n")
+    custom = ["p/custom-pack", "/path/to/rules.yml"]
+    configs = _resolve_configs(custom, targets=[str(tmp_path)])
+    assert configs == ["p/custom-pack", "/path/to/rules.yml"]
+    # Java-detection did NOT kick in.
+    assert "p/java" not in configs
+
+
+def test_resolve_configs_no_source_files_uses_legacy_default(
+    tmp_path: Path,
+) -> None:
+    """Target dir has no recognized source files → empty detected
+    set → legacy fallback (don't dump unnecessary language packs)."""
+    (tmp_path / "README.md").write_text("# Docs only\n")
+    configs = _resolve_configs(None, targets=[str(tmp_path)])
+    # Same as no-targets fallback.
+    assert "p/javascript" in configs
+
+
+def test_lang_packs_table_covers_advertised_languages() -> None:
+    """Anti-overfit guard: `_LANG_PACKS` must contain entries for
+    every language we claim to support in `_LANG_EXT_MAP`. If a new
+    extension is added but the pack map isn't, the language silently
+    gets zero packs (bad)."""
+    from strix.sast.semgrep_runner import _LANG_EXT_MAP
+    expected_langs = set(_LANG_EXT_MAP.values())
+    actual_langs = set(_LANG_PACKS.keys())
+    missing = expected_langs - actual_langs
+    assert not missing, (
+        f"Languages without entries in _LANG_PACKS: {missing}. "
+        f"Add a list of registry packs (or [] if no canonical pack exists)."
+    )
