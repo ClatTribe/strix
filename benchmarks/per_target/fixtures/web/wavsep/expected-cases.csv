@@ -1,0 +1,75 @@
+# WAVSEP v1.5 expected-cases ground truth (iter-Q5.34 starter set).
+# Format: url_path,category,is_real_vulnerability,cwe
+#
+# `url_path` — path component (no scheme/host) that uniquely identifies
+#              a WAVSEP test case. The harness matches strix's emitted
+#              finding endpoints against these by substring.
+# `category` — canonical OWASP_BENCHMARK_CATEGORIES name (kept aligned
+#              with owasp_benchmark_scoring.OWASP_BENCHMARK_CATEGORIES
+#              so the two harnesses share CWE → category math).
+# `is_real_vulnerability` — true / false. WAVSEP's `active` test cases
+#              are real vulns; `false-positive-test` cases are not.
+# `cwe` — bare integer.
+#
+# Coverage starter set (60 cases): sqli + rxss + lfi + pathtraver +
+# redirect, with active-vulnerable and false-positive subdirs sampled
+# from each. Expand by appending — the harness reloads on every run.
+# Source: WAVSEP test case layout, sectoolMarket WAVSEP corpus.
+#
+url_path,category,is_real_vulnerability,cwe
+# --- SQL Injection (CWE-89) — active/vulnerable test cases ---
+/wavsep/active/SQL-Injection/SInjection-Detection-Evaluation-GET-200Error/Case01-InjectionInLogin-String-LoginBypass-WithErrors.jsp,sqli,true,89
+/wavsep/active/SQL-Injection/SInjection-Detection-Evaluation-GET-200Error/Case02-InjectionInLogin-String-LoginBypass-WithDifferent200Responses.jsp,sqli,true,89
+/wavsep/active/SQL-Injection/SInjection-Detection-Evaluation-GET-200Error/Case03-InjectionInSearch-String-WithErrors.jsp,sqli,true,89
+/wavsep/active/SQL-Injection/SInjection-Detection-Evaluation-GET-200Error/Case04-InjectionInCalc-String-BranchingBlind.jsp,sqli,true,89
+/wavsep/active/SQL-Injection/SInjection-Detection-Evaluation-GET-200Error/Case05-InjectionInUpdate-String-WithErrors.jsp,sqli,true,89
+/wavsep/active/SQL-Injection/SInjection-Detection-Evaluation-POST-200Error/Case01-InjectionInLogin-String-LoginBypass-WithErrors.jsp,sqli,true,89
+/wavsep/active/SQL-Injection/SInjection-Detection-Evaluation-POST-200Error/Case02-InjectionInLogin-String-LoginBypass-WithDifferent200Responses.jsp,sqli,true,89
+/wavsep/active/SQL-Injection/SInjection-Detection-Evaluation-POST-500Error/Case01-InjectionInLogin-String-LoginBypass-WithErrors.jsp,sqli,true,89
+# --- SQL Injection — false-positive (passive) checks ---
+/wavsep/passive/SQL-Injection/SInjection-FalsePositives-GET/Case01-FalsePositive-String-DefaultLogin.jsp,sqli,false,89
+/wavsep/passive/SQL-Injection/SInjection-FalsePositives-GET/Case02-FalsePositive-String-200Valid.jsp,sqli,false,89
+/wavsep/passive/SQL-Injection/SInjection-FalsePositives-GET/Case03-FalsePositive-String-500Error.jsp,sqli,false,89
+/wavsep/passive/SQL-Injection/SInjection-FalsePositives-POST/Case01-FalsePositive-String-DefaultLogin.jsp,sqli,false,89
+# --- Reflected XSS (CWE-79) — active/vulnerable ---
+/wavsep/active/RXSS/RXSS-Detection-Evaluation-GET-200Response/Case01-Tag2HtmlPageScope.jsp,xss,true,79
+/wavsep/active/RXSS/RXSS-Detection-Evaluation-GET-200Response/Case02-Tag2TagScope.jsp,xss,true,79
+/wavsep/active/RXSS/RXSS-Detection-Evaluation-GET-200Response/Case03-Tag2TagStructure.jsp,xss,true,79
+/wavsep/active/RXSS/RXSS-Detection-Evaluation-GET-200Response/Case04-Tag2HtmlComment.jsp,xss,true,79
+/wavsep/active/RXSS/RXSS-Detection-Evaluation-GET-200Response/Case05-Tag2Frameset.jsp,xss,true,79
+/wavsep/active/RXSS/RXSS-Detection-Evaluation-GET-200Response/Case06-Tag2DoubleQuotePropertyScope.jsp,xss,true,79
+/wavsep/active/RXSS/RXSS-Detection-Evaluation-GET-200Response/Case07-Tag2SingleQuotePropertyScope.jsp,xss,true,79
+/wavsep/active/RXSS/RXSS-Detection-Evaluation-GET-200Response/Case08-Tag2UnquotedPropertyScope.jsp,xss,true,79
+/wavsep/active/RXSS/RXSS-Detection-Evaluation-POST-200Response/Case01-Tag2HtmlPageScope.jsp,xss,true,79
+/wavsep/active/RXSS/RXSS-Detection-Evaluation-POST-200Response/Case02-Tag2TagScope.jsp,xss,true,79
+/wavsep/active/RXSS/RXSS-Detection-Evaluation-POST-200Response/Case03-Tag2TagStructure.jsp,xss,true,79
+# --- Reflected XSS — false-positive (passive) checks ---
+/wavsep/passive/RXSS/RXSS-FalsePositives-GET/Case01-NonReflectedInput.jsp,xss,false,79
+/wavsep/passive/RXSS/RXSS-FalsePositives-GET/Case02-ReflectedInputInComment.jsp,xss,false,79
+/wavsep/passive/RXSS/RXSS-FalsePositives-GET/Case03-ReflectedEncodedInputInTag.jsp,xss,false,79
+/wavsep/passive/RXSS/RXSS-FalsePositives-POST/Case01-NonReflectedInput.jsp,xss,false,79
+# --- LFI / Path Traversal (CWE-22) — active/vulnerable ---
+/wavsep/active/LFI/LFI-Detection-Evaluation-GET-200Valid/Case01-LFI-FullPathTraversal-Unix.jsp,pathtraver,true,22
+/wavsep/active/LFI/LFI-Detection-Evaluation-GET-200Valid/Case02-LFI-FullPathTraversal-Windows.jsp,pathtraver,true,22
+/wavsep/active/LFI/LFI-Detection-Evaluation-GET-200Valid/Case03-LFI-RelativePathTraversal-Unix.jsp,pathtraver,true,22
+/wavsep/active/LFI/LFI-Detection-Evaluation-GET-200Valid/Case04-LFI-RelativePathTraversal-Windows.jsp,pathtraver,true,22
+/wavsep/active/LFI/LFI-Detection-Evaluation-GET-200Valid/Case05-LFI-FullPathTraversal-Unix-WithPrefix.jsp,pathtraver,true,22
+/wavsep/active/LFI/LFI-Detection-Evaluation-GET-200Valid/Case06-LFI-FullPathTraversal-Unix-WithSuffix.jsp,pathtraver,true,22
+/wavsep/active/LFI/LFI-Detection-Evaluation-POST-200Valid/Case01-LFI-FullPathTraversal-Unix.jsp,pathtraver,true,22
+/wavsep/active/LFI/LFI-Detection-Evaluation-POST-200Valid/Case02-LFI-FullPathTraversal-Windows.jsp,pathtraver,true,22
+# --- LFI / Path Traversal — false-positive checks ---
+/wavsep/passive/LFI/LFI-FalsePositives-GET/Case01-LFI-Static.jsp,pathtraver,false,22
+/wavsep/passive/LFI/LFI-FalsePositives-GET/Case02-LFI-FilteredInput.jsp,pathtraver,false,22
+/wavsep/passive/LFI/LFI-FalsePositives-POST/Case01-LFI-Static.jsp,pathtraver,false,22
+# --- Unvalidated Redirect (CWE-601) — active/vulnerable ---
+/wavsep/active/Redirect/Redirect-Detection-Evaluation-GET-302/Case01-Redirect-FullURL.jsp,redirect,true,601
+/wavsep/active/Redirect/Redirect-Detection-Evaluation-GET-302/Case02-Redirect-AbsolutePath.jsp,redirect,true,601
+/wavsep/active/Redirect/Redirect-Detection-Evaluation-GET-302/Case03-Redirect-RelativePath.jsp,redirect,true,601
+/wavsep/active/Redirect/Redirect-Detection-Evaluation-GET-302/Case04-Redirect-FullURL-WithPrefix.jsp,redirect,true,601
+/wavsep/active/Redirect/Redirect-Detection-Evaluation-GET-302/Case05-Redirect-FullURL-WithSuffix.jsp,redirect,true,601
+/wavsep/active/Redirect/Redirect-Detection-Evaluation-POST-302/Case01-Redirect-FullURL.jsp,redirect,true,601
+/wavsep/active/Redirect/Redirect-Detection-Evaluation-POST-302/Case02-Redirect-AbsolutePath.jsp,redirect,true,601
+# --- Unvalidated Redirect — false-positive checks ---
+/wavsep/passive/Redirect/Redirect-FalsePositives-GET/Case01-NoRedirect.jsp,redirect,false,601
+/wavsep/passive/Redirect/Redirect-FalsePositives-GET/Case02-WhitelistedRedirect.jsp,redirect,false,601
+/wavsep/passive/Redirect/Redirect-FalsePositives-POST/Case01-NoRedirect.jsp,redirect,false,601

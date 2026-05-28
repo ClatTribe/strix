@@ -1,0 +1,34 @@
+services:
+  # iter-Q5.34 — WAVSEP (Web Application Vulnerability Scanner
+  # Evaluation Project) — the canonical neutral DAST corpus.
+  #
+  # WAVSEP is a deliberately-vulnerable Java webapp that exposes
+  # thousands of test cases across SQL injection (CWE-89), reflected
+  # XSS (CWE-79), local file inclusion (CWE-22 / CWE-98), path
+  # traversal (CWE-22), open redirect (CWE-601), and others. Each
+  # test case has a deterministic URL of the form:
+  #
+  #   /wavsep/active/<Category>-Detection-Evaluation-<METHOD>-<RESPONSE>/CaseNN-*.jsp
+  #
+  # The bench harness maps strix's emitted findings back to these test
+  # cases by URL path and scores TP/FP/TN/FN against the fixture's
+  # expected-cases.csv.
+  #
+  # Comparators on the published Shay Chen DAST comparison: Acunetix,
+  # Burp Active Scan, Netsparker, IBM AppScan, HP WebInspect, ZAP.
+  #
+  # Image: `citizenstig/wavsep` — long-stable community image hosting
+  # the original Shay Chen WAR file inside a Tomcat 7 container.
+  # Operator escape: override `WAVSEP_IMAGE` to swap the image.
+  wavsep:
+    image: ${WAVSEP_IMAGE:-citizenstig/wavsep:latest}
+    container_name: bench-wavsep
+    ports:
+      - "8098:8080"  # 8098 to avoid clashing with the OWASP Benchmark fixture
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/wavsep/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
