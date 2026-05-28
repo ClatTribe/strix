@@ -665,6 +665,109 @@ class TestExtractorAmassFallback:
         ) == []
 
 
+# ----------------------------------------------------------------------
+# iter-Q5.46 — crt.sh extraction (cert-transparency mining)
+# ----------------------------------------------------------------------
+
+class TestExtractorCrtshFallback:
+    def test_crtsh_subdomains_extracted(self) -> None:
+        summary = PrepassSummary(target_type="domain", target_value="example.com")
+        summary.tool_results.append(ToolResult(
+            tool_name="enumerate_subdomains_crtsh",
+            status="ok",
+            findings_count=0,
+            raw_result={
+                "status": "ok",
+                "domain": "example.com",
+                "subdomains": ["api.example.com", "internal-ci.example.com"],
+            },
+        ))
+        children = _extract_child_assets_from_domain_prepass(
+            summary, "example.com",
+        )
+        hosts = sorted(c["host"] for c in children)
+        assert hosts == ["api.example.com", "internal-ci.example.com"]
+        for c in children:
+            assert c["source"] == "enumerate_subdomains_crtsh"
+
+    def test_crtsh_runs_after_amass_in_priority(self) -> None:
+        """Pass-4: amass entry wins over crt.sh entry for the same host."""
+        summary = PrepassSummary(target_type="domain", target_value="example.com")
+        summary.tool_results.append(ToolResult(
+            tool_name="enumerate_subdomains_amass",
+            status="ok",
+            findings_count=0,
+            raw_result={"subdomains": ["api.example.com"]},
+        ))
+        summary.tool_results.append(ToolResult(
+            tool_name="enumerate_subdomains_crtsh",
+            status="ok",
+            findings_count=0,
+            raw_result={"subdomains": ["api.example.com", "ct-only.example.com"]},
+        ))
+        children = _extract_child_assets_from_domain_prepass(
+            summary, "example.com",
+        )
+        by_host = {c["host"]: c for c in children}
+        assert by_host["api.example.com"]["source"] == "enumerate_subdomains_amass"
+        assert by_host["ct-only.example.com"]["source"] == "enumerate_subdomains_crtsh"
+
+    def test_crtsh_runs_after_pipeline_subfinder(self) -> None:
+        """Pipeline triage data must NOT be overwritten by crt.sh."""
+        summary = PrepassSummary(target_type="domain", target_value="example.com")
+        summary.tool_results.append(ToolResult(
+            tool_name="domain_recon_pipeline",
+            status="ok",
+            findings_count=0,
+            raw_result={
+                "surface_map": {
+                    "subdomain_triage": [
+                        {"host": "api.example.com", "scheme": "https", "ip": "1.2.3.4"},
+                    ],
+                },
+            },
+        ))
+        summary.tool_results.append(ToolResult(
+            tool_name="enumerate_subdomains_crtsh",
+            status="ok",
+            findings_count=0,
+            raw_result={"subdomains": ["api.example.com", "ct.example.com"]},
+        ))
+        children = _extract_child_assets_from_domain_prepass(
+            summary, "example.com",
+        )
+        by_host = {c["host"]: c for c in children}
+        assert by_host["api.example.com"]["source"] == "domain_recon_pipeline"
+        assert by_host["api.example.com"]["asset_type"] == "web_application"
+        assert by_host["api.example.com"]["ip"] == "1.2.3.4"
+        assert by_host["ct.example.com"]["source"] == "enumerate_subdomains_crtsh"
+
+    def test_crtsh_apex_excluded(self) -> None:
+        summary = PrepassSummary(target_type="domain", target_value="example.com")
+        summary.tool_results.append(ToolResult(
+            tool_name="enumerate_subdomains_crtsh",
+            status="ok",
+            findings_count=0,
+            raw_result={"subdomains": ["example.com", "api.example.com"]},
+        ))
+        children = _extract_child_assets_from_domain_prepass(
+            summary, "example.com",
+        )
+        assert [c["host"] for c in children] == ["api.example.com"]
+
+    def test_crtsh_partial_with_no_subdomains_skipped(self) -> None:
+        summary = PrepassSummary(target_type="domain", target_value="example.com")
+        summary.tool_results.append(ToolResult(
+            tool_name="enumerate_subdomains_crtsh",
+            status="partial",
+            findings_count=0,
+            raw_result={"reason": "crt.sh fetch failed"},
+        ))
+        assert _extract_child_assets_from_domain_prepass(
+            summary, "example.com",
+        ) == []
+
+
 def test_no_fixture_identifiers_in_q5_44_impl() -> None:
     """Source-grep: extractor must not reference SUT-specific hosts."""
     import inspect
