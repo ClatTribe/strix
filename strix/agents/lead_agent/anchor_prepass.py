@@ -723,6 +723,13 @@ _ANCHORS_DOMAIN: list[tuple[str, Any]] = [
     # both enumerators so duplicates don't double-spawn child scans.
     # Operators flip to active mode via `STRIX_AMASS_ACTIVE=1`.
     ("enumerate_subdomains_amass", _domain_kwargs),
+    # iter-Q5.46 — crt.sh certificate-transparency mining. Direct
+    # HTTPS GET to crt.sh — no binary install. Cert issuance is the
+    # most reliable signal that a subdomain has been deployed; CT
+    # logs catch the long-tail subfinder + amass miss (internal CI,
+    # dev/staging, tenant subdomains, recently-deployed assets).
+    # Kill switch: STRIX_CRTSH_DISABLED=1.
+    ("enumerate_subdomains_crtsh", _domain_kwargs),
     # DNS hygiene posture (checkdmarc): SPF / DKIM / DMARC / MX / CAA
     # / MTA-STS. Always-on for every domain asset.
     ("scan_dns_hygiene_checkdmarc", _domain_kwargs),
@@ -4444,6 +4451,38 @@ def _extract_child_assets_from_domain_prepass(
                 "scheme": None,
                 "triage": None,
                 "source": "enumerate_subdomains_amass",
+            }
+
+    # Pass 4: enumerate_subdomains_crtsh — iter-Q5.46 cert-transparency
+    # mining. Same shape as amass (top-level `subdomains` list); same
+    # gap-fill semantics — only adds hosts the earlier passes missed.
+    # crt.sh tends to catch the long-tail subdomains that signal
+    # production deployment (cert issuance is the most reliable
+    # signal a host is real) but generates more noise than passive
+    # DNS, so running it AFTER pipeline + subfinder + amass means
+    # those richer sources keep their entries.
+    for tr in getattr(summary, "tool_results", []) or []:
+        if getattr(tr, "tool_name", None) != "enumerate_subdomains_crtsh":
+            continue
+        raw = getattr(tr, "raw_result", None)
+        if not isinstance(raw, dict):
+            continue
+        subs = raw.get("subdomains")
+        if not isinstance(subs, list):
+            continue
+        for raw_host in subs:
+            if not isinstance(raw_host, str):
+                continue
+            host = _normalise_host(raw_host)
+            if not host or host == apex or host in seen:
+                continue
+            seen[host] = {
+                "host": host,
+                "ip": None,
+                "asset_type": "ip_address",
+                "scheme": None,
+                "triage": None,
+                "source": "enumerate_subdomains_crtsh",
             }
 
     # Stable order so downstream snapshots compare cleanly.
