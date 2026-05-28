@@ -80,10 +80,48 @@ precondition** for the already-shipped parallelism, and must land
   `set_global_tracer()`) but no per-slice instance mechanism. Axis B's
   per-slice isolation must be built — confirmed as proposed in §3.2.
 
+### 0.5 NEW FOUNDATIONAL FINDING — the sandbox is single-task-per-agent
+
+After §0.1-0.4, a deeper trace found the *actual* blocker — and it
+gates not just the lead loop but L1 fan-out too. The sandbox
+`tool_server` (`strix/runtime/tool_server.py`) kept **one running
+task per `agent_id`** and **cancelled the in-flight task on every new
+same-agent request** (`tool_server.py:237-240`, pre-Q4.0). Because the
+whole scan shares one `agent_id`, this means:
+
+* **L1 fan-out across URLs is serial**, not parallel. The host-side
+  `asyncio.Semaphore` in `anchor_prepass` was pinned to concurrency=1
+  precisely because >1 made the N concurrent dispatches cancel each
+  other ("Cancelled by newer request", iter-Q5.34g). **This is the
+  real reason the 200-URL WAVSEP fan-out runs 2h+.**
+* A **second** serializer compounded it: `tool_server._run_tool` held
+  `_tracer_lock` across the entire tool execution (to keep the
+  per-call finding snapshot correct), so even with the agent_id race
+  fixed, concurrent tools would still serialize on the lock.
+
+A sandboxed OSS tool was effectively a **singleton per scan** — the
+answer to "when scanning many URLs, are these run in parallel?" was
+**no**.
+
+**iter-Q4.0 (shipped)** fixes both:
+1. tool_server keys on `(agent_id, request_id)`; executor sends a uuid
+   `request_id` per call → concurrent same-agent dispatches no longer
+   cancel each other.
+2. `_tracer_lock` + index-snapshot replaced by a contextvar capture
+   sink (`tracer._finding_capture_sink`) — each concurrent tool's
+   findings land in its own task-isolated buffer, no lock, no
+   shared-list race.
+
+This is the prerequisite for **all** parallelism (L1 fan-out, Axis A
+within-turn sandbox tools, Axis B multi-path). It ships ahead of Q4.1.
+The fan-out concurrency default stays 1 until the rebuilt sandbox is
+the norm; iter-Q4.3 flips it.
+
 ### 0.4 Corrected iter sequence (supersedes §5)
 
 | iter | scope | changed from §5? |
 |---|---|---|
+| **Q4.0** ✅ | sandbox tool_server concurrent-per-agent: `(agent_id, request_id)` keying + contextvar finding-capture sink (removes both the agent_id cancellation AND the `_tracer_lock` serializer) | **NEW — the foundational blocker; shipped** |
 | **Q4.1** | trace instrumentation — per-turn wall-time JSONL in `base_agent.agent_loop` / `_process_iteration` | unchanged |
 | **Q4.2** | dependency classifier + wire into `process_tool_invocations` as a **safety guard** (partition into serial-chains + parallel-set; gather only within a set) | **re-scoped: safety-first, lands before any prompt change** |
 | **Q4.3** | A-prompt — nudge the lead to emit independent tools together; re-bench | was "Axis A ship"; now narrower (executor already parallel) |

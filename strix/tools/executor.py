@@ -1,6 +1,7 @@
 import inspect
 import logging
 import os
+import uuid
 from typing import Any
 
 import httpx
@@ -96,6 +97,11 @@ async def _execute_tool_in_sandbox(tool_name: str, agent_state: Any, **kwargs: A
         "agent_id": agent_id,
         "tool_name": tool_name,
         "kwargs": kwargs,
+        # iter-Q4.0 — unique per-call id so the sandbox tool_server
+        # keys this request on (agent_id, request_id) and does NOT
+        # cancel sibling in-flight tools sharing this agent_id. This
+        # is what unblocks concurrent fan-out / multi-tool dispatch.
+        "request_id": uuid.uuid4().hex,
     }
 
     headers = {
