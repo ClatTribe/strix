@@ -884,3 +884,157 @@ def test_routing_login_protection() -> None:
     assert tools == {"scan_nuclei_templates"}
     tools = _tool_names_for("http://x.test/users/sign_in")
     assert tools == {"scan_nuclei_templates"}
+
+
+# ---------------------------------------------------------------------------
+# iter-Q6.2 — per-category proportional quota in _select_fanout_urls
+# ---------------------------------------------------------------------------
+#
+# The Q5.34l WAVSEP bench at limit=200 found 0 Unvalidated-Redirect URLs
+# reached the fan-out because alphabetical sort placed them last and the
+# limit truncated the slice. Per-category round-robin fixes this — every
+# distinct URL family gets at least one slot before any single family
+# fills the rest.
+
+from strix.agents.lead_agent.anchor_prepass import (  # noqa: E402
+    _fanout_category_key,
+)
+
+
+class TestFanoutCategoryKey:
+    """`_fanout_category_key` — the bucket key for round-robin selection."""
+
+    def test_strips_leaf_segment(self):
+        assert _fanout_category_key(
+            "http://x/a/b/c/leaf.jsp",
+        ) == "/a/b/c"
+
+    def test_single_segment_path_collapses_to_root(self):
+        """`/login`, `/p00` — too shallow to have a parent."""
+        assert _fanout_category_key("http://x/login") == "/"
+        assert _fanout_category_key("http://x/p00") == "/"
+
+    def test_root_path(self):
+        assert _fanout_category_key("http://x/") == "/"
+        assert _fanout_category_key("http://x") == "/"
+
+    def test_lowercased(self):
+        """Categories that differ only by case should bucket together."""
+        a = _fanout_category_key("http://x/Wavsep/Active/SQL-Injection/Case01.jsp")
+        b = _fanout_category_key("http://x/wavsep/active/sql-injection/Case02.jsp")
+        assert a == b == "/wavsep/active/sql-injection"
+
+    def test_query_ignored(self):
+        a = _fanout_category_key("http://x/a/b/c.jsp")
+        b = _fanout_category_key("http://x/a/b/c.jsp?x=1")
+        assert a == b
+
+
+class TestFanoutCategoryQuota:
+    """`_select_fanout_urls` round-robin: every category surfaces at
+    least one URL before any category monopolises slots."""
+
+    def test_wavsep_shape_all_5_categories_represented(self):
+        """The Q5.34l regression case: with limit=20 and a WAVSEP-like
+        landing page (5 categories, hundreds of cases each), every
+        category MUST have at least one URL in the fan-out output.
+
+        Pre-Q6.2, alphabetical sort + cap-at-limit dropped late-alphabet
+        categories entirely."""
+        # Categories sorted alphabetically — late ones (Unvalidated-Redirect)
+        # would be truncated under the old logic.
+        categories = [
+            "DOM-XSS", "LFI", "Reflected-XSS",
+            "SQL-Injection", "Unvalidated-Redirect",
+        ]
+        for cat in categories:
+            for i in range(50):
+                record_endpoint_discovered(
+                    f"http://x.test/wavsep/active/{cat}/Sub/Case{i:02d}.jsp",
+                )
+        urls = _select_fanout_urls("http://x.test", 20)
+        assert len(urls) == 20
+        # Every category must contribute at least 1 URL.
+        cats_seen = {
+            url.split("/wavsep/active/")[1].split("/")[0].lower()
+            for url in urls
+        }
+        expected_cats = {c.lower() for c in categories}
+        missing = expected_cats - cats_seen
+        assert not missing, (
+            f"Q6.2 quota failed — categories missing from fan-out: {missing}"
+        )
+
+    def test_round_robin_balanced_distribution(self):
+        """With 5 categories × 50 URLs each and limit=15, every category
+        should get exactly 3 URLs (perfect round-robin)."""
+        categories = ["alpha", "beta", "gamma", "delta", "epsilon"]
+        for cat in categories:
+            for i in range(50):
+                record_endpoint_discovered(
+                    f"http://x.test/{cat}/sub/case{i:02d}.html",
+                )
+        urls = _select_fanout_urls("http://x.test", 15)
+        # 15 / 5 = 3 per category exactly.
+        per_cat: dict[str, int] = {}
+        for url in urls:
+            cat = url.split("/")[3]
+            per_cat[cat] = per_cat.get(cat, 0) + 1
+        assert sum(per_cat.values()) == 15
+        for cat in categories:
+            assert per_cat[cat] == 3, (
+                f"{cat} got {per_cat[cat]} URLs, expected 3"
+            )
+
+    def test_uneven_buckets_proportional_fall_through(self):
+        """When buckets are uneven, round-robin drains the small one
+        first then keeps cycling the remaining ones to fill the limit."""
+        # Small: 2 URLs; Big: 50 URLs; limit=10
+        record_endpoint_discovered("http://x.test/small/a/1.html")
+        record_endpoint_discovered("http://x.test/small/a/2.html")
+        for i in range(50):
+            record_endpoint_discovered(f"http://x.test/big/a/{i:02d}.html")
+        urls = _select_fanout_urls("http://x.test", 10)
+        assert len(urls) == 10
+        small = sum(1 for u in urls if "/small/" in u)
+        big = sum(1 for u in urls if "/big/" in u)
+        assert small == 2   # exhausted
+        assert big == 8     # filled the rest
+
+    def test_single_category_falls_back_to_sequential(self):
+        """When all URLs share one category, round-robin degenerates to
+        sequential — matches pre-Q6.2 behaviour for flat sites."""
+        for i in range(20):
+            record_endpoint_discovered(f"http://x.test/p{i:02d}")
+        urls = _select_fanout_urls("http://x.test", 5)
+        assert len(urls) == 5
+        # Stable order within a bucket (sorted).
+        assert urls == sorted(urls)
+
+    def test_limit_zero_returns_empty(self):
+        for i in range(10):
+            record_endpoint_discovered(
+                f"http://x.test/cat{i}/sub/case.jsp",
+            )
+        assert _select_fanout_urls("http://x.test", 0) == []
+
+    def test_limit_larger_than_total_returns_all(self):
+        """When limit exceeds the total dedupe-clean URL count, we
+        return everything without padding."""
+        record_endpoint_discovered("http://x.test/a/b/page1.html")
+        record_endpoint_discovered("http://x.test/c/d/page2.html")
+        urls = _select_fanout_urls("http://x.test", 100)
+        assert len(urls) == 2
+
+
+# Anti-overfit: the Q6.2 category-key function must not reference any
+# SUT-specific identifier — it's a generic per-asset quota mechanism.
+
+def test_no_fixture_identifiers_in_q6_2_impl():
+    import inspect
+    from strix.agents.lead_agent.anchor_prepass import _fanout_category_key
+    src = inspect.getsource(_fanout_category_key).lower()
+    for ident in ("juice-shop", "vampi", "crapi", "wavsep", "getedunext"):
+        assert ident not in src, (
+            f"_fanout_category_key references SUT identifier {ident!r}"
+        )
