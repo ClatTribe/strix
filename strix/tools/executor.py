@@ -119,13 +119,33 @@ async def _execute_tool_in_sandbox(tool_name: str, agent_state: Any, **kwargs: A
                 posthog.error("tool_execution_error", f"{tool_name}: {response_data['error']}")
                 raise RuntimeError(f"Sandbox execution error: {response_data['error']}")
             result = response_data.get("result")
-            # iter-35.4 — extract any findings the sandbox tool emitted
-            # via tracer.add_vulnerability_report (the sandbox tracer is
-            # hookless), re-emit each on the host tracer so the full
-            # L1.5 hook chain (FP filter / surface_priority /
+            # iter-35.4 + iter-Q5.31 — extract any findings the sandbox
+            # tool emitted via tracer.add_vulnerability_report (sandbox
+            # tracer is hookless) and re-emit them on the host tracer so
+            # the L1.5 hook chain (FP filter / surface_priority /
             # exploitability / corroborator / post_emit_verifier) fires.
-            # Tools didn't need to be modified — this works for every
-            # sandbox tool that already calls tracer in-body.
+            #
+            # iter-Q5.31: the sandbox tool_server now puts the findings
+            # on an explicit `findings_emitted` Pydantic field rather
+            # than piggybacking a `_sandbox_emitted_findings` key on the
+            # result dict — Pydantic 2's serializer for `Any`-typed
+            # fields dropped the extra key across the HTTP boundary
+            # (verified by direct diagnostic in iter-Q5.31). Fall back
+            # to the legacy sidecar location for forward-compat with
+            # older sandbox images that don't surface the new field.
+            findings_emitted = response_data.get("findings_emitted")
+            if findings_emitted:
+                # Attach as the legacy sidecar key so
+                # `_propagate_sandbox_findings_to_host` can extract it
+                # via the same code path (no need for a second
+                # branching code path on the host).
+                if isinstance(result, dict):
+                    result["_sandbox_emitted_findings"] = findings_emitted
+                else:
+                    result = {
+                        "_sandbox_wrapped_result": result,
+                        "_sandbox_emitted_findings": findings_emitted,
+                    }
             result = _propagate_sandbox_findings_to_host(tool_name, result)
             return result
         except httpx.HTTPStatusError as e:
