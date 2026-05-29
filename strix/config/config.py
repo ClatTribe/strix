@@ -57,7 +57,15 @@ class Config:
     # time. Without this, the client-side request timeout stays at
     # 120s and the bench reports `Tool timed out after 120s` even
     # though the sandbox-side tool server itself is set to 300s.
-    strix_sandbox_execution_timeout = "300"
+    # iter-Q7.9: raised 300 → 600. The WAVSEP re-bench showed heavy
+    # scanners (sqlmap/dalfox) hitting `Tool timed out after 300s` —
+    # one full `--forms --crawl` sqlmap pass over a multi-field form
+    # routinely exceeds 300s. This value flows host-side (executor HTTP
+    # client) AND into the sandbox: docker_runtime forwards it as
+    # STRIX_SANDBOX_EXECUTION_TIMEOUT → docker-entrypoint.sh passes it
+    # to `tool_server --timeout`. Override per-run via the
+    # `STRIX_SANDBOX_EXECUTION_TIMEOUT` env var (Config.get reads it).
+    strix_sandbox_execution_timeout = "600"
     strix_sandbox_connect_timeout = "10"
 
     # Telemetry

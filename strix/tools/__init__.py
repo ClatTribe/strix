@@ -157,6 +157,18 @@ import strix.l15  # noqa: F401, E402
 from .trufflehog_runner import *       # noqa: F403  # verify_credentials_trufflehog
 from .feroxbuster_runner import *      # noqa: F403  # discover_paths_feroxbuster
 from .inql_runner import *             # noqa: F403  # map_graphql_inql
+# iter-Q7.8 — register the Q5.45-Q5.51 OSS wrappers. Their `*_runner`
+# packages exist and self-register via @register_tool on import, but were
+# never imported here, so `get_tool_by_name` returned None and every
+# anchor_prepass dispatch for them failed "Tool not found" (caught by the
+# Q7.7 signature audit). Wiring the imports registers all 7.
+from .amass_runner import *            # noqa: F403  # enumerate_subdomains_amass
+from .crtsh_runner import *            # noqa: F403  # enumerate_subdomains_crtsh
+from .grype_runner import *            # noqa: F403  # scan_image_grype
+from .syft_runner import *             # noqa: F403  # extract_sbom_syft
+from .masscan_runner import *          # noqa: F403  # fingerprint_services_masscan
+from .zgrab_runner import *            # noqa: F403  # grab_banner_zgrab2
+from .kiterunner_runner import *       # noqa: F403  # discover_api_endpoints_kiterunner
 # iter-24.1 — ruleset/signature lazy-refresh infra. Three @register_tool
 # updaters that refresh ~/.strix/cache/rules/<file> from upstream
 # (gitleaks.toml, wappalyzer-technologies.json, hadolint.yaml), with a
