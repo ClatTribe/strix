@@ -3798,7 +3798,16 @@ async def _run_dependent_api_tools(
         #   * emits to KG via the standard tool pipeline
         crawled_tr = await _run_one_tool(
             "crawl_with_katana",
-            {"target_url": target_value, "max_pages": 30, "depth": 2},
+            # iter-Q7.7 — the tool param is `max_depth`, not `depth`.
+            # Passing `depth=` raised `crawl_with_katana() got an
+            # unexpected keyword argument 'depth'` in the sandbox, so the
+            # crawl died → 0 enumerated URLs → the anchor fan-out was
+            # starved (only the landing page scanned). That silently
+            # zeroed sqli / path_traversal / redirect recall on WAVSEP —
+            # the old pre-rebuild image happened to accept `depth`,
+            # masking the mismatch until the sandbox was rebuilt to the
+            # current `max_depth` signature.
+            {"target_url": target_value, "max_pages": 30, "max_depth": 2},
             agent_state=agent_state, timeout_s=timeout_s,
         )
         if crawled_tr.status in ("ok", "partial") and isinstance(
