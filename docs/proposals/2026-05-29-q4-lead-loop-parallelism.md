@@ -114,8 +114,10 @@ answer to "when scanning many URLs, are these run in parallel?" was
 
 This is the prerequisite for **all** parallelism (L1 fan-out, Axis A
 within-turn sandbox tools, Axis B multi-path). It ships ahead of Q4.1.
-The fan-out concurrency default stays 1 until the rebuilt sandbox is
-the norm; iter-Q4.3 flips it.
+The fan-out concurrency default stays 1 — and per §0.6's empirical
+finding, it should **stay** 1 until the sandbox has the CPU headroom (or
+per-tool timeouts) to run heavy scanners concurrently. iter-Q4.3 does
+NOT flip it as originally planned.
 
 ### 0.4 Corrected iter sequence (supersedes §5)
 
@@ -124,10 +126,55 @@ the norm; iter-Q4.3 flips it.
 | **Q4.0** ✅ | sandbox tool_server concurrent-per-agent: `(agent_id, request_id)` keying + contextvar finding-capture sink (removes both the agent_id cancellation AND the `_tracer_lock` serializer) | **NEW — the foundational blocker; shipped** |
 | **Q4.1** ✅ | trace instrumentation — per-turn wall-time JSONL (`<run_dir>/turn_timing.jsonl`) in `base_agent._process_iteration` / `_execute_actions`; records the (model_wall_s, tool_wall_s, tool_names) split per turn. Always-on, `STRIX_TURN_TRACE=0` disables; best-effort (never raises) | **shipped** |
 | **Q4.2** ✅ | dependency classifier (`strix/tools/tool_dependencies.py`: `TOOL_DEPENDENCIES` table + `partition_independent_calls`) wired into `process_tool_invocations` as a **safety guard** — the batch is layered into dependency-ordered waves (concurrent within a wave, sequential across waves) so a state-reader (e.g. `scan_idor`) never races its state-writer (`seed_auth`/`scan_auth_flow`); an all-independent batch collapses to one wave (== pre-Q4.2 gather) | **shipped — safety-first, lands before any prompt change** |
-| **Q4.3** | A-prompt — nudge the lead to emit independent tools together; re-bench | was "Axis A ship"; now narrower (executor already parallel) |
+| **Q4.3** ⚠️ | ~~flip fan-out concurrency 1→N~~ — **BLOCKED by §0.6**: concurrency=4 starves the sandbox VM → sqlmap/dalfox hit the 300 s per-tool timeout → recall collapse. Keep concurrency=1 until the sandbox gets CPU headroom or per-tool timeouts are raised. Re-scope to A-prompt only (host-side multi-tool emission, no sandbox contention) | **re-scoped — concurrency flip rejected** |
 | **Q4.4** | Axis B — multi-path fan-out + per-slice workflow_state/tracer isolation | unchanged |
 | **Q4.5** | Axis C — speculative prefetch with `prefetch_safe` registry flag | unchanged |
 | **Q4.6** | combined A+B+C bench vs ZAP/Burp/Acunetix wall-time | unchanged |
+
+### 0.6 EMPIRICAL FINDING — fan-out concurrency>1 starves the sandbox (Q4.3 blocked)
+
+The post-rebuild WAVSEP re-bench (sandbox baked with Q4.0+Q4.1+Q4.2+Q7.4+Q7.7,
+`STRIX_ANCHOR_FANOUT_CONCURRENCY=4`, quick mode) measured the parallelism flip
+end-to-end. Result: **7.5× faster (24 min / 18 min vs the 3 h serial baseline)
+but a recall *regression*** — overall Youden 12.74% → 8.28%, with sqli
+collapsing 244→25 findings and xss 163→1.
+
+Root-cause cascade (each a separate issue the rebuild + parallelism exposed):
+
+1. **Q7.7 — `crawl_with_katana(depth=)` kwarg bug** (FIXED, PR #578). The host
+   caller passed `depth`; the tool param is `max_depth`. The old image happened
+   to accept `depth`; the rebuilt image (current signature) raised
+   `unexpected keyword argument 'depth'`, killing the crawl → starved fan-out →
+   the *first* re-bench scored sqli=0. AST regression test added.
+2. **concurrency=4 starves the sandbox VM** (THE Q4.3 blocker). With 4 heavy
+   scanners (sqlmap/dalfox) sharing the VM's limited CPU, each runs slower and
+   blows the 300 s per-tool timeout (`Tool timed out after 300s` in run_meta) →
+   returns nothing. Serial gives each tool full CPU → completes → 244 sqli. The
+   nondeterministic per-category collapse run-to-run (xss 61→100→0 across runs)
+   is the signature of resource-starved timeouts, not a logic bug.
+3. **nuclei-templates corpus missing in the rebuilt image** (201 errors;
+   separate fix). Affects nuclei broad-corpus detection, not WAVSEP's
+   sqli/xss/pathtraver/redirect (those come from sqlmap/dalfox/scan_path_traversal/
+   open_redirect).
+
+**Ruled out** as causes: the Q6.2 per-category quota (it's balanced round-robin),
+the crawl (fixed), and the Q4.0 parallelism *logic* (zero "Cancelled by newer"
+— the keying fix works).
+
+**Confirmed wins, independent of the concurrency regression:**
+* **Q7.4 open-redirect form discovery** — redirect **0% → 40%** (24 TP, 0 FP).
+* **Q7.4 path-traversal form discovery** — emitted findings where it previously
+  emitted none (form discovery fires; recall still low, gated by sandbox timeouts).
+* **Q4.0/4.1/4.2** — mechanically sound (no cancellations, trace + dependency
+  guard work).
+
+**Decision:** keep `STRIX_ANCHOR_FANOUT_CONCURRENCY=1` as the production default.
+Parallelising heavy OSS scanners (sqlmap/dalfox/nuclei) in a CPU-bounded sandbox
+trades recall for speed — unacceptable per CLAUDE.md §1.5.2 (recall is the gate;
+token/wall-time economy is not). Re-enabling concurrency>1 requires either (a)
+more sandbox CPU, (b) much higher per-tool timeouts, or (c) bounding concurrency
+to *light* tools only (leave sqlmap/dalfox serial). Q4.3 is re-scoped to the
+host-side A-prompt nudge (no sandbox contention); the L1 fan-out stays serial.
 
 §3 below is the original draft, retained for the design rationale; read
 it through the §0 corrections.
